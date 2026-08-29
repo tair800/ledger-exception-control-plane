@@ -31,6 +31,15 @@ dependencies = [
     #                         not the schema-management mechanism; see ADR-021.
     "sqlalchemy[asyncio]==2.0.52",
     "alembic==1.19.1",
+    # Declared at M1.3 phase close, having been a *direct* import since M0.2.
+    #   pydantic — boundary schemas (NFR-2). `config.py`, `api.py` and the fixture artifact
+    #              schema import it by name, so it is a direct dependency regardless of the
+    #              fact that fastapi and pydantic-settings also pull it in.
+    # It resolved transitively and therefore worked, which is exactly why it went unnoticed:
+    # an undeclared direct dependency breaks only when an intermediary drops or bounds it, and
+    # that break lands far from its cause. Pinned to the version already in the lockfile, so
+    # this declaration changes nothing that is installed.
+    "pydantic==2.13.5",
 ]
 
 [dependency-groups]

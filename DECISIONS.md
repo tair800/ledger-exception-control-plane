@@ -905,6 +905,76 @@ destructive step is decoration.
 
 ---
 
+## ADR-037 — The declared mix is an apportionment rule, not an approximation
+
+**Status:** Accepted (M1.3 phase close)
+
+`IMPLEMENTATION_PLAN.md` §1.3 requires the residual mix to "match the declared distribution". A share
+of a discrete corpus is rarely a whole number, so "match" has to mean something precise or it means
+nothing. The earlier tests took the weak reading — they asserted the total, the coverage and the
+ordering, and PROJECT_STATUS then described that as verifying the mix, which was an overstatement of
+the project's own work.
+
+**Decision.** The distribution is a stated apportionment rule, and the rule is what is tested.
+
+**The declared distribution**, in parts per 200 — a design parameter of the synthetic corpus, not a
+measurement of a real settlement feed:
+
+| Class | Parts | Share |
+|---|---|---|
+| `matched` | 163 | 81.5% |
+| `tolerance_policy_dependent` | 12 | 6.0% |
+| `partial_capture` | 7 | 3.5% |
+| `fee_split` · `chargeback_reversal` · `fx_rounding` · `unclassified` | 4 each | 2.0% each |
+| `cross_period_refund` | 2 | 1.0% |
+
+200 as the denominator is deliberate: every declared share is then an exact number of parts, and a
+corpus whose size is a multiple of 200 reproduces the percentages exactly rather than nearly.
+
+**The rule — Hare quota with largest remainder (Hamilton's method), then a coverage floor:**
+
+1. `ideal_i = N * weight_i / TOTAL_WEIGHT`, as an exact rational.
+2. Allocate `floor(ideal_i)`.
+3. Give the `N - Σ floor` remaining units to the largest fractional remainders, ties broken by
+   catalogue position.
+4. Raise any scenario still at zero to one, taking the unit from the largest bucket.
+5. `Σ = N` exactly, always.
+
+**What is guaranteed, and where:**
+
+| Condition | Guarantee |
+|---|---|
+| Any `N ≥ 12` | Total is exactly `N`; every scenario appears; counts weakly decreasing by weight |
+| `N ≥ 200` | The floor cannot bind, so every count is `floor` or `ceil` of its ideal — deviation **strictly under one instance** |
+| `N` a multiple of 200 | No remainder exists; the corpus **is** the declared percentages |
+| `12 ≤ N < 200` | The rarest classes have an ideal below one. Step 4 gives each exactly one and takes the units from the dominant bucket, so the deviation is concentrated there by construction and every other class stays within one of its ideal |
+
+Step 4 is a real cost and it is chosen deliberately: a corpus missing a declared condition entirely is
+worse than one whose dominant class is under-represented, because the missing condition silently
+removes coverage a later test believes it has. The cost is bounded and tested, not waved at.
+
+**Why the units are taken rather than added.** Adding would make the corpus larger than the size
+requested, turning `--instances N` into a suggestion. It is a count.
+
+**How it is tested** — three independent things, because any one alone is weak:
+
+- **Hand-computed literals** at four sizes, worked through the rule by hand. These are the only tests
+  that would catch a change to the *rule itself*.
+- **An independent reimplementation** using `fractions.Fraction`, compared against the implementation
+  across eleven sizes. Exact rationals rather than floats: at large `N` a float remainder can compare
+  equal when the true values differ, which would make the tie-break depend on binary rounding.
+- **The bound**, asserted directly: `|count - ideal| < 1` wherever that is claimable.
+
+The literal for `N = 100` was written as 74 for the dominant bucket and the reimplementation disagreed
+— the hand computation had forgotten step 4, and 72 is correct. That is precisely why both exist; a
+reimplementation compared only against itself proves consistency, not correctness.
+
+**Ground truth stays out of it.** The expected mix is aggregated from `intended_classification` — a
+field the builder wrote — and from the declared weights. Nothing compares a settlement line to a
+ledger entry to decide what a scenario is, and no M2 logic was introduced to validate the mix.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.

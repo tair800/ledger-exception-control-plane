@@ -341,6 +341,13 @@ from the version 4 the application generates; time comes from a fixed epoch, and
 package's AST to prove no clock or random source is read. The corpus regenerates **byte-identically**,
 and CI fails if the committed files drift.
 
+**The mix is an apportionment rule, not an approximation.** The declared distribution is stated in
+parts per 200, and integer counts come from Hare quota with largest remainder plus a floor that
+guarantees every declared condition appears at least once. A corpus sized at a multiple of 200
+reproduces the declared percentages exactly; above 200 every class is within one instance of its
+ideal; below it the floor's cost is confined to the dominant class by construction. `--instances N`
+produces exactly N. See ADR-037.
+
 **The scenario labels are construction intent, not answers.** A scenario is a fee split because the
 generator *built* it as one, never because anything ran a matcher over it — that matters, because this
 metadata is what M2's matcher will later be judged against, and an oracle produced by the system under

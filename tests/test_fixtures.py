@@ -16,6 +16,7 @@ import json
 import math
 import pathlib
 import re
+from fractions import Fraction
 
 import pytest
 from pydantic import SecretStr
@@ -34,6 +35,7 @@ from ledger_exception_control_plane.fixtures.catalogue import (
     CATALOGUE,
     TOTAL_WEIGHT,
     BuiltScenario,
+    declared_classification_weights,
 )
 from ledger_exception_control_plane.fixtures.determinism import FIXTURE_EPOCH, Draw, fixture_uuid
 from ledger_exception_control_plane.fixtures.generator import (
@@ -1080,3 +1082,288 @@ def test_the_fx_scenario_is_arithmetically_consistent() -> None:
     assert decimal.Decimal("0.01") <= gap <= decimal.Decimal("0.03"), (
         f"the ledger gap of {gap} is not a rounding artefact"
     )
+
+
+# ======================================================================================
+# The declared distribution contract
+#
+# IMPLEMENTATION_PLAN.md 1.3 requires that "residual mix matches the declared distribution".
+# A share of a discrete corpus is rarely an integer, so the requirement is met by stating an
+# apportionment rule and testing the exact integer allocation it produces — not by asserting
+# that the output looks about right.
+#
+# The rule (documented on _instance_counts): Hare quota with largest remainder, ties by
+# catalogue position, then a coverage floor that raises any zero bucket to one and takes the
+# unit from the largest bucket.
+#
+# These tests do NOT call the implementation to decide what to expect. _hamilton below is an
+# independent reimplementation using exact rationals, and _EXPECTED_ALLOCATIONS holds
+# hand-computed literals. Comparing the implementation against itself would prove only that it
+# is consistent, which is not the property under test.
+# ======================================================================================
+
+#: The declared distribution, restated here as literals rather than imported. If someone
+#: changes a weight in the catalogue, this test must fail and force the change to be
+#: deliberate — importing CATALOGUE.weight would make the test agree with any change silently.
+DECLARED_WEIGHTS: dict[str, int] = {
+    "SC-001-exact-match": 147,
+    "SC-002-reference-mismatch": 16,
+    "SC-003-near-amount-difference": 12,
+    "SC-004-partial-capture": 6,
+    "SC-005-fee-split": 4,
+    "SC-006-chargeback-reversal": 4,
+    "SC-007-fx-rounding": 4,
+    "SC-008-cross-period-refund": 2,
+    "SC-009-unclassified": 2,
+    "SC-010-missing-merchant-reference": 1,
+    "SC-011-ambiguous-memo": 1,
+    "SC-012-repeated-psp-reference": 1,
+}
+
+#: The declared distribution aggregated to classification level — what the plan calls the
+#: residual mix. Also literals: partial_capture is SC-004 + SC-011, unclassified is
+#: SC-009 + SC-010 + SC-012, matched is SC-001 + SC-002.
+DECLARED_CLASSIFICATION_WEIGHTS: dict[str, int] = {
+    "chargeback_reversal": 4,
+    "cross_period_refund": 2,
+    "fee_split": 4,
+    "fx_rounding": 4,
+    "matched": 147 + 16,
+    "partial_capture": 6 + 1,
+    "tolerance_policy_dependent": 12,
+    "unclassified": 2 + 1 + 1,
+}
+
+DECLARED_TOTAL = 200
+
+
+def _hamilton(weights: list[int], total_weight: int, size: int) -> list[int]:
+    """Hare quota with largest remainder, then the coverage floor. Written independently.
+
+    Exact rationals rather than floats: at large sizes a float remainder can compare equal when
+    the true values differ, which would make the tie-break — and therefore the expected
+    allocation — depend on binary rounding.
+    """
+    ideals = [Fraction(size * weight, total_weight) for weight in weights]
+    counts = [int(ideal) for ideal in ideals]
+
+    remainders = sorted(
+        range(len(weights)),
+        key=lambda index: (-(ideals[index] - counts[index]), index),
+    )
+    for index in remainders[: size - sum(counts)]:
+        counts[index] += 1
+
+    for index, count in enumerate(counts):
+        if count == 0:
+            donor = max(range(len(counts)), key=lambda position: (counts[position], -position))
+            counts[donor] -= 1
+            counts[index] = 1
+    return counts
+
+
+#: Hand-computed allocations, worked through the rule by hand and pinned as literals. These are
+#: the tests that would still catch a change to the apportionment rule itself, which a
+#: reimplementation-versus-implementation comparison would not if both were changed together.
+_EXPECTED_ALLOCATIONS: dict[int, tuple[int, ...]] = {
+    # Exactly the declared weights: every ideal is a whole number, nothing to apportion.
+    200: (147, 16, 12, 6, 4, 4, 4, 2, 2, 1, 1, 1),
+    # Twice the weights, still exact.
+    400: (294, 32, 24, 12, 8, 8, 8, 4, 4, 2, 2, 2),
+    # Minimum size. Every ideal below one except exact-match; the floor raises eleven buckets
+    # to one and takes all eleven units from the dominant bucket.
+    12: (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+    # Half the weights, and the case that exercises every step of the rule at once. Four
+    # buckets carry a .5 remainder (SC-001 at 73.5, and SC-010/011/012 at 0.5 each); the two
+    # available units go to the first two in catalogue order, giving SC-001 74 and SC-010 1.
+    # SC-011 and SC-012 are then still at zero, so the coverage floor raises each to one and
+    # takes both units from the dominant bucket: SC-001 ends at 72, not 74.
+    #
+    # This literal was written as 74 first. The independent reimplementation disagreed, and it
+    # was the literal that was wrong — which is the reason both exist.
+    100: (72, 8, 6, 3, 2, 2, 2, 1, 1, 1, 1, 1),
+}
+
+
+def test_the_declared_weights_are_what_the_catalogue_actually_carries() -> None:
+    """Pins the business distribution. A weight change must be deliberate, not incidental."""
+    assert {entry.scenario_id: entry.weight for entry in CATALOGUE} == DECLARED_WEIGHTS
+    assert sum(DECLARED_WEIGHTS.values()) == DECLARED_TOTAL == TOTAL_WEIGHT
+    assert declared_classification_weights() == dict(
+        sorted(DECLARED_CLASSIFICATION_WEIGHTS.items())
+    )
+    assert sum(DECLARED_CLASSIFICATION_WEIGHTS.values()) == DECLARED_TOTAL
+
+
+@pytest.mark.parametrize("size", sorted(_EXPECTED_ALLOCATIONS))
+def test_the_allocation_matches_hand_computed_literals(size: int) -> None:
+    """The exact integer allocation, worked through the rule by hand."""
+    assert _instance_counts(Profile.BULK, size) == _EXPECTED_ALLOCATIONS[size]
+    assert sum(_EXPECTED_ALLOCATIONS[size]) == size
+
+
+@pytest.mark.parametrize(
+    "size",
+    [
+        12,  # smallest permitted: one per scenario class
+        13,  # small, and one above the class count
+        17,  # small, prime, nothing divides cleanly
+        47,  # non-divisible
+        100,  # half the declared total: five exact .5 remainders
+        199,  # one below the point where the coverage floor stops binding
+        200,  # divides cleanly — the declared percentages exactly
+        201,  # one above, so a single remainder unit must be placed
+        400,  # clean multiple
+        1000,  # clean multiple, larger
+        4321,  # large and awkward
+    ],
+)
+def test_the_allocation_matches_the_declared_apportionment_rule(size: int) -> None:
+    """The implementation is compared against an independent reimplementation of the rule."""
+    weights = [DECLARED_WEIGHTS[entry.scenario_id] for entry in CATALOGUE]
+    assert list(_instance_counts(Profile.BULK, size)) == _hamilton(weights, DECLARED_TOTAL, size)
+
+
+@pytest.mark.parametrize("size", [200, 400, 1000, 4000])
+def test_a_size_that_divides_cleanly_reproduces_the_declared_percentages_exactly(
+    size: int,
+) -> None:
+    """No remainder to apportion, so the corpus *is* the declared distribution."""
+    multiple = size // DECLARED_TOTAL
+    expected = tuple(DECLARED_WEIGHTS[entry.scenario_id] * multiple for entry in CATALOGUE)
+    assert _instance_counts(Profile.BULK, size) == expected
+
+    for entry, count in zip(CATALOGUE, expected, strict=True):
+        share = Fraction(count, size)
+        assert share == Fraction(DECLARED_WEIGHTS[entry.scenario_id], DECLARED_TOTAL)
+
+
+@pytest.mark.parametrize("size", [200, 201, 257, 400, 1000, 4321])
+def test_every_share_is_within_one_instance_of_its_ideal_once_the_floor_stops_binding(
+    size: int,
+) -> None:
+    """The mathematically justified bound for largest-remainder apportionment.
+
+    Only claimable at ``size >= TOTAL_WEIGHT``; below that the coverage floor deliberately moves
+    units, and the deviation is accounted for separately.
+    """
+    assert size >= TOTAL_WEIGHT
+    counts = _instance_counts(Profile.BULK, size)
+    for entry, count in zip(CATALOGUE, counts, strict=True):
+        ideal = Fraction(size * DECLARED_WEIGHTS[entry.scenario_id], DECLARED_TOTAL)
+        assert abs(Fraction(count) - ideal) < 1, (
+            f"{entry.scenario_id}: {count} vs {float(ideal):.3f}"
+        )
+
+
+@pytest.mark.parametrize("size", [12, 13, 17, 47, 100, 199])
+def test_below_the_floor_threshold_the_deviation_is_confined_to_the_donor(size: int) -> None:
+    """The floor's cost is bounded and lands where the contract says it lands.
+
+    Every bucket the floor did not touch stays within one instance of its ideal; the dominant
+    bucket absorbs the entire adjustment. Stating it as a test stops "the floor moved some
+    units" from becoming a licence for arbitrary drift.
+    """
+    assert size < TOTAL_WEIGHT
+    counts = _instance_counts(Profile.BULK, size)
+    weights = [DECLARED_WEIGHTS[entry.scenario_id] for entry in CATALOGUE]
+
+    ideals = [Fraction(size * weight, DECLARED_TOTAL) for weight in weights]
+    unfloored = [int(ideal) for ideal in ideals]
+    order = sorted(range(len(weights)), key=lambda i: (-(ideals[i] - unfloored[i]), i))
+    for index in order[: size - sum(unfloored)]:
+        unfloored[index] += 1
+
+    floored = [index for index, count in enumerate(unfloored) if count == 0]
+    donated = sum(counts[i] - unfloored[i] for i in floored)
+    assert donated == len(floored), "each floored scenario receives exactly one instance"
+
+    deficit = sum(unfloored[i] - counts[i] for i in range(len(counts)) if i not in floored)
+    assert deficit == len(floored), "the units come from elsewhere; none are created"
+
+    for index, entry in enumerate(CATALOGUE):
+        if index in floored or counts[index] < unfloored[index]:
+            continue
+        assert abs(Fraction(counts[index]) - ideals[index]) < 1, entry.scenario_id
+
+
+@pytest.mark.parametrize("size", [12, 47, 200, 401])
+def test_the_generated_residual_mix_matches_the_declared_apportionment(size: int) -> None:
+    """End to end, at the level the plan names: the *residual mix* of a generated corpus.
+
+    Scenario counts are apportioned independently, aggregated to classification level from the
+    declared weights, and compared with what the generator actually produced.
+    """
+    weights = [DECLARED_WEIGHTS[entry.scenario_id] for entry in CATALOGUE]
+    allocation = _hamilton(weights, DECLARED_TOTAL, size)
+
+    expected: dict[str, int] = {}
+    for entry, count in zip(CATALOGUE, allocation, strict=True):
+        built = entry.build(Draw(0, "expected"), "")
+        key = (
+            built.intended_classification.value
+            if built.intent is MatchIntent.RESIDUAL and built.intended_classification is not None
+            else built.intent.value
+        )
+        expected[key] = expected.get(key, 0) + count
+
+    result = generate(COMMITTED_SEED, Profile.BULK, size)
+    assert result.manifest.residual_mix == dict(sorted(expected.items()))
+    assert sum(result.manifest.residual_mix.values()) == size
+
+
+def test_the_residual_mix_is_exactly_the_declared_percentages_at_a_clean_size() -> None:
+    """At 200 instances the mix is not merely close to the declared distribution — it is it."""
+    result = generate(COMMITTED_SEED, Profile.BULK, DECLARED_TOTAL)
+    assert result.manifest.residual_mix == dict(sorted(DECLARED_CLASSIFICATION_WEIGHTS.items()))
+
+
+@pytest.mark.parametrize("size", [12, 13, 17, 47, 100, 199, 200, 201, 400, 1000, 4321])
+def test_exactly_the_requested_number_of_instances_is_produced(size: int) -> None:
+    """``--instances N`` is a count. The coverage floor moves units; it never creates them."""
+    counts = _instance_counts(Profile.BULK, size)
+    assert sum(counts) == size
+    assert min(counts) >= 1
+
+
+@pytest.mark.parametrize("size", [12, 47, 200])
+def test_the_same_seed_profile_and_size_reproduce_byte_identically(size: int) -> None:
+    """Reproducibility is a property of all three inputs, not of the seed alone."""
+    first = generate(COMMITTED_SEED, Profile.BULK, size)
+    second = generate(COMMITTED_SEED, Profile.BULK, size)
+    assert first.files == second.files
+    assert first.manifest.content_sha256 == second.manifest.content_sha256
+
+    different_size = generate(COMMITTED_SEED, Profile.BULK, size + 1)
+    assert different_size.manifest.content_sha256 != first.manifest.content_sha256
+
+
+def test_the_expected_mix_is_computed_without_any_matching_logic() -> None:
+    """Ground-truth independence, restated where the distribution is checked.
+
+    The expected mix above is aggregated from ``intended_classification`` — a field the builder
+    *wrote* — and from the declared weights. Nothing compares a settlement line to a ledger
+    entry to decide what a scenario is. This test pins that: every classification the corpus
+    reports is one a builder declared, and the set of declared classifications is closed.
+    """
+    result = generate(COMMITTED_SEED, Profile.BULK, 47)
+    declared = set(declared_classification_weights())
+    assert set(result.manifest.residual_mix) <= declared
+
+    residual_labels = {
+        scenario.intended_classification
+        for scenario in result.scenarios.scenarios
+        if scenario.intended_classification is not None
+    }
+    assert residual_labels == set(ExceptionClassification)
+    # And the corpus carries no match_result, exception or proposal data from which a label
+    # could have been derived by computation rather than declaration.
+    payload = json.loads(result.files["records.json"])
+    assert set(payload) == {
+        "fixture_schema_version",
+        "generator_version",
+        "profile",
+        "seed",
+        "batches",
+        "ledger_entries",
+    }

@@ -85,12 +85,47 @@ class _PlacedLine:
 
 
 def _instance_counts(profile: Profile, instances: int) -> tuple[int, ...]:
-    """How many times each catalogue entry is built.
+    """How many times each catalogue entry is built. **This is the allocation contract.**
 
     ``canonical`` builds exactly one of each, so a test can address a condition by scenario id
-    and know there is precisely one. ``bulk`` allocates the declared weights over the requested
-    size by largest remainder — deterministic, and it sums to ``instances`` exactly rather than
-    drifting by a rounding error.
+    and know there is precisely one.
+
+    ``bulk`` apportions the declared weights over ``instances``. A share of a discrete corpus
+    is rarely an integer, so the rule is stated rather than approximated:
+
+    1. **Ideal share.** ``ideal_i = instances * weight_i / TOTAL_WEIGHT``, exact rational.
+    2. **Base.** ``floor(ideal_i)``.
+    3. **Remainder.** The ``instances - Σ floor`` unallocated units go one each to the largest
+       fractional remainders, ties broken by catalogue position — the **Hare quota with
+       largest remainder** (Hamilton's method). Deterministic: no sort instability and no
+       dependence on dictionary order can reach it.
+    4. **Coverage floor.** Any scenario still at zero is raised to one, and one unit is taken
+       from the largest bucket (ties by earliest catalogue position). Applied in catalogue
+       order.
+    5. **Total.** ``Σ = instances``, exactly, always. Step 4 moves units, never creates them.
+
+    What this guarantees, by size:
+
+    * **Any ``instances ≥ len(CATALOGUE)``** — the total is exactly ``instances``; every
+      scenario appears at least once; counts are weakly decreasing in catalogue order (the
+      catalogue is ordered by descending weight).
+    * **``instances ≥ TOTAL_WEIGHT``** — the floor cannot bind, because the smallest weight is
+      1 and ``instances * 1 / TOTAL_WEIGHT ≥ 1``. Pure Hamilton therefore applies and every
+      count is ``floor(ideal_i)`` or ``ceil(ideal_i)``: deviation from the ideal share is
+      **strictly less than one instance**.
+    * **``instances`` a multiple of ``TOTAL_WEIGHT``** — every ideal is an integer, so there is
+      no remainder to allocate and the corpus matches the declared percentages **exactly**.
+    * **``len(CATALOGUE) ≤ instances < TOTAL_WEIGHT``** — the rarest classes have an ideal
+      below one and would be allocated zero. Step 4 raises each to one and takes the units from
+      the dominant bucket, so the deviation is concentrated there by construction: every other
+      bucket stays within one of its ideal, and the donor absorbs the whole adjustment. That is
+      the floor doing its job — a corpus missing a declared condition is worse than one whose
+      dominant class is under-represented — and it is a documented property, not drift.
+
+    Step 4 cannot strand a bucket at zero. If any bucket is zero then, since the total is
+    ``instances ≥ len(CATALOGUE)`` and there are ``len(CATALOGUE)`` buckets, the largest must
+    hold at least two; donating leaves it at one or more. A bucket already passed can therefore
+    only fall from ≥2 to ≥1, never to zero.
     """
     if profile is Profile.CANONICAL:
         return tuple(1 for _ in CATALOGUE)

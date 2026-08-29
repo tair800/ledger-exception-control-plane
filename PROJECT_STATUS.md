@@ -346,9 +346,14 @@ it is not discovered as a surprise then.
 | Amounts serialise as JSON strings, never numbers | PASS |
 | Generated records fit the live column limits | PASS — limits read from the metadata, so they cannot drift |
 | Every metadata reference resolves to real data | PASS |
-| Declared bulk mix is exact at the default size | PASS — 200 instances, counts equal the weights |
-| Bulk allocation is exact, ordered and complete at every size | PASS — 12, 13, 24, 47, 100, 200, 401, 1000 |
-| Bulk allocation is strictly proportional once the floor stops binding | PASS — 200, 401, 1000, 4321 |
+| Declared distribution pinned as literals; catalogue must match | PASS — a weight change fails 13 tests |
+| Allocation matches hand-computed literals | PASS — sizes 12, 100, 200, 400 |
+| Allocation matches an independent `Fraction`-based reimplementation | PASS — 12, 13, 17, 47, 100, 199, 200, 201, 400, 1000, 4321 |
+| A clean size reproduces the declared percentages exactly | PASS — 200, 400, 1000, 4000 |
+| Deviation from ideal is under one instance once the floor stops binding | PASS — measured worst case 0.76 over N = 200…3000 |
+| Below the threshold, the floor's cost is confined to the donor | PASS — 12, 13, 17, 47, 100, 199 |
+| Generated residual mix matches the declared apportionment end to end | PASS — 12, 47, 200, 401 |
+| Exactly N instances produced, every scenario present | PASS — swept N = 12…3000, 2,989 sizes, zero violations |
 | Invalid artifacts labelled and outside the loadable set | PASS |
 | No credential-shaped material in any artifact | PASS |
 | Manifest carries no path, timestamp or machine identity | PASS |
@@ -361,6 +366,28 @@ it is not discovered as a surprise then.
 | `git diff --check` | PASS |
 
 ## Known issues and findings
+
+### M1.3 phase close — two integrity corrections (2026-08-30)
+
+**An undeclared direct dependency.** `pydantic` is imported by name in `config.py`, `api.py` and the
+fixture artifact schema, but was only ever present transitively through `fastapi` and
+`pydantic-settings`. It resolved and therefore worked, which is exactly why it went unnoticed for
+three milestones: an undeclared direct dependency breaks only when an intermediary drops or bounds it,
+and that break lands far from its cause. Now declared at `==2.13.5`, the version already locked — the
+lockfile gained two lines (the dependency edge and its specifier) and no package was added, removed or
+upgraded. An AST audit of every third-party import in `src/` found no other case.
+
+**The declared mix was under-tested and over-claimed.** The plan requires the residual mix to match the
+declared distribution; the tests asserted the total, the coverage and the ordering, and this document
+described that as verifying the mix. The distribution is now a stated apportionment rule (ADR-037) with
+tests that compare the exact integer allocation against hand-computed literals and against an
+independent `Fraction`-based reimplementation. One of the hand literals was wrong when first written
+and the reimplementation caught it, which is the argument for having both.
+
+**Falsified, not assumed.** Reversing the remainder tie-break fails 5 tests; making the coverage floor
+add units instead of moving them fails 7; changing a single catalogue weight fails 13. A sweep over
+N = 12…3000 found zero violations of the contract and a worst-case deviation of 0.76 instances against
+a bound of 1. The committed corpus is byte-unchanged by any of this.
 
 ### M1.3 — adversarial review: a fixture writer that could delete a repository (2026-08-29)
 
@@ -438,7 +465,7 @@ Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 38 ADRs and 11 OPEN items. OPEN-1 was resolved at M1.3 (ADR-031). None blocks M2.1. Still relevant:
+`DECISIONS.md` holds 39 ADRs and 11 OPEN items. OPEN-1 was resolved at M1.3 (ADR-031). None blocks M2.1. Still relevant:
 
 - **LICENSE copyright holder** is `tair800` (the configured Git identity). Replace with a legal name
   if that matters for a public repository.

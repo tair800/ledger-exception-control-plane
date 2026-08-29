@@ -774,4 +774,31 @@ CATALOGUE: Final[tuple[CatalogueEntry, ...]] = (
     ),
 )
 
+#: Denominator of the declared distribution. Chosen so every declared share is an exact
+#: number of parts per 200 — no weight is a repeating fraction of the total, and a corpus whose
+#: size is a multiple of this reproduces the declared percentages exactly.
 TOTAL_WEIGHT: Final = sum(entry.weight for entry in CATALOGUE)
+
+
+def declared_classification_weights() -> dict[str, int]:
+    """The declared distribution aggregated to the level the plan names: the *residual mix*.
+
+    ``IMPLEMENTATION_PLAN.md`` §1.3 requires the residual mix to match the declared
+    distribution, and a residual is identified by its **classification**, not by which scenario
+    produced it — three different scenarios are constructed to land on ``unclassified``, and
+    two on ``partial_capture``. Aggregating here keeps the scenario weights the single source
+    and derives the classification mix from them, so the two cannot disagree.
+
+    Keyed by intended classification for residual scenarios and by the intent itself for the
+    two non-residual intents, matching :func:`generator.residual_mix`.
+    """
+    weights: dict[str, int] = {}
+    for entry in CATALOGUE:
+        built = entry.build(Draw(0, "declared"), "")
+        key = (
+            built.intended_classification.value
+            if built.intent is MatchIntent.RESIDUAL and built.intended_classification is not None
+            else built.intent.value
+        )
+        weights[key] = weights.get(key, 0) + entry.weight
+    return dict(sorted(weights.items()))
