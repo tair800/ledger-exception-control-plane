@@ -1,6 +1,6 @@
 # Developer commands. `make help` lists them.
 .DEFAULT_GOAL := help
-.PHONY: help install fmt fmt-check lint types test gate up down down-volumes logs ps smoke build
+.PHONY: help install fmt fmt-check lint types test gate up down down-volumes logs ps smoke build \n        db-up migrate migrate-down schema-verify
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -43,5 +43,19 @@ ps: ## Show stack status
 logs: ## Tail application logs
 	docker compose logs -f app
 
-smoke: ## Run integration tests against the running stack
+smoke: ## Run ALL integration tests (needs the full stack: make up)
 	uv run pytest -m integration -p no:cacheprovider
+
+# --- schema / migrations (need PostgreSQL only, not the whole stack) ---
+
+db-up: ## Start only PostgreSQL, for schema and migration work
+	docker compose up -d --wait postgres
+
+migrate: ## Apply migrations up to head
+	uv run alembic upgrade head
+
+migrate-down: ## Roll back one revision
+	uv run alembic downgrade -1
+
+schema-verify: ## Verify migrations and schema integrity against real PostgreSQL
+	uv run pytest tests/test_schema_postgres.py -m integration -p no:cacheprovider --no-cov

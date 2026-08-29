@@ -24,6 +24,13 @@ dependencies = [
     "pydantic-settings==2.15.0",
     "asyncpg==0.31.0",
     "redis==8.1.0",
+    # Added at M1.1 (core reconciliation schema):
+    #   sqlalchemy[asyncio] — declarative models and Core metadata. The schema is the
+    #                         deliverable, and typed 2.x models let mypy check it.
+    #   alembic             — the production migration path. `create_all()` is deliberately
+    #                         not the schema-management mechanism; see ADR-021.
+    "sqlalchemy[asyncio]==2.0.52",
+    "alembic==1.19.1",
 ]
 
 [dependency-groups]

@@ -41,6 +41,7 @@ py.typed        text eol=lf
 *.ini           text eol=lf
 *.cfg           text eol=lf
 *.sql           text eol=lf
+*.mako          text eol=lf
 *.css           text eol=lf
 *.html          text eol=lf diff=html
 *.md            text eol=lf diff=markdown

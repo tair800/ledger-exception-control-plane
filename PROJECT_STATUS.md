@@ -3,8 +3,8 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M0.2 complete. **Next:** M1.1 — core reconciliation schema.
-**No business functionality is implemented.**
+**Current milestone:** M1.1 complete. **Next:** M1.2 — exception, resolution and reliability schema.
+**No business functionality is implemented.** The schema has tables; nothing writes to them.
 
 ---
 
@@ -14,8 +14,9 @@ commits before doing anything.
 |---|---|---|
 | **0.1 Repository skeleton and tooling** | **DONE** | uv, ruff, mypy strict, pytest + coverage, CI |
 | **0.2 Local stack and health endpoints** | **DONE** | Compose stack, liveness/readiness, typed config, structured JSON logging + correlation ids |
-| 1.1 Core reconciliation schema | NOT STARTED | Alembic, settlement/ledger/match tables |
-| 1.2 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **1.1 Core reconciliation schema** | **DONE** | SQLAlchemy 2.x + Alembic; `settlement_batch`, `settlement_line`, `ledger_entry`, `match_result` |
+| 1.2 Exception, resolution and reliability schema | NOT STARTED | exception, evidence, proposal, approval, adjustment, outbox, posting_attempt, dlq, recovery_queue, audit_event |
+| 1.3 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -78,18 +79,53 @@ Three defects were found *by the real-stack verification* and fixed. All are rec
    a secret-leak test pass against an empty record list. It now replaces only its own handler.
 
 Outstanding, not blocking: `starlette.testclient` emits a deprecation warning recommending `httpx2`.
-Left alone — changing HTTP client libraries is not an M0.2 concern.
+Left alone — changing HTTP client libraries is not an M0.2 or M1.1 concern.
+
+**M1.1 note.** `pytest -m integration` now spans two different requirements: the M0.2 stack tests
+need the full Compose stack (`make up`), while the M1.1 schema tests need PostgreSQL only. Running
+the whole integration marker with just PostgreSQL up therefore fails the four stack tests. Use
+`make schema-verify` for schema work and `make up && make smoke` for the full set. Splitting the
+marker was judged scope creep for this increment.
 
 ## Blockers
 
 None.
 
-## Next tasks (M1.1 — do not start without instruction)
+## What M1.1 delivered
 
-1. Alembic setup
-2. Migrations for `settlement_batch` (unique `content_hash`), `settlement_line`, `ledger_entry`,
-   `match_result`
-3. Migration up/down tests and a unique-constraint test
+- **Persistence stack** — SQLAlchemy 2.x declarative models with async engine construction, and
+  Alembic as the production migration path. `create_all()` is not used for schema management.
+- **Four tables** — `settlement_batch` (unique `content_hash`), `settlement_line`, `ledger_entry`,
+  `match_result`. Exactly the M1.1 scope; no M1.2 table exists.
+- **Money** — `NUMERIC(20, 4)` mapped to `Decimal` everywhere, every amount paired with an explicit
+  currency, and no floating point anywhere in the metadata.
+- **One migration** — `cf6581793e0c`, reviewed by hand after autogenerate.
+- **Tests** — 80 unit (Docker-free) plus 12 schema tests against real PostgreSQL.
+
+## M1.1 verification
+
+| Check | Result |
+|---|---|
+| Clean `uv sync --frozen` | PASS |
+| `ruff format --check` / `ruff check` | PASS |
+| `mypy` strict | PASS — 18 source files |
+| Unit suite + coverage | PASS — 80 passed, 98.14% (gate 90%) |
+| Alembic upgrade zero → head on a clean database | PASS — `cf6581793e0c` |
+| Exactly the four M1.1 tables created | PASS — plus `alembic_version`, nothing else |
+| No M1.2 tables present | PASS |
+| Downgrade → re-upgrade | PASS |
+| Model/migration drift (`alembic check`) | PASS |
+| Constraints reject bad rows | PASS — duplicate hash, bad hash format, quarantine without reason, lower-case currency, double-consumed ledger entry, unpaired tolerance currency |
+| `Decimal("0.1234")` round-trips exactly | PASS |
+| `created_at` populated by the database, timezone-aware | PASS |
+| `git diff --check` | PASS |
+
+## Next tasks (M1.2 — do not start without instruction)
+
+1. Migrations for `exception`, `evidence`, `treatment_proposal`, `approval`, `adjustment`
+   (unique `operation_id`), `outbox`, `posting_attempt`, `dlq`, `recovery_queue`, `audit_event`
+2. Unique-constraint test on `operation_id`
+3. A test asserting the application role cannot `UPDATE` or `DELETE` `audit_event`
 
 ## Deployment state
 
@@ -98,18 +134,18 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-51 passed, 4 deselected            coverage 97.65% (required 90%)
-ruff format: 12 files already formatted
+80 passed, 16 deselected           coverage 98.14% (required 90%)
+ruff format: all files formatted
 ruff check:  All checks passed!
-mypy:        Success: no issues found in 12 source files
-integration: 4 passed against the live Compose stack
+mypy:        Success: no issues found in 18 source files
+schema:      12 passed against real PostgreSQL (migrations, drift, constraints)
 ```
 
 Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-08-29.
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 21 ADRs and 12 OPEN items. None blocks M1.1. Still relevant:
+`DECISIONS.md` holds 26 ADRs and 12 OPEN items. None blocks M1.2. Still relevant:
 
 - **LICENSE copyright holder** is `tair800` (the configured Git identity). Replace with a legal name
   if that matters for a public repository.

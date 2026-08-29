@@ -58,6 +58,55 @@ jobs:
       - name: Run tests with coverage
         run: uv run pytest
 
+  schema:
+    name: Migrations and schema integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Narrowly scoped on purpose: a single PostgreSQL service container, no Redis and no
+    # Compose. Migration correctness is the one thing unit tests genuinely cannot prove —
+    # that Alembic applies from zero to head, that downgrade reverses, that the models and
+    # the migration have not drifted, and that the check constraints actually reject bad
+    # rows. Everything else about the schema is asserted against metadata in the `quality`
+    # job, which stays Docker-free.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lecp
+          POSTGRES_PASSWORD: lecp_ci_ephemeral # throwaway, lives only for this job
+          POSTGRES_DB: lecp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lecp -d lecp_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      LECP_POSTGRES_DSN: postgresql://lecp:lecp_ci_ephemeral@localhost:5432/lecp_test
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.15"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies from the lockfile
+        run: uv sync --frozen
+
+      - name: Verify migrations and schema integrity
+        run: uv run pytest tests/test_schema_postgres.py -m integration --no-cov
+
   container:
     name: Build container image
     runs-on: ubuntu-latest
