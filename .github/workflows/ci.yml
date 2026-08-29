@@ -58,6 +58,13 @@ jobs:
       - name: Run tests with coverage
         run: uv run pytest
 
+      # Regenerates the canonical corpus and compares it with what is committed. The unit
+      # suite asserts the same property, but this step fails with the offending paths listed
+      # and the regeneration command in the log, which is what someone reading a red build
+      # actually needs.
+      - name: Verify the committed fixture corpus has not drifted
+        run: uv run python -m ledger_exception_control_plane.fixtures verify
+
   schema:
     name: Migrations and schema integrity
     runs-on: ubuntu-latest
@@ -106,6 +113,12 @@ jobs:
 
       - name: Verify migrations and schema integrity
         run: uv run pytest tests/test_schema_postgres.py -m integration --no-cov
+
+      # The corpus must load against the real schema with every constraint enforced. This is
+      # the plan's "committed sample loads" exit criterion for M1.3, and it reuses the
+      # PostgreSQL service already running for the schema tests rather than adding one.
+      - name: Verify the fixture corpus loads
+        run: uv run pytest tests/test_fixtures_postgres.py -m integration --no-cov
 
   container:
     name: Build container image

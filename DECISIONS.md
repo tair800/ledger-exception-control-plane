@@ -707,17 +707,211 @@ explicitly, so this affects only an unconfigured local run, which is exactly the
 
 ---
 
+## ADR-031 — Settlement file format and the simulated PSP feed (resolves OPEN-1)
+
+**Status:** Accepted (M1.3). **Resolves OPEN-1**, which the plan required to be settled before this
+increment.
+
+**Decision.** A synthesised composite CSV, not a copy of any vendor's report layout.
+
+```
+psp_reference,merchant_reference,transaction_type,amount,currency,value_date,
+presentment_amount,presentment_currency,fx_rate,memo
+```
+
+**One row is one movement, carrying one signed amount.** Fees are their own rows rather than gross/fee/net
+columns on a capture row. That is realistic — PSP settlement files do report fees separately — and it
+avoids a trap: a file with `gross`, `fee` and `net` columns forces the *generator* to decide which becomes
+`settlement_line.amount`, and that decision belongs to the normaliser in M2.1. With one amount per row
+there is nothing for this increment to decide on M2.1's behalf.
+
+**Not a specific PSP's layout.** Mirroring a named provider's proprietary report would imply a
+compatibility claim the project cannot support and has not tested, in a public repository. The composite
+carries the properties that matter — a provider reference, a pass-through merchant reference that is
+sometimes absent, signed amounts, a value date, presentment/settlement currency pairs and free-text memos
+— without pretending to be anyone's format.
+
+**FX rates arrive as recorded inputs**, per §3's non-goal, and are stored **as a string** in the file.
+A rate is not money: `money_column` carries a four-decimal ceiling and assumes a paired currency, and a
+rate has neither property. Nothing in this system computes a rate, and nothing at M1.3 persists one — the
+rate lives in the raw payload for M2.1 to interpret.
+
+**Awkward on purpose, and enumerated rather than merely asserted.** Missing merchant references, empty
+and ambiguous memos, three-row fee splits, opposing signed chargeback rows, a repeated `psp_reference`
+within one file, cross-period dates, and a foreign presentment currency. Each is recorded as a declared
+`Awkwardness` value on its scenario, so "the corpus is awkward" is a checkable property rather than a
+claim in a README. A matcher validated against tidy input proves nothing.
+
+**Deliberately invalid artifacts sit in `invalid/`, labelled and unloadable** — an over-precise amount, a
+missing column, bad currency codes, an unparseable amount. They exist for M2.1's quarantine path, which
+cannot be tested against well-formed data. Their labels state a *fact about the bytes*, never the
+quarantine reason M2.1 will emit; inventing that vocabulary here would pre-empt an increment this one does
+not own.
+
+---
+
+## ADR-032 — Fixture determinism: hashed draws, UUIDv5, an anchored epoch
+
+**Status:** Accepted (M1.3)
+
+NFR-9 requires the same seed to produce the same corpus; the plan is stricter and requires the corpus to
+regenerate **byte-identically**. Three sources of variation had to be closed, and each was closed by
+replacing it rather than by seeding it.
+
+**Draws are hashed, not streamed.** `random.Random(seed)` is reproducible for a fixed interpreter, but it
+is a stream: a value depends on how many draws preceded it. Adding one scenario to the catalogue would
+shift every scenario after it, turning a one-line change into a whole-corpus diff — and CPython's
+`shuffle` and `sample` have changed implementation before, so the guarantee was never quite what it
+looked like. Every value is instead `SHA-256(domain ‖ seed ‖ label)` over length-prefixed components, so
+it depends on nothing but its own label. A test proves a label's value is unchanged by intervening draws.
+
+*Stated honestly:* reducing a digest modulo a range is very slightly biased toward the low end. For
+synthetic fixtures that is immaterial, and rejection sampling would reintroduce order-dependence for no
+benefit — but "uniform" is a claim, and this is not quite one.
+
+**Identifiers are UUIDv5, which is load-bearing twice.** They are deterministic, and they are *visibly not
+version 4*, which ADR-022 reserves for rows the application generates. A fixture row can therefore never
+be mistaken for a real one, and the distinction is carried by the UUID version field rather than by a
+naming convention someone could forget. A test asserts every identifier in the corpus has version 5.
+
+**Time is anchored, never read.** All dates and timestamps derive from a fixed epoch. No `now()`,
+`today()` or `uuid4()` appears anywhere in the package, and a test walks the AST to enforce that rather
+than grepping — verified by injecting a `datetime.now()` call and confirming the test fails.
+
+**Byte stability is explicit**, not inherited: `\n` line endings written in binary, UTF-8 without a BOM,
+sorted JSON keys, a total ordering on every collection, and amounts rendered from `Decimal` by `str` so a
+value keeps the scale its currency actually uses. Amounts serialise as JSON *strings* — a JSON number
+would come back as a float, and a monetary value that round-trips through binary floating point has
+already lost.
+
+---
+
+## ADR-033 — Two profiles, one committed corpus, pinned by a drift test
+
+**Status:** Accepted (M1.3)
+
+**Decision.** A closed set of two profiles, not a configuration language.
+
+| Profile | Committed | Purpose |
+|---|---|---|
+| `canonical` | Yes | Exactly one instance of every scenario. Small enough to read; addressable by scenario id |
+| `bulk` | No | Generated on demand at volume, so the declared residual mix can be checked *as a distribution* |
+
+`canonical` cannot demonstrate a distribution — one of each is a checklist, not a mix — and `bulk` cannot
+be committed without putting a large generated dataset in Git for no reason. Each exists because the other
+cannot do its job.
+
+**What is committed:** the generator, the canonical corpus (11 files, ~20 KB), the scenario metadata and a
+manifest. **What is not:** bulk output, and any database.
+
+**The committed corpus is pinned by a drift test** that regenerates it and compares bytes, run both in the
+unit suite and as its own CI step. Without it the committed artifacts are just files someone once
+produced, and nothing would notice them drifting from the code that claims to generate them. Verified by
+tampering with a committed file and confirming both the test and the CI command fail — the command exits
+non-zero and names the offending paths.
+
+**The declared mix is a design parameter, not a measurement.** Nobody here has measured a real settlement
+feed. The weights encode the only property §1 actually asserts — deterministic matching clears the great
+majority, a modest residual remains — and the README says so rather than implying an empirical basis.
+
+**`--instances` is a count, not a suggestion.** Proportional allocation zeroes the rare scenarios first,
+so a floor guarantees each appears at least once; the floor takes its unit from the largest bucket rather
+than adding one, because adding would make the corpus larger than the size requested. Found by a test that
+asserted the requested size and got a larger one.
+
+---
+
+## ADR-034 — Ground truth is construction intent, never a computed answer
+
+**Status:** Accepted (M1.3) · Reused by increment 6.1
+
+Every scenario records what it is: intended classification, intended match outcome, the awkwardness it
+carries, why it exists and what distinguishes it from its neighbours.
+
+**Decision.** That metadata is written by the *constructor* and never derived by running anything over the
+data.
+
+A fee-split scenario is a fee split because the builder wrote a capture row, two fee rows and a single
+combined ledger entry. Nothing compares a settlement line to a ledger entry to find that out — and
+nothing could, since the matcher is M2.2 and does not exist. This is the difference between a corpus that
+can judge a future matcher and one that cannot: an oracle produced by the system under test measures only
+its self-consistency.
+
+The rule is enforced structurally, not by discipline. A test walks the package's AST and fails on an
+import outside an allowlist, or on a function whose name begins with a verb M2 owns (`match_`, `classify`,
+`normalise`, `parse_`, `reconcile`, `compute_`). Both were verified by injection. The allowlist is
+deliberately an allowlist: reconciliation modules do not exist yet, so a denylist would have nothing to
+name and would pass silently when one arrives.
+
+**Where the honest answer is "it depends", the metadata says so.** A line differing from the ledger by one
+to three minor units carries the intent `tolerance_policy_dependent`, because whether it clears depends on
+bands OPEN-2 has not settled. Recording either outcome would be inventing a decision nobody has taken —
+and it is exactly the case OPEN-2 needs in order to be decided responsibly.
+
+---
+
+## ADR-035 — The fixture loader refuses any database that is not obviously disposable
+
+**Status:** Accepted (M1.3)
+
+**Decision.** The target database name must match `^lecp_(test|demo|fixtures)$`. Anything else — including
+the project's own `lecp` — is refused before a connection is opened.
+
+A loader that can be pointed somewhere by accident is a data-loss tool with a friendly name. Checking the
+*name* rather than the port is deliberate: a disposable database can live on any port, and ADR-029 already
+records that the developer machine this was built on runs an unrelated PostgreSQL on the default one. A
+flag would put the decision in whichever caller forgot to pass it.
+
+**Reset is by identifier, never `TRUNCATE`.** Deterministic UUIDv5 identifiers mean the loader can delete
+exactly the rows it owns; a test inserts an unrelated ledger entry, runs a reset, and asserts it survived.
+
+**No constraint is ever disabled.** Rows go in through the ORM against the real schema with every check,
+foreign key and unique constraint enforced — that is the entire content of the plan's "committed sample
+loads" criterion. A load that needed integrity switched off would prove the corpus is *not* loadable. The
+loader also recomputes each batch's `content_hash` from the bytes on disk before inserting, because FR-1's
+re-delivery guard is built on that value.
+
+---
+
+## ADR-036 — The corpus writer is guarded like the loader, because it is the destructive one
+
+**Status:** Accepted (M1.3)
+
+ADR-035 guards the fixture *loader*: it refuses any database not obviously disposable, on the
+principle that "a loader that can be pointed somewhere by accident is a data-loss tool with a friendly
+name". An adversarial review pointed that sentence at the other half of the system.
+
+`write_corpus` removes stale artifacts — every file under its target that is not one it is about to
+write — so a renamed artifact cannot linger and break the manifest digest. That is correct behaviour
+for a corpus directory. It is catastrophic for anything else, and `--out` is a free-form path:
+`generate --out .` from the repository root would have unlinked the source tree, the tests, the
+migrations and, because `rglob` matches dotted entries, `.git` along with them.
+
+The asymmetry was the tell. The loader, whose writes are additive and reversible, had an allowlist;
+the writer, which deletes, had nothing.
+
+**Decision.** `write_corpus` refuses a target that exists, is non-empty, and contains no
+`manifest.json`. Writing is permitted into a directory that does not exist, is empty, or is already a
+corpus.
+
+A marker file rather than a path allowlist: a corpus is a thing with a manifest, and that is checkable
+wherever someone chooses to put one. A path allowlist would have to guess at directory names and would
+be wrong for a temp directory, which is where most callers legitimately write one.
+
+**Related, and the same mistake in a different place.** The integration suites run
+`alembic downgrade base` — fifteen tables dropped — before anything checks the target is disposable,
+because the check lived inside `load()`. Both suites now check first. A guard that fires after the
+destructive step is decoration.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.
 
-## OPEN-1 — Settlement file format and the shape of the simulated PSP feed
-
-**Must decide:** the concrete schema of the simulated settlement file, whether it mirrors a specific
-public PSP report layout or is a synthesised composite, and how FX rates arrive.
-**Constraint:** must be awkward on purpose — inconsistent references, missing fields, memo text of
-varying quality — or the matcher is validated against tidy input and proves nothing.
-**Needed before:** increment 1.3.
+**OPEN-1 (settlement file format and the simulated PSP feed) was resolved at M1.3** and is recorded as
+ADR-031. It is removed from this list rather than left with a "resolved" marker, because an open-decisions
+list that accumulates closed items stops being read.
 
 ## OPEN-2 — Tolerance band configuration and defaults
 

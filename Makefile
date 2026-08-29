@@ -1,6 +1,6 @@
 # Developer commands. `make help` lists them.
 .DEFAULT_GOAL := help
-.PHONY: help install fmt fmt-check lint types test gate up down down-volumes logs ps smoke build \n        db-up migrate migrate-down schema-verify
+.PHONY: help install fmt fmt-check lint types test gate up down down-volumes logs ps smoke build \n        db-up migrate migrate-down schema-verify \n        fixtures fixtures-check fixtures-load fixtures-verify
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -59,3 +59,17 @@ migrate-down: ## Roll back one revision
 
 schema-verify: ## Verify migrations and schema integrity against real PostgreSQL
 	uv run pytest tests/test_schema_postgres.py -m integration -p no:cacheprovider --no-cov
+
+# --- deterministic fixture corpus (M1.3) ---
+
+fixtures: ## Regenerate the committed canonical corpus
+	uv run python -m ledger_exception_control_plane.fixtures generate
+
+fixtures-check: ## Fail if the committed corpus has drifted from the generator
+	uv run python -m ledger_exception_control_plane.fixtures verify
+
+fixtures-load: ## Load the canonical corpus into the disposable test database (needs db-up)
+	LECP_POSTGRES_DSN=postgresql://lecp:lecp_local_dev@localhost:15432/lecp_test 		uv run python -m ledger_exception_control_plane.fixtures load --reset
+
+fixtures-verify: ## Prove the corpus loads against real PostgreSQL with constraints on
+	uv run pytest tests/test_fixtures_postgres.py -m integration -p no:cacheprovider --no-cov

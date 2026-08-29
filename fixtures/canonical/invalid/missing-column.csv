@@ -1,0 +1,2 @@
+psp_reference,merchant_reference,transaction_type,amount,value_date,memo
+psp_0000000000b2,ORD-2026-100002,capture,45.00,2026-06-03,no currency column

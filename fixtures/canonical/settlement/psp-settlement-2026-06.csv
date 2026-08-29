@@ -1,0 +1,17 @@
+psp_reference,merchant_reference,transaction_type,amount,currency,value_date,presentment_amount,presentment_currency,fx_rate,memo
+psp_5deeabafcd26,ORD-2026-903098,capture,1766.67,EUR,2026-06-03,,,,capture for order ORD-2026-903098
+psp_5916e44797e5,ORD-2026-794442,capture,36.83,USD,2026-06-04,,,,
+psp_4cebb7922b67,ORD-2026-105567,capture,1828.49,GBP,2026-06-05,,,,capture ORD-2026-105567
+psp_c08e712f6fe1,ORD-2026-413909,capture,2799.97,EUR,2026-06-06,,,,partial capture for ORD-2026-413909
+psp_5687ae2d8196,ORD-2026-764755,capture,1244.71,EUR,2026-06-07,,,,gross capture ORD-2026-764755
+psp_5687ae2d8196-fee1,ORD-2026-764755,fee,-2.13,EUR,2026-06-07,,,,scheme fee
+psp_5687ae2d8196-fee2,ORD-2026-764755,fee,-7.94,EUR,2026-06-07,,,,processing fee
+psp_5525be44e9d5,ORD-2026-532726,chargeback,-326.92,USD,2026-06-08,,,,chargeback raised for ORD-2026-532726
+psp_5525be44e9d5-rev,ORD-2026-532726,chargeback_reversal,326.92,USD,2026-06-10,,,,dispute resolved in merchant favour
+psp_e5d430885187,ORD-2026-181802,capture,4499.93,EUR,2026-06-09,683880,JPY,0.00658,cross-currency capture ORD-2026-181802
+psp_1f49fd9d23ec,ORD-2026-510910,capture,540.86,EUR,2026-06-26,,,,capture ORD-2026-510910
+psp_f3cd2653ca3b,,adjustment,14.657,BHD,2026-06-11,,,,misc
+psp_6608182739b3,,capture,50.21,EUR,2026-06-12,,,,capture
+psp_3f92565cb9fd,ORD-2026-732696,capture,446.71,EUR,2026-06-13,,,,adj per ops - see thread
+psp_46b14f7b835a,ORD-2026-120815,capture,948.24,EUR,2026-06-14,,,,capture ORD-2026-120815
+psp_46b14f7b835a,ORD-2026-120815,capture,964.43,EUR,2026-06-14,,,,duplicate reference from psp export

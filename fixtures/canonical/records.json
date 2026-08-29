@@ -1,0 +1,300 @@
+{
+  "batches": [
+    {
+      "content_hash": "b99debb6cc64c67a3bb4250a4841ba5416269c597a87685abced40376753ad90",
+      "id": "50d18283-a244-55b5-ab1d-aaf842009981",
+      "lines": [
+        {
+          "amount": "1766.67",
+          "currency": "EUR",
+          "id": "30dd0a1c-abe3-5fa0-8405-a5b899be1d4f",
+          "line_number": 1,
+          "merchant_reference": "ORD-2026-903098",
+          "psp_reference": "psp_5deeabafcd26",
+          "scenario_id": "SC-001-exact-match",
+          "value_date": "2026-06-03"
+        },
+        {
+          "amount": "36.83",
+          "currency": "USD",
+          "id": "6fff989f-a645-5af7-ac48-ad000ed66ea9",
+          "line_number": 2,
+          "merchant_reference": "ORD-2026-794442",
+          "psp_reference": "psp_5916e44797e5",
+          "scenario_id": "SC-002-reference-mismatch",
+          "value_date": "2026-06-04"
+        },
+        {
+          "amount": "1828.49",
+          "currency": "GBP",
+          "id": "2d92f9c6-bd20-5aec-b6bc-b61666008965",
+          "line_number": 3,
+          "merchant_reference": "ORD-2026-105567",
+          "psp_reference": "psp_4cebb7922b67",
+          "scenario_id": "SC-003-near-amount-difference",
+          "value_date": "2026-06-05"
+        },
+        {
+          "amount": "2799.97",
+          "currency": "EUR",
+          "id": "884c7593-f7c0-509b-9fa3-a721fd3e9981",
+          "line_number": 4,
+          "merchant_reference": "ORD-2026-413909",
+          "psp_reference": "psp_c08e712f6fe1",
+          "scenario_id": "SC-004-partial-capture",
+          "value_date": "2026-06-06"
+        },
+        {
+          "amount": "1244.71",
+          "currency": "EUR",
+          "id": "fcb2f9f3-a0f0-5a36-97f6-201db0fde312",
+          "line_number": 5,
+          "merchant_reference": "ORD-2026-764755",
+          "psp_reference": "psp_5687ae2d8196",
+          "scenario_id": "SC-005-fee-split",
+          "value_date": "2026-06-07"
+        },
+        {
+          "amount": "-2.13",
+          "currency": "EUR",
+          "id": "57176a1c-507c-584f-ae91-8f49f3b77e25",
+          "line_number": 6,
+          "merchant_reference": "ORD-2026-764755",
+          "psp_reference": "psp_5687ae2d8196-fee1",
+          "scenario_id": "SC-005-fee-split",
+          "value_date": "2026-06-07"
+        },
+        {
+          "amount": "-7.94",
+          "currency": "EUR",
+          "id": "572d958b-1c90-5bc0-b1af-6e61bbde6fc1",
+          "line_number": 7,
+          "merchant_reference": "ORD-2026-764755",
+          "psp_reference": "psp_5687ae2d8196-fee2",
+          "scenario_id": "SC-005-fee-split",
+          "value_date": "2026-06-07"
+        },
+        {
+          "amount": "-326.92",
+          "currency": "USD",
+          "id": "9a33ee77-5fac-55c9-a490-e17ed23b4232",
+          "line_number": 8,
+          "merchant_reference": "ORD-2026-532726",
+          "psp_reference": "psp_5525be44e9d5",
+          "scenario_id": "SC-006-chargeback-reversal",
+          "value_date": "2026-06-08"
+        },
+        {
+          "amount": "326.92",
+          "currency": "USD",
+          "id": "0ce67772-035c-569d-bc73-ce5b90cc3ae6",
+          "line_number": 9,
+          "merchant_reference": "ORD-2026-532726",
+          "psp_reference": "psp_5525be44e9d5-rev",
+          "scenario_id": "SC-006-chargeback-reversal",
+          "value_date": "2026-06-10"
+        },
+        {
+          "amount": "4499.93",
+          "currency": "EUR",
+          "id": "71fdc469-bbcb-506c-bcee-74028c582a02",
+          "line_number": 10,
+          "merchant_reference": "ORD-2026-181802",
+          "psp_reference": "psp_e5d430885187",
+          "scenario_id": "SC-007-fx-rounding",
+          "value_date": "2026-06-09"
+        },
+        {
+          "amount": "540.86",
+          "currency": "EUR",
+          "id": "0f5be397-0d59-58b9-a3e5-7834104a780c",
+          "line_number": 11,
+          "merchant_reference": "ORD-2026-510910",
+          "psp_reference": "psp_1f49fd9d23ec",
+          "scenario_id": "SC-008-cross-period-refund",
+          "value_date": "2026-06-26"
+        },
+        {
+          "amount": "14.657",
+          "currency": "BHD",
+          "id": "a519f3f9-79a0-5736-8953-443abf283898",
+          "line_number": 12,
+          "merchant_reference": null,
+          "psp_reference": "psp_f3cd2653ca3b",
+          "scenario_id": "SC-009-unclassified",
+          "value_date": "2026-06-11"
+        },
+        {
+          "amount": "50.21",
+          "currency": "EUR",
+          "id": "11dd5d60-1e9c-5d56-8c29-f80be90a0513",
+          "line_number": 13,
+          "merchant_reference": null,
+          "psp_reference": "psp_6608182739b3",
+          "scenario_id": "SC-010-missing-merchant-reference",
+          "value_date": "2026-06-12"
+        },
+        {
+          "amount": "446.71",
+          "currency": "EUR",
+          "id": "8d441ef3-bb3c-50a1-bd6a-62d2b0c9a51c",
+          "line_number": 14,
+          "merchant_reference": "ORD-2026-732696",
+          "psp_reference": "psp_3f92565cb9fd",
+          "scenario_id": "SC-011-ambiguous-memo",
+          "value_date": "2026-06-13"
+        },
+        {
+          "amount": "948.24",
+          "currency": "EUR",
+          "id": "fd575166-70cb-559e-8326-4aa1812675fd",
+          "line_number": 15,
+          "merchant_reference": "ORD-2026-120815",
+          "psp_reference": "psp_46b14f7b835a",
+          "scenario_id": "SC-012-repeated-psp-reference",
+          "value_date": "2026-06-14"
+        },
+        {
+          "amount": "964.43",
+          "currency": "EUR",
+          "id": "7a9cb7ff-db25-5089-abf6-ad6be6492080",
+          "line_number": 16,
+          "merchant_reference": "ORD-2026-120815",
+          "psp_reference": "psp_46b14f7b835a",
+          "scenario_id": "SC-012-repeated-psp-reference",
+          "value_date": "2026-06-14"
+        }
+      ],
+      "raw_payload_path": "settlement/psp-settlement-2026-06.csv",
+      "received_at": "2026-06-27T06:00:00Z",
+      "source": "psp-settlement-feed",
+      "status": "parsed"
+    },
+    {
+      "content_hash": "69c1bcfd1afc831d590b23456263fe445f3dea2f4686573bc667b64f72aa7f05",
+      "id": "4a06d69e-0121-507c-92d1-2dca73bffc4a",
+      "lines": [
+        {
+          "amount": "-540.86",
+          "currency": "EUR",
+          "id": "5963f9d5-987c-5a32-a42b-1389f678b02a",
+          "line_number": 1,
+          "merchant_reference": "ORD-2026-510910",
+          "psp_reference": "psp_1f49fd9d23ec-rfnd",
+          "scenario_id": "SC-008-cross-period-refund",
+          "value_date": "2026-07-08"
+        }
+      ],
+      "raw_payload_path": "settlement/psp-settlement-2026-07.csv",
+      "received_at": "2026-07-09T06:00:00Z",
+      "source": "psp-settlement-feed",
+      "status": "parsed"
+    }
+  ],
+  "fixture_schema_version": "1",
+  "generator_version": "1.0.0",
+  "ledger_entries": [
+    {
+      "account_code": "4100",
+      "amount": "2944.56",
+      "booked_at": "2026-06-06T10:00:00Z",
+      "currency": "EUR",
+      "description": "authorised amount ORD-2026-413909",
+      "external_ref": "GL-10320979",
+      "id": "9898fbd1-70d5-5844-9a3e-dfc548e2e8a9",
+      "scenario_id": "SC-004-partial-capture"
+    },
+    {
+      "account_code": "4900",
+      "amount": "-326.92",
+      "booked_at": "2026-06-08T13:00:00Z",
+      "currency": "USD",
+      "description": "chargeback debit",
+      "external_ref": "GL-11365559",
+      "id": "8322f050-c4dd-51e9-bcc7-be8807d305f5",
+      "scenario_id": "SC-006-chargeback-reversal"
+    },
+    {
+      "account_code": "4100",
+      "amount": "4499.95",
+      "booked_at": "2026-06-09T11:00:00Z",
+      "currency": "EUR",
+      "description": "fx converted capture ORD-2026-181802",
+      "external_ref": "GL-14320249",
+      "id": "c4b789fc-1af2-5878-9774-046a32e49321",
+      "scenario_id": "SC-007-fx-rounding"
+    },
+    {
+      "account_code": "4100",
+      "amount": "540.86",
+      "booked_at": "2026-06-26T12:00:00Z",
+      "currency": "EUR",
+      "description": "capture ORD-2026-510910",
+      "external_ref": "GL-20181083",
+      "id": "bfdeb4e9-978a-59f0-952f-89dc03a2c151",
+      "scenario_id": "SC-008-cross-period-refund"
+    },
+    {
+      "account_code": "4100",
+      "amount": "484.20",
+      "booked_at": "2026-06-13T10:00:00Z",
+      "currency": "EUR",
+      "description": "authorised amount ORD-2026-732696",
+      "external_ref": "GL-36837419",
+      "id": "ee4e513e-94ca-50f9-a1b1-7bbccc51fab3",
+      "scenario_id": "SC-011-ambiguous-memo"
+    },
+    {
+      "account_code": "2100",
+      "amount": "87.26",
+      "booked_at": "2026-06-12T11:00:00Z",
+      "currency": "EUR",
+      "description": "clearing account movement",
+      "external_ref": "GL-75199381",
+      "id": "a2d327d9-0009-59e0-b208-1cbe56c138e8",
+      "scenario_id": "SC-010-missing-merchant-reference"
+    },
+    {
+      "account_code": "4100",
+      "amount": "1234.64",
+      "booked_at": "2026-06-07T11:00:00Z",
+      "currency": "EUR",
+      "description": "net settlement ORD-2026-764755",
+      "external_ref": "GL-82433548",
+      "id": "1007ed4b-1a37-5b5a-9a7a-778fb91f1309",
+      "scenario_id": "SC-005-fee-split"
+    },
+    {
+      "account_code": "4100",
+      "amount": "1766.67",
+      "booked_at": "2026-06-03T12:00:00Z",
+      "currency": "EUR",
+      "description": "card capture ORD-2026-903098",
+      "external_ref": "GL-86321716",
+      "id": "eb3316a5-324a-5525-97ce-266aa16d753b",
+      "scenario_id": "SC-001-exact-match"
+    },
+    {
+      "account_code": "4100",
+      "amount": "36.83",
+      "booked_at": "2026-06-04T10:00:00Z",
+      "currency": "USD",
+      "description": "daily card settlement",
+      "external_ref": "GL-95604097",
+      "id": "aee27258-01f6-5615-add9-a848e6c38968",
+      "scenario_id": "SC-002-reference-mismatch"
+    },
+    {
+      "account_code": "4100",
+      "amount": "1828.47",
+      "booked_at": "2026-06-05T11:00:00Z",
+      "currency": "GBP",
+      "description": "card capture ORD-2026-105567",
+      "external_ref": "GL-96208834",
+      "id": "9a7ffb00-e1e6-51a2-b36d-117c79e76066",
+      "scenario_id": "SC-003-near-amount-difference"
+    }
+  ],
+  "profile": "canonical",
+  "seed": 20260829
+}

@@ -4,21 +4,23 @@ PSP settlement files against the general ledger. Deterministic matching clears t
 proposes a treatment from a closed enum whose type has no numeric field. A chaos suite proves no
 double-post against a RED baseline that does.
 
-> ## Status: milestone M1.2 of 31
+> ## Status: milestone M1.3 of 31
 >
 > **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
 > liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
-> correlation-id propagation, the tooling baseline, a green CI gate, and — as of M1.2 — the
-> **complete database schema**: the core reconciliation tables plus the exception, resolution and
-> reliability tables, with Alembic migrations.
+> correlation-id propagation, the tooling baseline, a green CI gate, the **complete database
+> schema** with Alembic migrations, and — as of M1.3 — a **deterministic synthetic fixture
+> corpus** that loads into that schema.
 >
-> **What does not exist:** everything the rest of this document describes as behaviour. The schema
-> has tables; **nothing writes to them.** There is no settlement parsing, no normalisation, no
-> matching, no tolerance arithmetic, no exception creation, no treatment proposal, no LLM
-> integration, no ledger adapter, no idempotency execution, no dispatcher, no retry, no DLQ replay,
-> no recovery workflow, no audit emission and no chaos suite. An `outbox` table is not a
-> transactional outbox; a `posting_attempt` table is not a write-ahead protocol. The architecture
-> below is a *specification of intended behaviour*, not a description of working software.
+> **What does not exist:** everything the rest of this document describes as behaviour. There are
+> tables and there is data to put in them; **no code processes that data.** There is no settlement
+> parsing, no normalisation, no matching, no tolerance arithmetic, no exception creation, no
+> treatment proposal, no LLM integration, no ledger adapter, no idempotency execution, no
+> dispatcher, no retry, no DLQ replay, no recovery workflow, no audit emission and no chaos suite.
+> An `outbox` table is not a transactional outbox; a `posting_attempt` table is not a write-ahead
+> protocol; **a fixture labelled `fee_split` is a constructed input, not evidence that anything can
+> classify a fee split.** The architecture below is a *specification of intended behaviour*, not a
+> description of working software.
 >
 > No measurement here is a result — the `Measured` table is an obligation the build must produce
 > from a committed script, and it will not appear until it does.
@@ -307,6 +309,48 @@ Values with up to 4 decimal places are stored exactly; anything more precise, or
 Binary floating point is absent from the schema, asserted across all metadata rather than just the
 known money columns. Every amount is paired with an explicit currency column under a
 both-present-or-both-absent check.
+
+### Deterministic fixture corpus
+
+Later milestones need realistic input that is identical on every machine and every run. The generator
+produces it from a seed alone:
+
+```bash
+make fixtures         # regenerate the committed canonical corpus
+make fixtures-check   # fail if the committed corpus has drifted from the generator
+make db-up
+make fixtures-load    # load it into the disposable lecp_test database
+make fixtures-verify  # prove it loads with every constraint enforced
+```
+
+The committed corpus lives in `fixtures/canonical/`: two settlement files, a ledger snapshot, the
+records the loader consumes, scenario metadata, four deliberately malformed files, and a manifest with
+a content hash. **Everything in it is synthetic** — no real customer, PSP, ledger or account data, and
+a test asserts no artifact contains credential-shaped material.
+
+**Twelve scenarios**, each stating what condition it represents, which later milestone needs it, and
+what distinguishes it from its neighbours. Three are constructed to match; the rest cover every class
+of FR-4's taxonomy, plus the awkward cases the corpus is deliberately built to contain: missing
+merchant references, empty and ambiguous memos, a three-row fee split against one combined ledger
+entry, opposing signed chargeback rows, a repeated PSP reference within one file, a refund settling in
+the month after its capture, and a foreign presentment currency with a recorded FX rate.
+
+Determinism is not a hope. Draws are `SHA-256(domain ‖ seed ‖ label)` rather than a random stream, so a
+value depends on nothing but its own label; identifiers are UUIDv5, deterministic and visibly distinct
+from the version 4 the application generates; time comes from a fixed epoch, and a test walks the
+package's AST to prove no clock or random source is read. The corpus regenerates **byte-identically**,
+and CI fails if the committed files drift.
+
+**The scenario labels are construction intent, not answers.** A scenario is a fee split because the
+generator *built* it as one, never because anything ran a matcher over it — that matters, because this
+metadata is what M2's matcher will later be judged against, and an oracle produced by the system under
+test would measure only its own self-consistency. Where the honest answer depends on a decision nobody
+has taken yet, the metadata says so: a line differing by one to three minor units is recorded as
+`tolerance_policy_dependent` rather than as matched or residual.
+
+The loader refuses any database whose name is not `lecp_test`, `lecp_demo` or `lecp_fixtures`, resets
+by identifier rather than `TRUNCATE`, and never disables a constraint — a corpus that needed integrity
+switched off to load would not be a loadable corpus.
 
 **Timestamps** are `TIMESTAMP WITH TIME ZONE` throughout. `created_at` is generated by the
 *database*; business timestamps (`received_at`, `booked_at`, `matched_at`) are supplied by the

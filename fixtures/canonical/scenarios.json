@@ -1,0 +1,238 @@
+{
+  "fixture_schema_version": "1",
+  "generator_version": "1.0.0",
+  "profile": "canonical",
+  "scenarios": [
+    {
+      "awkwardness": [],
+      "distinguishing_fields": [
+        "amount",
+        "currency",
+        "value_date",
+        "merchant_reference"
+      ],
+      "intended_classification": null,
+      "intent": "matched",
+      "kind": "exact_match",
+      "ledger_references": [
+        "GL-86321716"
+      ],
+      "scenario_id": "SC-001-exact-match",
+      "settlement_references": [
+        "psp_5deeabafcd26"
+      ],
+      "why_it_exists": "The ordinary case. M2.2 must clear it with no tolerance and no model call, and M2.2's 'share cleared deterministically' measurement is meaningless without a population of these."
+    },
+    {
+      "awkwardness": [
+        "uninformative_memo"
+      ],
+      "distinguishing_fields": [
+        "ledger description carries no reference"
+      ],
+      "intended_classification": null,
+      "intent": "matched",
+      "kind": "reference_mismatch",
+      "ledger_references": [
+        "GL-95604097"
+      ],
+      "scenario_id": "SC-002-reference-mismatch",
+      "settlement_references": [
+        "psp_5916e44797e5"
+      ],
+      "why_it_exists": "The ledger description carries no usable reference, so this line can only be matched on amount, currency and date. It exists so M2.2 cannot pass by comparing reference strings, which would look correct against a tidier corpus."
+    },
+    {
+      "awkwardness": [],
+      "distinguishing_fields": [
+        "settlement amount differs from the ledger by 1-3 minor units"
+      ],
+      "intended_classification": null,
+      "intent": "tolerance_policy_dependent",
+      "kind": "near_amount_difference",
+      "ledger_references": [
+        "GL-96208834"
+      ],
+      "scenario_id": "SC-003-near-amount-difference",
+      "settlement_references": [
+        "psp_4cebb7922b67"
+      ],
+      "why_it_exists": "Differs from the ledger by one to three minor units. Whether it clears depends on the tolerance bands OPEN-2 has not settled, so the corpus records the difference and declines to predict the outcome. M2.2's boundary tests need it, and OPEN-2 cannot be decided responsibly without cases like it."
+    },
+    {
+      "awkwardness": [],
+      "distinguishing_fields": [
+        "settlement amount materially below the ledger entry"
+      ],
+      "intended_classification": "partial_capture",
+      "intent": "residual",
+      "kind": "partial_capture",
+      "ledger_references": [
+        "GL-10320979"
+      ],
+      "scenario_id": "SC-004-partial-capture",
+      "settlement_references": [
+        "psp_c08e712f6fe1"
+      ],
+      "why_it_exists": "The merchant captured less than the ledger accrued, so the difference is material rather than a rounding artefact. M2.3 must classify it and M2.4 must price the shortfall deterministically."
+    },
+    {
+      "awkwardness": [
+        "split_across_rows"
+      ],
+      "distinguishing_fields": [
+        "three settlement rows share one psp_reference stem",
+        "no single row equals the ledger entry"
+      ],
+      "intended_classification": "fee_split",
+      "intent": "residual",
+      "kind": "fee_split",
+      "ledger_references": [
+        "GL-82433548"
+      ],
+      "scenario_id": "SC-005-fee-split",
+      "settlement_references": [
+        "psp_5687ae2d8196",
+        "psp_5687ae2d8196-fee1",
+        "psp_5687ae2d8196-fee2"
+      ],
+      "why_it_exists": "The PSP reports the capture and each fee on its own row while the ledger booked one net entry, so no single settlement line equals any single ledger entry. This is the case that breaks a one-to-one matcher, and it is why match_result carries a unique constraint on settlement_line_id rather than allowing fan-out."
+    },
+    {
+      "awkwardness": [],
+      "distinguishing_fields": [
+        "two opposing signed rows",
+        "ledger holds only the debit"
+      ],
+      "intended_classification": "chargeback_reversal",
+      "intent": "residual",
+      "kind": "chargeback_reversal",
+      "ledger_references": [
+        "GL-11365559"
+      ],
+      "scenario_id": "SC-006-chargeback-reversal",
+      "settlement_references": [
+        "psp_5525be44e9d5",
+        "psp_5525be44e9d5-rev"
+      ],
+      "why_it_exists": "A chargeback and its later reversal both appear in settlement while the ledger booked only the original chargeback. Negative amounts on both rows are why settlement_line imposes no sign constraint."
+    },
+    {
+      "awkwardness": [
+        "foreign_presentment_currency"
+      ],
+      "distinguishing_fields": [
+        "presentment currency differs from settlement currency",
+        "fx_rate is populated and consistent with the settled amount",
+        "the ledger differs by one to three minor units"
+      ],
+      "intended_classification": "fx_rounding",
+      "intent": "residual",
+      "kind": "fx_rounding",
+      "ledger_references": [
+        "GL-14320249"
+      ],
+      "scenario_id": "SC-007-fx-rounding",
+      "settlement_references": [
+        "psp_e5d430885187"
+      ],
+      "why_it_exists": "Presented in JPY and settled in EUR at a rate the PSP recorded, with the settlement amount consistent with that rate to the minor unit. The ledger booked its own conversion and landed one to three minor units away, so the two differ by a rounding artefact rather than by an economic amount. It is the case that forces every amount to carry an explicit currency, and the reason the FX rate is a recorded input (§3) rather than something this system computes."
+    },
+    {
+      "awkwardness": [
+        "cross_period_dates"
+      ],
+      "distinguishing_fields": [
+        "refund value_date falls in the month after the capture"
+      ],
+      "intended_classification": "cross_period_refund",
+      "intent": "residual",
+      "kind": "cross_period_refund",
+      "ledger_references": [
+        "GL-20181083"
+      ],
+      "scenario_id": "SC-008-cross-period-refund",
+      "settlement_references": [
+        "psp_1f49fd9d23ec",
+        "psp_1f49fd9d23ec-rfnd"
+      ],
+      "why_it_exists": "A refund settles in the month after the capture it reverses, so the two fall in different accounting periods. Named explicitly by the plan as an awkward case, and the reason adjustment carries a period column that OPEN-4 must give rules for. It is also what makes the corpus span more than one settlement batch."
+    },
+    {
+      "awkwardness": [
+        "no_ledger_counterpart",
+        "uninformative_memo"
+      ],
+      "distinguishing_fields": [
+        "no ledger entry exists at all"
+      ],
+      "intended_classification": "unclassified",
+      "intent": "residual",
+      "kind": "unclassified",
+      "ledger_references": [],
+      "scenario_id": "SC-009-unclassified",
+      "settlement_references": [
+        "psp_f3cd2653ca3b"
+      ],
+      "why_it_exists": "A movement with no ledger counterpart, no merchant reference and a memo that explains nothing. The taxonomy needs a genuine bottom case, and FR-4's 'unclassified' is only honest if something actually lands there. It is also the case where the model should abstain rather than guess (M3.3)."
+    },
+    {
+      "awkwardness": [
+        "missing_merchant_reference"
+      ],
+      "distinguishing_fields": [
+        "merchant_reference is empty in the file"
+      ],
+      "intended_classification": "unclassified",
+      "intent": "residual",
+      "kind": "missing_merchant_reference",
+      "ledger_references": [
+        "GL-75199381"
+      ],
+      "scenario_id": "SC-010-missing-merchant-reference",
+      "settlement_references": [
+        "psp_6608182739b3"
+      ],
+      "why_it_exists": "The PSP passed no merchant reference through, and the ledger entry that would otherwise match is for a different amount. Named by the plan as an awkward case, and the reason settlement_line.merchant_reference is nullable."
+    },
+    {
+      "awkwardness": [
+        "ambiguous_memo"
+      ],
+      "distinguishing_fields": [
+        "same shape as SC-004; memo is unusable"
+      ],
+      "intended_classification": "partial_capture",
+      "intent": "residual",
+      "kind": "ambiguous_memo",
+      "ledger_references": [
+        "GL-36837419"
+      ],
+      "scenario_id": "SC-011-ambiguous-memo",
+      "settlement_references": [
+        "psp_3f92565cb9fd"
+      ],
+      "why_it_exists": "Structurally identical to SC-004, but the only free-text evidence is a memo that gestures at a conversation nobody recorded. Named by the plan as an awkward case. It is the pair that makes M3's evaluation meaningful: the same underlying condition with and without usable evidence, so a drop in proposal quality can be attributed to evidence quality rather than to the condition."
+    },
+    {
+      "awkwardness": [
+        "repeated_psp_reference",
+        "no_ledger_counterpart"
+      ],
+      "distinguishing_fields": [
+        "two rows share one psp_reference with differing amounts"
+      ],
+      "intended_classification": "unclassified",
+      "intent": "residual",
+      "kind": "repeated_psp_reference",
+      "ledger_references": [],
+      "scenario_id": "SC-012-repeated-psp-reference",
+      "settlement_references": [
+        "psp_46b14f7b835a",
+        "psp_46b14f7b835a"
+      ],
+      "why_it_exists": "One psp_reference appears on two rows of the same file with different amounts. The schema permits it — settlement_line is unique on (batch, line_number), not on the PSP's reference — and that is correct, because the PSP's reference is their data and not a key this system can rely on. M2.1 and M2.2 both need a case that proves nothing here silently assumes reference uniqueness."
+    }
+  ],
+  "seed": 20260829
+}

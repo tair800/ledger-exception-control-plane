@@ -72,6 +72,12 @@ pnpm-lock.yaml      text eol=lf -diff linguist-generated
 poetry.lock         text eol=lf -diff linguist-generated
 uv.lock             text eol=lf -diff linguist-generated
 
+# --- Deterministic fixture corpus ---
+# Byte-identical regeneration is a CI gate, so these files must never be re-encoded on
+# checkout. The *.csv and *.json rules above already force LF; this states it for the corpus
+# explicitly, so a future change to those rules cannot silently break the drift check.
+fixtures/**         text eol=lf
+
 # --- Evaluation fixtures: text, kept out of diff noise, not counted as source ---
 evals/golden/**     text eol=lf linguist-generated
 tests/cassettes/**  text eol=lf linguist-generated

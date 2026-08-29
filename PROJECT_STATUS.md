@@ -3,8 +3,9 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M1.2 complete. **Next:** M1.3 — seeded fixture generator.
-**No business functionality is implemented.** The schema is now complete; nothing writes to it.
+**Current milestone:** M1.3 complete. **Next:** M2.1 — settlement normalisation and quarantine.
+**No business functionality is implemented.** There is a complete schema and a corpus to put in it;
+no code processes that data.
 
 ---
 
@@ -16,7 +17,8 @@ commits before doing anything.
 | **0.2 Local stack and health endpoints** | **DONE** | Compose stack, liveness/readiness, typed config, structured JSON logging + correlation ids |
 | **1.1 Core reconciliation schema** | **DONE** | SQLAlchemy 2.x + Alembic; `settlement_batch`, `settlement_line`, `ledger_entry`, `match_result` |
 | **1.2 Exception, resolution and reliability schema** | **DONE** | 11 tables, append-only audit trigger, least-privilege role script |
-| 1.3 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **1.3 Seeded fixture generator** | **DONE** | 12 scenarios, byte-identical regeneration, loads into real PostgreSQL |
+| 2.1 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -306,6 +308,117 @@ banned. `IMPLEMENTATION_PLAN.md` §11.1 specifies a test asserting the phrase ap
 the sentence is rephrased or the allowlist grows; that is an 11.1 decision and is recorded here so
 it is not discovered as a surprise then.
 
+## What M1.3 delivered
+
+- **A deterministic generator** in `src/ledger_exception_control_plane/fixtures/`, producing a corpus
+  from a seed alone. Draws are `SHA-256(domain ‖ seed ‖ label)` rather than a random stream, so a value
+  depends on nothing but its own label and adding a scenario cannot perturb the others (ADR-032).
+- **Twelve scenarios** covering every class of FR-4's taxonomy plus the awkward cases the plan names —
+  missing references, ambiguous memos, cross-period refunds — each recording what it represents, which
+  milestone needs it, and what distinguishes it from its neighbours.
+- **The settlement file format**, resolving OPEN-1: a synthesised composite CSV, one movement per row,
+  with FX rates as recorded strings rather than computed values (ADR-031).
+- **A committed canonical corpus** (`fixtures/canonical/`, 11 files) pinned by a drift test in both the
+  unit suite and CI.
+- **Four deliberately malformed files** for M2.1's quarantine path, labelled and provably outside the
+  loadable set.
+- **A loader** that refuses any database not named `lecp_test`/`lecp_demo`/`lecp_fixtures`, resets by
+  identifier rather than `TRUNCATE`, and disables no constraint (ADR-035).
+- **Tests** — 200 unit (Docker-free) plus 8 fixture-load tests against real PostgreSQL.
+
+## M1.3 verification
+
+| Check | Result |
+|---|---|
+| `ruff format --check` / `ruff check` | PASS |
+| `mypy` strict | PASS — 31 source files |
+| Unit suite + coverage | PASS — 200 passed, 94.48% (gate 90%) |
+| Same seed regenerates byte-identically | PASS |
+| Committed corpus matches the generator | PASS — asserted in the suite and as a CI step |
+| Drift check fails on a tampered artifact | PASS — verified by tampering; exits 1 and names the paths |
+| A different seed changes references and amounts | PASS |
+| A different seed does **not** change scenario structure, dates or the mix | PASS |
+| Every identifier is UUIDv5, unique, name-derived | PASS |
+| No clock or random source read anywhere in the package | PASS — AST walk, verified by injecting `datetime.now()` |
+| No forbidden import | PASS — allowlist, verified by injecting `import random` |
+| No function named after an M2 action | PASS — verified by injecting `match_lines` |
+| Every amount is an exact `Decimal` at its currency's real minor unit | PASS |
+| Amounts serialise as JSON strings, never numbers | PASS |
+| Generated records fit the live column limits | PASS — limits read from the metadata, so they cannot drift |
+| Every metadata reference resolves to real data | PASS |
+| Declared bulk mix is exact at the default size | PASS — 200 instances, counts equal the weights |
+| Bulk allocation is exact, ordered and complete at every size | PASS — 12, 13, 24, 47, 100, 200, 401, 1000 |
+| Bulk allocation is strictly proportional once the floor stops binding | PASS — 200, 401, 1000, 4321 |
+| Invalid artifacts labelled and outside the loadable set | PASS |
+| No credential-shaped material in any artifact | PASS |
+| Manifest carries no path, timestamp or machine identity | PASS |
+| Corpus loads into real PostgreSQL with all constraints on | PASS — 2 batches, 17 lines, 10 ledger entries |
+| Amounts read back exactly; `match_state` still `unmatched` | PASS |
+| Stored `raw_payload` hashes to its `content_hash` | PASS |
+| Loading twice without reset is refused by the database | PASS |
+| Reset leaves an unrelated row untouched | PASS |
+| Loader refuses a non-disposable target | PASS |
+| `git diff --check` | PASS |
+
+## Known issues and findings
+
+### M1.3 — adversarial review: a fixture writer that could delete a repository (2026-08-29)
+
+Five independent lenses over the fixture system, each finding verified by a separate skeptic prompted
+to refute it. **30 findings raised; 7 survived**, and one of them was serious.
+
+1. **`write_corpus` was a deletion tool with no guard.** It unlinks every file under its target that
+   is not one of the artifacts it is about to write, and `rglob` matches dotted entries. `--out` is a
+   free-form path, so `generate --out .` from the repository root would have unlinked the source
+   tree, the tests, the migrations and `.git` with them. The inverse of this project's own stated
+   principle: ADR-035 guards the *loader*, whose writes are additive and reversible, while the
+   destructive writer had nothing. It now refuses any directory that is non-empty and contains no
+   manifest — verified by pointing it at a fake working tree and confirming nothing was touched.
+2. **The disposability check ran after the destructive step.** The integration fixtures run
+   `alembic downgrade base`, dropping all fifteen tables, taking their DSN from the environment
+   unvalidated; ADR-035's allowlist was only reached later, inside `load()`. A guard that fires after
+   the damage is not a guard. Both the fixture suite and the pre-existing schema suite now check
+   first.
+3. **The scope guards had a hole shaped like the thing they guard.** `fixtures_module_paths()` used
+   `glob` rather than `rglob`, so a `fixtures/matching/` subpackage would have been invisible to all
+   three AST guards while the docstring claimed the opposite.
+4. **The FX scenario's own numbers disagreed by two orders of magnitude.** Presentment amount, rate
+   and settled amount were drawn independently, so the corpus asserted that JPY 683,880 at 0.00658
+   settled as EUR 40.77. An FX *rounding* fixture whose arithmetic is wrong by 100× is not a rounding
+   fixture. The settled amount is now constructed from the recorded rate with an explicit, audited
+   quantisation, and the ledger differs by the one to three minor units that make it a rounding case.
+5. **A refusal message could echo credential material.** `urlsplit` ends the netloc at the first `/`,
+   so a password containing an unencoded slash pushes the rest of the credential into what looks like
+   a database name — and straight into the error message. §17 treats an error message as a log line
+   waiting to happen. The name is now printed only if it is shaped like a database name.
+6. **This document overstated a test.** The verification table claimed the declared mix was exact at
+   seven different sizes; only the count and the coverage were checked at six of them, and the mix
+   only at the default. Corrected above, and the allocator now has tests for the properties that
+   actually hold at every size — plus strict proportionality at the sizes where it can hold.
+
+The remaining 23 findings were refuted on verification.
+
+**Method note.** The dangerous one was not a subtle bug. It was a `for … unlink()` loop that reads
+exactly as intended and is fine every time the tool is used correctly. Reading the code does not
+surface that class; asking "what does this do if someone types the wrong path" does.
+
+### M1.3 — `--instances` was a suggestion, not a count (2026-08-29)
+
+The bulk profile allocates the declared weights proportionally, which zeroes the rare scenarios at small
+sizes; a floor raised each to one. The floor *added* the units, so asking for 24 instances produced 30 —
+and quietly distorted the declared mix at the same time. Caught by a test that asserted the requested
+size and got a larger one. The floor now takes its unit from the largest bucket, so coverage is
+guaranteed without changing the size the caller asked for.
+
+### M1.3 — an interpretation worth flagging
+
+`IMPLEMENTATION_PLAN.md` §1.3 names only "settlement batches" among the deliverables, but its goal is a
+*controlled residual mix*, and a residual is defined relative to a ledger. The corpus therefore also
+generates a `ledger_entry` snapshot, without which the residual mix would be neither constructible nor
+checkable and the "committed sample loads" criterion would be satisfied by inserting a single row. This
+is an under-specification in the plan's wording resolved by its own stated goal, not a contradiction
+between documents — recorded here so the decision is visible rather than assumed.
+
 ## Deployment state
 
 Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources exist.
@@ -313,18 +426,19 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-111 passed, 80 deselected          coverage 97.88% (required 90%)
+200 passed, 88 deselected          coverage 94.48% (required 90%)
 ruff format: all files formatted
 ruff check:  All checks passed!
-mypy:        Success: no issues found in 19 source files
+mypy:        Success: no issues found in 31 source files
 schema:      76 passed against real PostgreSQL (migrations, drift, constraints, grants)
+fixtures:     8 passed against real PostgreSQL (corpus loads with constraints enforced)
 ```
 
 Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-08-29.
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 32 ADRs and 12 OPEN items. None blocks M1.3. Still relevant:
+`DECISIONS.md` holds 38 ADRs and 11 OPEN items. OPEN-1 was resolved at M1.3 (ADR-031). None blocks M2.1. Still relevant:
 
 - **LICENSE copyright holder** is `tair800` (the configured Git identity). Replace with a legal name
   if that matters for a public repository.

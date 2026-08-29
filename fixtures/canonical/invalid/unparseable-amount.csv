@@ -1,0 +1,3 @@
+psp_reference,merchant_reference,transaction_type,amount,currency,value_date,presentment_amount,presentment_currency,fx_rate,memo
+psp_0000000000d5,ORD-2026-100005,capture,not-a-number,EUR,2026-06-05,,,,unreadable
+psp_0000000000d6,ORD-2026-100006,capture,,EUR,2026-06-05,,,,empty amount

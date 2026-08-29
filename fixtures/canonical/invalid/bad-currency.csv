@@ -1,0 +1,3 @@
+psp_reference,merchant_reference,transaction_type,amount,currency,value_date,presentment_amount,presentment_currency,fx_rate,memo
+psp_0000000000c3,ORD-2026-100003,capture,80.00,eur,2026-06-04,,,,lower case code
+psp_0000000000c4,ORD-2026-100004,capture,90.00,EURO,2026-06-04,,,,four letters

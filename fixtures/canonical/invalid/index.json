@@ -1,0 +1,28 @@
+{
+  "fixture_schema_version": "1",
+  "fixtures": [
+    {
+      "defect": "row 2 states an amount with five decimal places",
+      "path": "invalid/over-precise-amount.csv",
+      "why_it_exists": "The M1.1 money contract rejects rather than rounds an over-precise value, and the rejection has to happen somewhere a user can see. This file is what proves the ingest path refuses it instead of quantising it on the way in."
+    },
+    {
+      "defect": "the header omits the currency column and every row is one field short",
+      "path": "invalid/missing-column.csv",
+      "why_it_exists": "A structurally invalid batch must quarantine with a reason (FR-2) rather than raise an index error deep in a parser."
+    },
+    {
+      "defect": "row 2 carries a lower-case currency code and row 3 carries a four-letter one",
+      "path": "invalid/bad-currency.csv",
+      "why_it_exists": "The database rejects both — currency is checked against ^[A-Z]{3}$ — so the ingest path must catch them first and say why, rather than surfacing a constraint violation to a user."
+    },
+    {
+      "defect": "row 2 states an amount that is not a number and row 3 leaves it empty",
+      "path": "invalid/unparseable-amount.csv",
+      "why_it_exists": "A line whose amount cannot be read has no normalised form at all. It is the case that must never reach a Decimal constructor unguarded, and never be defaulted to zero — a silent zero is a financial error, not a fallback."
+    }
+  ],
+  "generator_version": "1.0.0",
+  "profile": "canonical",
+  "seed": 20260829
+}

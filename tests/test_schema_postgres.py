@@ -26,6 +26,10 @@ from pathlib import Path
 
 import asyncpg
 import pytest
+from pydantic import SecretStr
+
+from ledger_exception_control_plane.config import Settings
+from ledger_exception_control_plane.fixtures.loader import assert_target_is_disposable
 
 pytestmark = pytest.mark.integration
 
@@ -76,7 +80,15 @@ def _alembic(*args: str) -> subprocess.CompletedProcess[str]:
 
 @pytest.fixture(scope="module", autouse=True)
 def migrated_database() -> Iterator[None]:
-    """Bring the test database to head from zero before the module runs."""
+    """Bring the test database to head from zero before the module runs.
+
+    Disposability is checked first. This module drops every table, and it takes its DSN from
+    the environment; the same hazard was found in the M1.3 fixture suite by review, and it
+    applies here identically. Predates M1.3 — corrected here because the fix is two lines and
+    the failure mode is somebody's database.
+    """
+    assert_target_is_disposable(Settings(postgres_dsn=SecretStr(DSN)))
+
     downgraded = _alembic("downgrade", "base")
     assert downgraded.returncode == 0, downgraded.stderr
     upgraded = _alembic("upgrade", "head")

@@ -1,0 +1,21 @@
+{
+  "batch_count": 2,
+  "content_sha256": "c14073c8479cb9b644e68c2bbbd546ca87b2603011c7def137134187e2798c4c",
+  "fixture_schema_version": "1",
+  "generator_version": "1.0.0",
+  "ledger_entry_count": 10,
+  "profile": "canonical",
+  "residual_mix": {
+    "chargeback_reversal": 1,
+    "cross_period_refund": 1,
+    "fee_split": 1,
+    "fx_rounding": 1,
+    "matched": 2,
+    "partial_capture": 2,
+    "tolerance_policy_dependent": 1,
+    "unclassified": 3
+  },
+  "scenario_count": 12,
+  "seed": 20260829,
+  "settlement_line_count": 17
+}

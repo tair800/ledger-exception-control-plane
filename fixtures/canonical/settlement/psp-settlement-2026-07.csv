@@ -1,0 +1,2 @@
+psp_reference,merchant_reference,transaction_type,amount,currency,value_date,presentment_amount,presentment_currency,fx_rate,memo
+psp_1f49fd9d23ec-rfnd,ORD-2026-510910,refund,-540.86,EUR,2026-07-08,,,,customer returned order
