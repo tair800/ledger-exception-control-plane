@@ -24,8 +24,14 @@ from sqlalchemy import (
     Table,
     UniqueConstraint,
 )
+from sqlalchemy.types import TypeDecorator
 
-from ledger_exception_control_plane.db.base import MONEY_PRECISION, MONEY_SCALE, Base
+from ledger_exception_control_plane.db.base import (
+    MONEY_MAGNITUDE_EXCLUSIVE_BOUND,
+    MONEY_MAX_SCALE,
+    Base,
+    Money,
+)
 from ledger_exception_control_plane.db.models import (
     BatchStatus,
     LedgerEntry,
@@ -101,16 +107,78 @@ def test_no_binary_floating_point_anywhere_in_the_schema() -> None:
 
 
 @pytest.mark.parametrize(("table_name", "column_name"), list(MONEY_COLUMNS))
-def test_money_columns_are_exact_numeric_with_declared_precision(
+def test_money_columns_are_exact_numeric_returning_decimal(
     table_name: str, column_name: str
 ) -> None:
-    column = _tables()[table_name].columns[column_name]
+    column_type = _tables()[table_name].columns[column_name].type
+    assert isinstance(column_type, Money), f"{table_name}.{column_name} is not the Money type"
 
-    assert isinstance(column.type, Numeric), f"{table_name}.{column_name} is not NUMERIC"
-    assert column.type.precision == MONEY_PRECISION
-    assert column.type.scale == MONEY_SCALE
-    assert column.type.asdecimal is True
-    assert column.type.python_type is Decimal
+    impl = column_type.impl_instance
+    assert isinstance(impl, Numeric), f"{table_name}.{column_name} is not NUMERIC"
+    assert impl.asdecimal is True
+    assert impl.python_type is Decimal
+
+
+@pytest.mark.parametrize(("table_name", "column_name"), list(MONEY_COLUMNS))
+def test_money_columns_carry_no_fixed_scale_typmod(table_name: str, column_name: str) -> None:
+    """**Regression guard.** A fixed-scale typmod silently rounds and must never return.
+
+    ``NUMERIC(20, 4)`` does not reject an over-precise value — it rounds it before any check
+    constraint can see the original. Measured: ``Decimal("1.23456")`` was stored as
+    ``1.2346`` with no error. Declaring precision or scale on a monetary column reintroduces
+    that defect, so this test fails the moment anyone does.
+    """
+    column_type = _tables()[table_name].columns[column_name].type
+    if isinstance(column_type, TypeDecorator):
+        column_type = column_type.impl_instance
+    assert isinstance(column_type, Numeric)
+
+    assert column_type.precision is None, (
+        f"{table_name}.{column_name} declares precision "
+        f"{column_type.precision!r}; a fixed typmod silently rounds"
+    )
+    assert column_type.scale is None, (
+        f"{table_name}.{column_name} declares scale {column_type.scale!r}; "
+        f"a fixed typmod silently rounds"
+    )
+
+
+@pytest.mark.parametrize(("table_name", "column_name"), list(MONEY_COLUMNS))
+def test_every_money_column_has_a_precision_check_constraint(
+    table_name: str, column_name: str
+) -> None:
+    """Removing the typmod is only safe because a constraint replaces it."""
+    conditions = [
+        str(constraint.sqltext)
+        for constraint in _tables()[table_name].constraints
+        if isinstance(constraint, CheckConstraint)
+    ]
+    scale_checks = [c for c in conditions if f"trunc({column_name}" in c]
+    magnitude_checks = [c for c in conditions if f"abs({column_name})" in c]
+    assert scale_checks, f"{table_name}.{column_name} has no scale check constraint"
+    assert magnitude_checks, f"{table_name}.{column_name} has no magnitude check constraint"
+
+    assert f"trunc({column_name}, {MONEY_MAX_SCALE}) = {column_name}" in scale_checks[0]
+    # NaN is excluded explicitly: trunc('NaN',4) = 'NaN' is TRUE, so the scale rule alone
+    # would admit it.
+    assert f"{column_name} <> 'NaN'::numeric" in scale_checks[0]
+    assert f"abs({column_name}) < {MONEY_MAGNITUDE_EXCLUSIVE_BOUND}" in magnitude_checks[0]
+
+
+def test_precision_check_uses_trunc_not_scale() -> None:
+    """``scale()`` is representation-based and would reject valid values.
+
+    ``scale(1.230000)`` is 6, so a scale-based rule rejects a value numerically identical to
+    ``1.2300`` that loses nothing when stored. ``trunc(v, 4) = v`` is value-based.
+    """
+    conditions = " ".join(
+        str(constraint.sqltext)
+        for table in _tables().values()
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    )
+    assert "trunc(" in conditions
+    assert "scale(" not in conditions, "scale() would reject valid trailing-zero values"
 
 
 @pytest.mark.parametrize(("key", "currency_column"), list(MONEY_COLUMNS.items()))
@@ -140,7 +208,7 @@ def test_scale_accommodates_every_iso_minor_unit() -> None:
     JPY has 0 minor digits, most currencies 2, and BHD/KWD/TND have 3; intermediate
     fee-split and FX values commonly need a fourth.
     """
-    assert MONEY_SCALE >= 4
+    assert MONEY_MAX_SCALE >= 4
 
 
 # --------------------------------------------------------------------------------------
@@ -230,6 +298,12 @@ def test_required_check_constraints_are_declared() -> None:
         "ck_match_result_tolerance_currency_pairing",
         "ck_match_result_tolerance_currency_format",
         "ck_match_result_tolerance_non_negative",
+        "ck_settlement_line_amount_scale",
+        "ck_settlement_line_amount_magnitude",
+        "ck_ledger_entry_amount_scale",
+        "ck_ledger_entry_amount_magnitude",
+        "ck_match_result_tolerance_scale",
+        "ck_match_result_tolerance_magnitude",
     }
     actual: set[str] = {
         str(constraint.name)

@@ -2,14 +2,25 @@
 
 Three project-wide rules are enforced here rather than repeated per table.
 
-**Money is never binary floating point.** Every monetary column is
-``NUMERIC(MONEY_PRECISION, MONEY_SCALE)`` mapped to Python ``Decimal`` with
-``asdecimal=True``. ``Float``/``REAL``/``DOUBLE PRECISION`` must never appear in this
-package, and a test asserts their absence across the whole metadata rather than trusting
-review. Scale is fixed at 4 so every ISO 4217 minor unit fits without rounding — JPY has 0
-minor digits, most currencies 2, and a few (BHD, KWD, TND) have 3, while intermediate
-fee-split and FX values commonly need a fourth. Persisting at a coarser scale would round
-silently at the storage boundary, which is exactly the failure this project exists to avoid.
+**Money is never binary floating point, and is never silently rounded.** Every monetary
+column is an *unconstrained* ``NUMERIC`` mapped to Python ``Decimal`` with ``asdecimal=True``,
+guarded by a check constraint. ``Float``/``REAL``/``DOUBLE PRECISION`` must never appear in
+this package, and a test asserts their absence across the whole metadata rather than
+trusting review.
+
+The column is deliberately **not** ``NUMERIC(20, 4)``. A fixed-scale typmod does not reject
+an over-precise value — it *rounds* it, before any constraint can see the original. Measured
+on PostgreSQL 16: inserting ``Decimal("1.23456")`` into ``NUMERIC(20,4)`` stored ``1.2346``
+with no error and no warning, so the application could not tell the value had changed. That
+is precisely the silent rounding at a persistence boundary this project forbids.
+
+Removing the typmod lets the original decimal reach the constraint unchanged, and the
+constraint rejects it. The check is expressed with ``trunc``, not ``scale``, because
+``scale`` is representation-based: ``scale(1.230000)`` is 6, so a scale-based rule would
+reject a value numerically identical to ``1.2300`` that loses nothing when stored.
+``trunc(v, 4) = v`` is value-based and rejects exactly the values that would lose
+information. Verified against signed values, integers, zero, trailing zeros, both magnitude
+boundaries and NULL.
 
 **Currency is explicit wherever an amount exists.** Amounts are always declared with a
 paired currency column and a check constraint tying the two together, so no row can hold a
@@ -26,17 +37,33 @@ rejected by ``TIMESTAMP(timezone=True)``.
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 import uuid
 from typing import Any, Final
 
-from sqlalchemy import CheckConstraint, DateTime, MetaData, Numeric, String, func
+from sqlalchemy import CheckConstraint, DateTime, Dialect, MetaData, Numeric, String, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
 
-#: Total digits and digits after the point for every monetary column. See the module
-#: docstring for why the scale is 4 and not 2.
-MONEY_PRECISION: Final = 20
-MONEY_SCALE: Final = 4
+#: Maximum fractional decimal places a monetary value may carry. A value with more is
+#: **rejected**, never rounded.
+#:
+#: Four covers every ISO 4217 minor unit exactly — JPY has 0 minor digits, most currencies 2,
+#: BHD/KWD/TND 3, and CLF/UYW 4. Note the honest consequence: because a currency already uses
+#: all four, there is **no headroom** for intermediate fee-split or FX values in the smallest
+#: units. Such intermediates must be quantised explicitly, and deliberately, before they reach
+#: persistence — an audited rounding earlier is permitted; a silent one here is not.
+MONEY_MAX_SCALE: Final = 4
+
+#: Integer digits permitted, preserving the range the previous ``NUMERIC(20, 4)`` allowed.
+MONEY_MAX_INTEGER_DIGITS: Final = 16
+
+#: Exclusive magnitude bound: ``abs(value) < 10**16``, i.e. at most 9999999999999999.9999.
+MONEY_MAGNITUDE_EXCLUSIVE_BOUND: Final = 10**MONEY_MAX_INTEGER_DIGITS
+
+#: Canonical form every monetary value takes when read back. See :class:`Money`.
+MONEY_QUANTUM: Final = decimal.Decimal(1).scaleb(-MONEY_MAX_SCALE)  # Decimal("0.0001")
 
 #: ISO 4217 alphabetic code length.
 CURRENCY_CODE_LENGTH: Final = 3
@@ -59,15 +86,91 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
-def money_column(**kwargs: Any) -> Mapped[Any]:
-    """A monetary amount: exact ``NUMERIC``, never floating point.
+class Money(TypeDecorator[decimal.Decimal]):
+    """Exact, unconstrained ``NUMERIC`` that reads back in a canonical form.
 
-    Callers must pair this with :func:`currency_column` and a check constraint; the
-    convention is not optional, and :func:`currency_pairing_constraint` builds the check.
+    **Writes pass through untouched**, which is the whole point: the original decimal must
+    reach the check constraint so an over-precise value can be *rejected* rather than
+    rounded. No client-side quantisation on the way in.
+
+    **Reads are quantised to exactly four decimal places.** Removing the fixed typmod
+    removed a guarantee that was easy to overlook: ``NUMERIC(20, 4)`` normalised every read
+    to four places, so ``1.23`` and ``1.2300`` came back identical. Unconstrained ``NUMERIC``
+    preserves whatever scale the writer sent, so the same economic value could come back as
+    two different ``Decimal`` objects — unequal under ``Decimal.compare_total``, differently
+    hashed, differently serialised. That matters concretely: ADR-004b derives ``operation_id``
+    from a hash covering the amount, and an identifier that varies with representation rather
+    than value would silently defeat idempotency. Quantising on read restores the
+    canonicalisation the typmod used to provide, without restoring its rounding.
+
+    Quantisation here is lossless by construction: the check constraint guarantees no stored
+    value carries more than four decimal places, so nothing is ever rounded away.
     """
-    return mapped_column(
-        Numeric(precision=MONEY_PRECISION, scale=MONEY_SCALE, asdecimal=True),
-        **kwargs,
+
+    impl = Numeric
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Dialect) -> Any:
+        return dialect.type_descriptor(Numeric(asdecimal=True))
+
+    def process_result_value(
+        self, value: decimal.Decimal | None, dialect: Dialect
+    ) -> decimal.Decimal | None:
+        if value is None:
+            return None
+        return value.quantize(MONEY_QUANTUM)
+
+
+def money_column(**kwargs: Any) -> Mapped[Any]:
+    """A monetary amount: exact, unconstrained ``NUMERIC``, never floating point.
+
+    No precision or scale typmod, deliberately — see the module docstring. Scale and
+    magnitude are enforced by :func:`money_scale_constraint` and
+    :func:`money_magnitude_constraint`, which *reject* rather than round.
+
+    **Money only.** This helper carries a four-decimal ceiling and assumes a paired currency,
+    so it is wrong for FX rates, ratios and unit prices, which legitimately need more decimal
+    places and have no currency of their own. Those need their own column helper when an
+    increment first requires one; do not reuse this.
+
+    Callers must pair this with :func:`currency_column`, a currency check, and both monetary
+    constraints. None of those is optional.
+    """
+    return mapped_column(Money(), **kwargs)
+
+
+def money_scale_constraint(column: str, name: str) -> CheckConstraint:
+    """Reject a value carrying more than four decimal places, and reject ``NaN``.
+
+    ``trunc(col, 4) = col`` — truncating to four places must change nothing. Value-based, so
+    ``1.230000`` passes (it equals ``1.2300``) while ``1.23456`` is rejected.
+
+    The ``NaN`` term is explicit rather than emergent. ``trunc('NaN', 4) = 'NaN'`` is **true**
+    in PostgreSQL, so the scale rule alone admits ``NaN``; it was previously excluded only as
+    a side effect of the magnitude comparison, which is not a property to depend on silently.
+    Note that PostgreSQL ``numeric`` ``NaN`` compares *equal* to itself, unlike IEEE floats,
+    so the usual ``col = col`` idiom does not detect it — verified — and ``col <> 'NaN'`` is
+    used instead.
+
+    A ``NULL`` passes: a bare ``CHECK`` evaluates to ``NULL``, not ``FALSE``, so nullable
+    monetary columns need no guard clause. Verified on PostgreSQL 16.
+    """
+    return CheckConstraint(
+        f"{column} <> 'NaN'::numeric AND trunc({column}, {MONEY_MAX_SCALE}) = {column}",
+        name=name,
+    )
+
+
+def money_magnitude_constraint(column: str, name: str) -> CheckConstraint:
+    """Reject a value outside ``±10**16``, the range the previous fixed typmod permitted.
+
+    Separate from the scale rule so a rejection names its cause: asyncpg reports the
+    constraint name but not the column, so one combined constraint would leave the caller
+    unable to tell an over-precise value from an over-large one.
+    """
+    return CheckConstraint(
+        f"abs({column}) < {MONEY_MAGNITUDE_EXCLUSIVE_BOUND}",
+        name=name,
     )
 
 

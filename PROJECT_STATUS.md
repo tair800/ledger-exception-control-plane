@@ -67,6 +67,49 @@ attempt**; the engine was restored manually and the complete verification was re
 
 ## Known issues and findings
 
+### M1.1 correction — silent decimal rounding (2026-08-29)
+
+**A defect shipped in `70a8888` and was corrected in a follow-up commit.** The schema used
+`NUMERIC(20, 4)` and the original ADR-020 asserted that satisfied the project's no-silent-rounding
+rule. Empirical testing disproved it: inserting `Decimal("1.23456")` stored `1.2346` with no error
+and no warning, leaving the application unable to tell the value had changed.
+
+Monetary columns are now unconstrained `NUMERIC` with a check that rejects over-precise or
+over-large values. `trunc(v, 4) = v` is used rather than `scale(v) <= 4`, because `scale` is
+representation-based and would reject `1.230000` — numerically identical to `1.2300`, and lossless
+to store. See ADR-020 for the measurements.
+
+Autogenerate detected only the new check constraints, **not** the required column type change.
+Adding the checks without widening the columns would have left the typmod rounding values before
+the checks ever ran — a correction that appears to succeed while changing nothing. The migration
+was written by hand.
+
+An adversarial review of the correction found three further issues, all fixed before commit:
+
+1. **Read-back canonicalisation was lost with the typmod.** `NUMERIC(20,4)` normalised every read
+   to four places; unconstrained `NUMERIC` preserves the writer's scale, so `1.23` and `1.230000`
+   would return as different `Decimal` objects for one economic value — and ADR-004b hashes the
+   amount into `operation_id`, so that would silently defeat idempotency. A `Money` type decorator
+   now quantises on read; writes still pass through unquantised so the constraint can reject.
+2. **`NaN` passed the scale rule.** `trunc('NaN',4) = 'NaN'` is true in PostgreSQL, so `NaN` was
+   excluded only incidentally by the magnitude comparison. Now excluded explicitly. Note the usual
+   `col = col` idiom does **not** detect it — PostgreSQL `numeric` `NaN` compares equal to itself,
+   unlike IEEE floats — so `col <> 'NaN'` is used. Verified.
+3. **The downgrade was broken.** `op.drop_constraint` applies the naming convention just as create
+   does, so passing an already-expanded name doubled the prefix and the DROP failed against a
+   constraint that did not exist. Caught by actually running the downgrade, not by reading it.
+
+Two constraints per column, not one, so a rejection names its cause: asyncpg reports the
+constraint name but not the column. The downgrade now refuses rather than silently rounding.
+
+**Known, accepted limitation.** An unconstrained `NUMERIC` can store a value with a very large
+trailing-zero scale (e.g. `1.23` followed by thousands of zeros), which renders far wider than it
+stores. Storage and indexing are unaffected — PostgreSQL omits trailing zero groups — and the read
+path canonicalises to four places, so this is bounded in practice. A `scale(col) <= 8` ceiling would
+close it at the database; judged not worth the extra constraint surface for an obscure case.
+
+### M0.2 findings
+
 Three defects were found *by the real-stack verification* and fixed. All are recorded as ADRs.
 
 1. **Sequential probes made readiness latency the sum of timeouts** (ADR-016). Measured 3.07 s with
@@ -97,10 +140,12 @@ None.
   Alembic as the production migration path. `create_all()` is not used for schema management.
 - **Four tables** — `settlement_batch` (unique `content_hash`), `settlement_line`, `ledger_entry`,
   `match_result`. Exactly the M1.1 scope; no M1.2 table exists.
-- **Money** — `NUMERIC(20, 4)` mapped to `Decimal` everywhere, every amount paired with an explicit
-  currency, and no floating point anywhere in the metadata.
-- **One migration** — `cf6581793e0c`, reviewed by hand after autogenerate.
-- **Tests** — 80 unit (Docker-free) plus 12 schema tests against real PostgreSQL.
+- **Money** — unconstrained `NUMERIC` mapped to `Decimal`, guarded by a check that **rejects**
+  over-precise values rather than rounding them; every amount paired with an explicit currency; no
+  floating point anywhere in the metadata.
+- **Two migrations** — `cf6581793e0c` (schema) and `a72a14e6f51f` (precision correction), both
+  reviewed by hand after autogenerate.
+- **Tests** — 87 unit (Docker-free) plus 28 schema tests against real PostgreSQL.
 
 ## M1.1 verification
 
@@ -116,6 +161,9 @@ None.
 | Downgrade → re-upgrade | PASS |
 | Model/migration drift (`alembic check`) | PASS |
 | Constraints reject bad rows | PASS — duplicate hash, bad hash format, quarantine without reason, lower-case currency, double-consumed ledger entry, unpaired tolerance currency |
+| **Over-precise money rejected, not rounded** | PASS — `1.23456`, `-1.23456`, `0.00005` all raise `ck_*_precision` |
+| **Valid money persists exactly** | PASS — `1.2345`, `-1.2345`, `100`, `0`, `1.2300`, `1.230000`, both magnitude boundaries |
+| **No monetary column carries a fixed-scale typmod** | PASS — regression guard against reintroducing silent rounding |
 | `Decimal("0.1234")` round-trips exactly | PASS |
 | `created_at` populated by the database, timezone-aware | PASS |
 | `git diff --check` | PASS |

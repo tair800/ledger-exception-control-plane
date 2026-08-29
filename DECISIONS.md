@@ -379,26 +379,65 @@ Documented in the README so the ports are not surprising.
 
 ---
 
-## ADR-020 — Money is `NUMERIC(20, 4)`, never floating point
+## ADR-020 — Money is unconstrained `NUMERIC` with a rejecting check, not `NUMERIC(20, 4)`
 
-**Status:** Accepted (M1.1)
+**Status:** Accepted (M1.1) · **Superseded the original fixed-typmod decision on 2026-08-29,
+after empirical testing disproved its central assumption**
 
-**Decision.** Every monetary column is `NUMERIC(20, 4)` mapped to Python `Decimal` with
-`asdecimal=True`. Every amount is paired with an explicit currency column under a both-or-neither
-check constraint. A test asserts no `Float` column exists anywhere in the metadata — not merely on
-the known money columns — so a future column cannot introduce one silently.
+**The defect.** The first version of this ADR specified `NUMERIC(20, 4)` and asserted that it
+satisfied the project's "no silent rounding at persistence boundaries" rule. **It does not.** A
+fixed-scale typmod does not reject an over-precise value — it rounds it, before any check
+constraint can observe the original. Measured on PostgreSQL 16 against the shipped schema:
 
-**Rationale for scale 4, not 2.** JPY has zero minor digits, most currencies two, and BHD/KWD/TND
-three; intermediate fee-split and FX values commonly need a fourth. Persisting at scale 2 would round
-at the storage boundary, silently, which is precisely the class of error this project exists to
-prevent. Precision 20 leaves ample headroom for aggregate values.
+```
+submitted : Decimal('1.23456')      (5 fractional digits)
+INSERT    : ACCEPTED — no error, no warning
+read back : Decimal('1.2346')       silently rounded, difference -0.00004
+```
 
-**Consequences.** Quantisation and rounding mode remain an *application* concern (NFR-3); the database
-guarantees exactness of storage, not of arithmetic. Amounts are signed — refunds, chargeback reversals
-and fee deductions are legitimately negative — so no sign constraint is imposed.
+The application had no way to know the value had changed. That is exactly the failure the rule
+exists to prevent, and the original ADR asserted the opposite without testing it.
 
-**Open.** Whether a `Money` value object wrapping amount and currency is worth introducing when M2
-begins computing with these values. Not needed for a schema.
+**Decision.** Monetary columns are **unconstrained `NUMERIC`** — no precision, no scale — so the
+original decimal reaches the database unchanged, guarded by a check constraint per column:
+
+```sql
+CHECK (trunc(amount, 4) = amount AND abs(amount) < 10000000000000000)
+```
+
+**Why `trunc`, not `scale`.** `scale()` is representation-based: `scale(1.230000)` is 6, so a
+scale-based rule rejects a value numerically identical to `1.2300` that loses nothing when
+stored. `trunc(v, 4) = v` is value-based and rejects exactly the values that would lose
+information. Verified: `1.230000` passes under `trunc`, fails under `scale`.
+
+**Magnitude.** `abs(v) < 10^16` preserves the integer range `NUMERIC(20, 4)` allowed — 20 total
+digits with scale 4 gives 16 integer digits, maximum `9999999999999999.9999`. The literal parses
+as `bigint`→`numeric`, never as a float.
+
+**NULL.** A bare `CHECK` evaluates to `NULL`, not `FALSE`, so the nullable `tolerance_applied`
+needs no guard clause. Verified.
+
+**Verified end to end through asyncpg**, not merely in SQL — the driver does not round
+client-side, so the constraint genuinely fires:
+
+| Value | Result |
+|---|---|
+| `1.2345`, `-1.2345`, `100`, `0`, `1.2300`, `1.230000` | accepted, stored exactly |
+| `9999999999999999.9999`, `-9999999999999999.9999` | accepted, stored exactly |
+| `1.23456`, `-1.23456`, `0.00005` | **rejected** by `ck_*_precision` |
+| `10000000000000000`, `-10000000000000000` | **rejected** by `ck_*_precision` |
+
+**Consequences.** Over-precise input now fails loudly at the write instead of corrupting the
+value. Callers must quantize *explicitly* before persisting — an audited, deliberate rounding
+earlier in the pipeline is permitted; a silent one at the boundary is not. Scale 4 remains the
+limit, for the reasons in the original ADR (JPY 0, most currencies 2, BHD/KWD/TND 3, plus a
+fourth for intermediate fee-split and FX values). Amounts stay signed.
+
+**A note on process.** This defect shipped in commit `70a8888` because the original ADR reasoned
+about `NUMERIC(20,4)` rather than testing it. The correction was found only when the behaviour was
+actually exercised. Two regression guards now exist — one on the model metadata, one querying
+`information_schema` — because a future migration could reintroduce a typmod without touching the
+models.
 
 ---
 

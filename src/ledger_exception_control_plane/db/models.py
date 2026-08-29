@@ -38,6 +38,8 @@ from ledger_exception_control_plane.db.base import (
     currency_format_constraint,
     currency_pairing_constraint,
     money_column,
+    money_magnitude_constraint,
+    money_scale_constraint,
     uuid_pk,
 )
 
@@ -176,6 +178,10 @@ class SettlementLine(Base):
         ),
         CheckConstraint("line_number > 0", name="line_number_positive"),
         currency_format_constraint("currency", "currency_format"),
+        # Reject an over-precise amount instead of letting storage round it. Split in two
+        # so a rejection names its cause: asyncpg reports the constraint, not the column.
+        money_scale_constraint("amount", "amount_scale"),
+        money_magnitude_constraint("amount", "amount_magnitude"),
         CheckConstraint(
             f"match_state IN ({', '.join(repr(s.value) for s in MatchState)})",
             name="match_state_valid",
@@ -219,6 +225,8 @@ class LedgerEntry(Base):
     __table_args__ = (
         UniqueConstraint("external_ref", name="uq_ledger_entry_external_ref"),
         currency_format_constraint("currency", "currency_format"),
+        money_scale_constraint("amount", "amount_scale"),
+        money_magnitude_constraint("amount", "amount_magnitude"),
         # The matcher looks up candidates by account and booking time. Justified now for the
         # same reason as the settlement-line index: it is M2's only read path into this table.
         Index("ix_ledger_entry_account_code_booked_at", "account_code", "booked_at"),
@@ -284,4 +292,7 @@ class MatchResult(Base):
             "tolerance_applied IS NULL OR tolerance_applied >= 0",
             name="tolerance_non_negative",
         ),
+        # NULL passes a bare CHECK, so the nullable tolerance needs no guard clause here.
+        money_scale_constraint("tolerance_applied", "tolerance_scale"),
+        money_magnitude_constraint("tolerance_applied", "tolerance_magnitude"),
     )

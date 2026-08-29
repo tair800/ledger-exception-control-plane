@@ -15,6 +15,8 @@ Run against the project's Compose PostgreSQL::
 
 from __future__ import annotations
 
+import decimal
+import hashlib
 import os
 import subprocess
 import uuid
@@ -370,3 +372,281 @@ async def test_created_at_is_populated_by_the_database() -> None:
     finally:
         await connection.execute("DELETE FROM settlement_batch WHERE content_hash = $1", digest)
         await connection.close()
+
+
+# --------------------------------------------------------------------------------------
+# No silent rounding at the persistence boundary
+#
+# The initial schema used NUMERIC(20, 4). Measured against it, Decimal("1.23456") was
+# stored as 1.2346 with no error and no warning — the application could not tell the value
+# had changed. These tests pin the corrected behaviour: reject, never round.
+# --------------------------------------------------------------------------------------
+
+
+async def _insert_amount(
+    connection: asyncpg.Connection, batch_id: uuid.UUID, line_number: int, amount: object
+) -> uuid.UUID:
+    line_id = uuid.uuid4()
+    await connection.execute(
+        """
+        INSERT INTO settlement_line
+            (id, settlement_batch_id, line_number, psp_reference,
+             amount, currency, value_date, match_state)
+        VALUES ($1, $2, $3, 'precision-probe', $4, 'EUR', current_date, 'unmatched')
+        """,
+        line_id,
+        batch_id,
+        line_number,
+        amount,
+    )
+    return line_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [
+        ("four decimal places", "1.2345"),
+        ("negative four places", "-1.2345"),
+        ("integer", "100"),
+        ("zero", "0"),
+        ("trailing zeros", "1.2300"),
+        ("more trailing zeros", "1.230000"),
+        ("maximum magnitude", "9999999999999999.9999"),
+        ("maximum negative magnitude", "-9999999999999999.9999"),
+    ],
+)
+async def test_valid_monetary_values_persist_exactly(label: str, value: str) -> None:
+    """Accepted values must round-trip exactly, not merely approximately.
+
+    ``1.230000`` is included deliberately: it is numerically identical to ``1.2300`` and
+    loses nothing when stored, so a ``scale()``-based rule that rejected it would be wrong.
+    """
+    expected = decimal.Decimal(value)
+    connection = await _connect()
+    digest = hashlib.sha256(f"ok:{label}".encode()).hexdigest()
+    try:
+        await connection.execute("DELETE FROM settlement_batch WHERE content_hash = $1", digest)
+        batch_id = await _insert_batch(connection, digest)
+        line_id = await _insert_amount(connection, batch_id, 1, expected)
+
+        stored = await connection.fetchval(
+            "SELECT amount FROM settlement_line WHERE id = $1", line_id
+        )
+        assert isinstance(stored, decimal.Decimal)
+        assert stored == expected, f"{label}: {expected} came back as {stored}"
+    finally:
+        await connection.execute("DELETE FROM settlement_batch WHERE content_hash = $1", digest)
+        await connection.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [
+        ("five decimal places", "1.23456"),
+        ("negative five places", "-1.23456"),
+        ("tiny sub-scale value", "0.00005"),
+        ("one over maximum magnitude", "10000000000000000"),
+        ("one under minimum magnitude", "-10000000000000000"),
+    ],
+)
+async def test_excess_precision_or_magnitude_is_rejected_not_rounded(
+    label: str, value: str
+) -> None:
+    """The defect this correction exists for: the write must FAIL, not quietly succeed."""
+    connection = await _connect()
+    digest = hashlib.sha256(f"reject:{label}".encode()).hexdigest()
+    try:
+        await connection.execute("DELETE FROM settlement_batch WHERE content_hash = $1", digest)
+        batch_id = await _insert_batch(connection, digest)
+
+        with pytest.raises(asyncpg.CheckViolationError) as error:
+            await _insert_amount(connection, batch_id, 1, decimal.Decimal(value))
+
+        name = error.value.constraint_name or ""
+        assert name.endswith(("_scale", "_magnitude")), (
+            f"{label} was rejected, but by the wrong constraint: {name}"
+        )
+    finally:
+        await connection.execute("DELETE FROM settlement_batch WHERE content_hash = $1", digest)
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_no_monetary_column_carries_a_fixed_scale_typmod() -> None:
+    """**Regression guard, at the database.**
+
+    A fixed-scale ``NUMERIC(p, s)`` rounds before any check constraint can see the value.
+    This fails if a future migration reintroduces one — which the metadata test alone could
+    not catch, because a migration can change the database without changing the models.
+    """
+    connection = await _connect()
+    try:
+        rows = await connection.fetch(
+            """
+            SELECT table_name, column_name, numeric_precision, numeric_scale
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND column_name IN ('amount', 'tolerance_applied')
+            """
+        )
+    finally:
+        await connection.close()
+
+    assert rows, "no monetary columns found — the query is wrong, not the schema"
+    offenders = [
+        f"{r['table_name']}.{r['column_name']} is "
+        f"NUMERIC({r['numeric_precision']},{r['numeric_scale']})"
+        for r in rows
+        if r["numeric_scale"] is not None
+    ]
+    assert not offenders, f"fixed-scale monetary columns silently round: {offenders}"
+
+
+@pytest.mark.asyncio
+async def test_nullable_tolerance_still_obeys_pairing_and_precision_rules() -> None:
+    """The correction must not weaken the existing nullable-tolerance rules."""
+    connection = await _connect()
+    digest = hashlib.sha256(b"tolerance-precision").hexdigest()
+    external_ref = f"entry-{uuid.uuid4()}"
+    try:
+        await connection.execute("DELETE FROM settlement_batch WHERE content_hash = $1", digest)
+        batch_id = await _insert_batch(connection, digest)
+        entry_id = uuid.uuid4()
+        line_id = uuid.uuid4()
+        await connection.execute(
+            """
+            INSERT INTO ledger_entry (id, external_ref, account_code, amount, currency, booked_at)
+            VALUES ($1, $2, 'acct', 10.0000, 'EUR', now())
+            """,
+            entry_id,
+            external_ref,
+        )
+        await connection.execute(
+            """
+            INSERT INTO settlement_line
+                (id, settlement_batch_id, line_number, psp_reference,
+                 amount, currency, value_date, match_state)
+            VALUES ($1, $2, 1, 'psp', 10.0000, 'EUR', current_date, 'unmatched')
+            """,
+            line_id,
+            batch_id,
+        )
+
+        # A NULL tolerance still passes the precision check — a bare CHECK yields NULL, not
+        # FALSE — and still satisfies the currency pairing rule.
+        match_id = uuid.uuid4()
+        await connection.execute(
+            """
+            INSERT INTO match_result (id, settlement_line_id, ledger_entry_id, rule_id, matched_at)
+            VALUES ($1, $2, $3, 'exact', now())
+            """,
+            match_id,
+            line_id,
+            entry_id,
+        )
+        assert (
+            await connection.fetchval(
+                "SELECT tolerance_applied FROM match_result WHERE id = $1", match_id
+            )
+            is None
+        )
+
+        # An over-precise tolerance is rejected like any other monetary value.
+        await connection.execute("DELETE FROM match_result WHERE id = $1", match_id)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await connection.execute(
+                """
+                INSERT INTO match_result
+                    (id, settlement_line_id, ledger_entry_id, rule_id,
+                     tolerance_applied, tolerance_currency, matched_at)
+                VALUES ($1, $2, $3, 'tolerance', $4, 'EUR', now())
+                """,
+                uuid.uuid4(),
+                line_id,
+                entry_id,
+                decimal.Decimal("0.00001"),
+            )
+    finally:
+        await connection.execute("DELETE FROM settlement_batch WHERE content_hash = $1", digest)
+        await connection.execute("DELETE FROM ledger_entry WHERE external_ref = $1", external_ref)
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_money_reads_back_canonicalised_regardless_of_written_scale() -> None:
+    """The same economic value must return one canonical ``Decimal``.
+
+    Dropping the fixed typmod also dropped a guarantee that was easy to overlook:
+    ``NUMERIC(20, 4)`` normalised every read to four places, so ``1.23`` and ``1.230000``
+    came back identical. Unconstrained ``NUMERIC`` preserves the writer's scale, so without
+    the ``Money`` type decorator the same amount would surface as two different ``Decimal``
+    objects — differently hashed and differently serialised. ADR-004b derives ``operation_id``
+    from a hash covering the amount, so a representation-dependent value would silently
+    defeat idempotency.
+    """
+    import datetime as dt
+
+    import sqlalchemy as sa
+    from pydantic import SecretStr
+
+    from ledger_exception_control_plane.config import Settings
+    from ledger_exception_control_plane.db.engine import create_engine
+    from ledger_exception_control_plane.db.models import SettlementBatch, SettlementLine
+
+    engine = create_engine(Settings(postgres_dsn=SecretStr(DSN)))
+    digest = hashlib.sha256(b"canonicalisation").hexdigest()
+    written = [decimal.Decimal("1.23"), decimal.Decimal("1.2300"), decimal.Decimal("1.230000")]
+    batch_id = uuid.uuid4()
+
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                sa.delete(SettlementBatch).where(SettlementBatch.content_hash == digest)
+            )
+            await connection.execute(
+                sa.insert(SettlementBatch).values(
+                    id=batch_id,
+                    content_hash=digest,
+                    source="canonical",
+                    raw_payload=b"x",
+                    received_at=dt.datetime.now(dt.UTC),
+                    status="received",
+                )
+            )
+            for number, value in enumerate(written, start=1):
+                await connection.execute(
+                    sa.insert(SettlementLine).values(
+                        id=uuid.uuid4(),
+                        settlement_batch_id=batch_id,
+                        line_number=number,
+                        psp_reference="canonical",
+                        amount=value,
+                        currency="EUR",
+                        value_date=dt.date.today(),
+                        match_state="unmatched",
+                    )
+                )
+
+        async with engine.connect() as connection:
+            result = await connection.execute(
+                sa.select(SettlementLine.amount)
+                .where(SettlementLine.settlement_batch_id == batch_id)
+                .order_by(SettlementLine.line_number)
+            )
+            returned = [row[0] for row in result.all()]
+
+        assert all(isinstance(v, decimal.Decimal) for v in returned)
+        # Identical exponents, not merely equal values: str() must agree.
+        rendered = {str(v) for v in returned}
+        assert rendered == {"1.2300"}, (
+            f"the same value came back in different representations: {rendered}. "
+            f"Written as {[str(w) for w in written]}."
+        )
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(
+                sa.delete(SettlementBatch).where(SettlementBatch.content_hash == digest)
+            )
+        await engine.dispose()
