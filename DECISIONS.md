@@ -299,6 +299,86 @@ comparisons; only genuine surprises count. **Do not fabricate this entry.**
 
 ---
 
+## ADR-015 — Liveness and readiness are separate endpoints with different dependency coupling
+
+**Status:** Accepted (M0.2)
+
+**Decision.** `GET /healthz` is liveness and probes nothing external. `GET /readyz` is readiness and
+probes PostgreSQL and Redis concurrently, read-only, under a bounded per-dependency timeout, returning
+`503` with per-dependency status when either is unavailable. The container healthcheck in Compose uses
+**liveness only**.
+
+**Rationale.** An orchestrator restarts a container that fails liveness. A liveness probe coupled to
+the database therefore converts a brief database outage into a restart storm that removes the capacity
+needed to recover. Readiness is the correct place to express "do not send me work right now".
+
+**Consequences.** Neither endpoint returns a DSN, credential, host or stack trace — a readiness
+endpoint is reachable by anyone who can reach the service.
+
+---
+
+## ADR-016 — Dependency probes run concurrently, not sequentially
+
+**Status:** Accepted (M0.2) · **Found by real-stack measurement, not by design review**
+
+**Context.** The first implementation awaited each probe in turn. Measured against the running stack
+with PostgreSQL stopped, `/readyz` answered in **3.07 s** — the sum of the per-dependency timeouts,
+not the maximum. Bounded, but the bound grows with every dependency added.
+
+**Decision.** Probe concurrently with `asyncio.gather`, so readiness is bounded by the slowest single
+probe and the worst case stays flat as the dependency list grows.
+
+**Consequences.** Re-measured at roughly 2.4 s, though samples ranged 2.36–3.43 s on Docker Desktop
+for Windows, so the design property is the claim here, not a precise speedup.
+
+---
+
+## ADR-017 — The application emits its own request log line
+
+**Status:** Accepted (M0.2) · **Found by inspecting real container logs**
+
+**Context.** Uvicorn's access log is written *after* the correlation middleware unbinds the context
+variable, so every access line carried `correlation_id: null` — useless exactly where a correlation id
+is most wanted.
+
+**Decision.** Emit a structured `http request` line from inside the middleware, carrying method, path,
+status and duration, while the id is still bound. Uvicorn's access logger is set to `WARNING` so
+requests are not logged twice.
+
+**Consequences.** Metadata only; request and response bodies are never logged.
+
+---
+
+## ADR-018 — `configure_logging` replaces only its own handler
+
+**Status:** Accepted (M0.2) · **Found by a test that was passing vacuously**
+
+**Context.** The first implementation cleared *all* root handlers. That removed pytest's `caplog`
+handler, which made a secret-leak test assert over an empty record list — it passed without ever
+inspecting real log output.
+
+**Decision.** Tag the handler this function installs and remove only handlers carrying that tag.
+
+**Consequences.** Repeated calls still do not stack duplicate output, but an embedding application's
+logging — and the test harness's — survives.
+
+---
+
+## ADR-019 — Compose publishes non-default host ports
+
+**Status:** Accepted (M0.2) · Narrow and reversible
+
+**Context.** Port 5432 was already bound on the development machine by a locally installed PostgreSQL.
+
+**Decision.** Publish `127.0.0.1:15432` for PostgreSQL and `127.0.0.1:16379` for Redis. The
+application is unaffected: inside the Compose network it reaches dependencies by service name on their
+standard ports. The host mapping exists only for attaching a local client.
+
+**Consequences.** No collision with a locally installed PostgreSQL or Redis, which is a common setup.
+Documented in the README so the ports are not surprising.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.

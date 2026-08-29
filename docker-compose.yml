@@ -1,0 +1,80 @@
+# Local development stack. Three services, no third-party account required (NFR-7).
+#
+# CREDENTIALS: every value below is a development-only placeholder, scoped to this stack.
+# The database binds to localhost, holds no real data, and is recreated by `make down-volumes`.
+# Nothing here is a production secret, and no deployed environment may reuse these values —
+# deployment supplies its own configuration through LECP_* environment variables.
+
+name: lecp
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lecp
+      POSTGRES_PASSWORD: lecp_local_dev # dev-only placeholder; see the note above
+      POSTGRES_DB: lecp
+    ports:
+      # Host port is deliberately NOT 5432. A locally installed PostgreSQL on the default
+      # port is common, and colliding with it would make `docker compose up` fail on a
+      # developer machine for no good reason. The app never uses this mapping — inside the
+      # Compose network it reaches the service as `postgres:5432` — so this is purely a
+      # convenience for connecting a local client. Bound to localhost only.
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lecp -d lecp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      # Off the default port for the same reason as PostgreSQL above, and for symmetry.
+      - "127.0.0.1:16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      LECP_ENVIRONMENT: local
+      LECP_LOG_LEVEL: INFO
+      # Service names, not localhost: inside the Compose network the app reaches its
+      # dependencies by service name.
+      LECP_POSTGRES_DSN: postgresql://lecp:lecp_local_dev@postgres:5432/lecp
+      LECP_REDIS_DSN: redis://redis:6379/0
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Liveness only. Readiness deliberately is NOT the container healthcheck: a dependency
+      # outage must not make the orchestrator restart a process that is working correctly.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status==200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres_data:

@@ -57,3 +57,31 @@ jobs:
 
       - name: Run tests with coverage
         run: uv run pytest
+
+  container:
+    name: Build container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Deliberately narrow. This job builds the image and stops — it does NOT start the
+    # Compose stack. Every health, readiness, timeout, correlation-id and secret-containment
+    # behaviour is already proven deterministically with fakes in the `quality` job, so
+    # running Docker Compose in CI would add minutes and flakiness to prove nothing new.
+    # What a build-only job does catch, and unit tests cannot, is Dockerfile rot: a broken
+    # base image, a lockfile the container cannot install, or a bad COPY path. That is worth
+    # roughly a minute. The Compose stack is verified locally via `make up && make smoke`.
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

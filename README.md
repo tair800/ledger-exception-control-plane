@@ -4,15 +4,22 @@ PSP settlement files against the general ledger. Deterministic matching clears t
 proposes a treatment from a closed enum whose type has no numeric field. A chaos suite proves no
 double-post against a RED baseline that does.
 
-> ## Status: planning
+> ## Status: milestone M0.2 of 31
 >
-> **No application code exists yet.** This repository currently contains planning documents only:
-> [`PROJECT_SPEC.md`](PROJECT_SPEC.md), [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) and
-> [`DECISIONS.md`](DECISIONS.md).
+> **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
+> liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
+> correlation-id propagation, the tooling baseline and a green CI gate.
 >
-> Nothing described below is implemented. Everything is a specification of intended behaviour.
-> No measurement in this repository is a result — the `Measured` table is an obligation the build
-> must produce from a committed script, and it will not appear here until it does.
+> **What does not exist:** everything the rest of this document describes. There is no settlement
+> ingestion, no matching, no exception model, no treatment proposal, no LLM integration, no ledger
+> adapter, no idempotency or outbox, no DLQ, no audit events and no chaos suite. The architecture
+> below is a *specification of intended behaviour*, not a description of working software.
+>
+> No measurement here is a result — the `Measured` table is an obligation the build must produce
+> from a committed script, and it will not appear until it does.
+>
+> [`PROJECT_STATUS.md`](PROJECT_STATUS.md) tracks exactly what is built;
+> [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) lists all 31 increments.
 
 ---
 
@@ -189,9 +196,61 @@ The full gate, in the order CI runs it:
 uv sync --frozen && uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pytest
 ```
 
-**Current state:** the tooling baseline and CI gate exist and pass. There is no application code yet —
-the package contains a version and nothing else, and the tests verify the packaging baseline rather
-than any behaviour. See [`PROJECT_STATUS.md`](PROJECT_STATUS.md) for exactly what is and is not built.
+### Local stack
+
+```bash
+make up            # build + start postgres, redis and the app; waits for health
+make ps            # status
+make logs          # tail structured application logs
+make smoke         # integration tests against the running stack
+make down          # stop and remove this project's containers
+make down-volumes  # also delete its data volume
+```
+
+The stack binds to localhost only, on **non-default host ports** (`15432` for PostgreSQL, `16379`
+for Redis, `8000` for the app) so it does not collide with a locally installed PostgreSQL or Redis.
+The application never uses those mappings — inside the Compose network it reaches its dependencies
+by service name — so they exist purely for attaching a local client.
+
+Credentials in `docker-compose.yml` are **development-only placeholders** scoped to this stack. No
+deployed environment may reuse them; deployment supplies its own values via `LECP_*` variables.
+
+### Health endpoints
+
+| Endpoint | Meaning | Depends on PostgreSQL/Redis? |
+|---|---|---|
+| `GET /healthz` | **Liveness** — the process is alive and serving | **No, deliberately** |
+| `GET /readyz` | **Readiness** — dependencies are reachable, so work can be accepted | Yes |
+
+They are separate on purpose. An orchestrator restarts a container that fails liveness, so a liveness
+probe coupled to the database would turn a brief outage into a restart storm. `/readyz` returns `503`
+with per-dependency status when either dependency is unavailable, probes them concurrently under a
+bounded timeout, never mutates them, and returns no DSN, credential or stack trace.
+
+### Configuration
+
+Environment-driven and typed (`pydantic-settings`), prefixed `LECP_`. Connection strings are held as
+`SecretStr`, so they render as `**********` in logs, reprs and validation errors; reading the real
+value requires an explicit `.get_secret_value()`. Unknown variables and invalid values fail at
+startup rather than at the first request. See [`.env.example`](.env.example); `.env` is git-ignored.
+
+### Correlation ids
+
+Every response carries `X-Request-ID`. An inbound value is trusted only if it matches
+`[A-Za-z0-9_-]{1,128}`; anything else — oversized, whitespace, newline, control characters — is
+replaced with a generated id rather than rejected, so a header can never become a log-injection
+payload. The id is bound for the request and appears on every application log line, including the
+per-request line carrying method, path, status and duration. Bodies are never logged.
+
+Logs are line-delimited JSON with a stable field set: `timestamp`, `level`, `event`, `logger`,
+`service`, `environment`, `correlation_id`, plus any `extra` nested under `context` so application
+data cannot overwrite a stable field.
+
+**Current state:** the local stack, health endpoints, typed configuration and structured logging
+exist and are verified. **There is still no business functionality** — no settlement ingestion, no
+reconciliation, no financial calculation, no treatment proposals, no ledger adapter, no idempotency
+or outbox, no audit events. See [`PROJECT_STATUS.md`](PROJECT_STATUS.md) for exactly what is and is
+not built, and [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for what each later increment adds.
 
 ## Documents
 

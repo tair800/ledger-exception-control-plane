@@ -6,10 +6,25 @@ requires-python = "==3.12.*"
 readme = "README.md"
 license = { file = "LICENSE" }
 
-# No runtime dependencies at M0.1. This is deliberate, not an oversight: the milestone
-# establishes tooling only. Runtime dependencies are added by the increment that first
-# needs them, never in advance.
-dependencies = []
+# Runtime dependencies are added by the increment that first needs them, never in advance.
+# Every entry below is required by M0.2 (local stack, health endpoints, structured logging):
+#   fastapi           — the application shell and the /healthz and /readyz endpoints
+#   uvicorn[standard] — the ASGI server the container actually runs
+#   pydantic-settings — typed, environment-driven configuration; Pydantic v2 is already the
+#                       approved convention for boundary schemas (NFR-2)
+#   asyncpg           — direct async PostgreSQL client used *only* for the readiness probe.
+#                       Deliberately not SQLAlchemy/Alembic: this milestone has no schema, and
+#                       an ORM would be future foundation built early.
+#   redis             — official client, async PING for the readiness probe only
+# Versions are exact-pinned, matching the dev group, so the lockfile is the single source of
+# truth and an upgrade is always a deliberate, reviewable change.
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.52.4",
+    "pydantic-settings==2.15.0",
+    "asyncpg==0.31.0",
+    "redis==8.1.0",
+]
 
 [dependency-groups]
 dev = [
@@ -17,6 +32,11 @@ dev = [
     "mypy==1.18.2",
     "pytest==8.4.2",
     "pytest-cov==7.0.0",
+    # httpx        — required by Starlette's TestClient
+    # pytest-asyncio — to exercise the async health probes directly, including timeout bounds
+    "httpx==0.28.1",
+    "pytest-asyncio==1.4.0",
+    "asyncpg-stubs>=0.31.3",
 ]
 
 [build-system]
@@ -83,7 +103,15 @@ addopts = [
     "--cov=ledger_exception_control_plane",
     "--cov-report=term-missing",
     "--cov-fail-under=90",
+    # Integration tests need the real Compose stack and are excluded from the default run,
+    # so `uv run pytest` stays deterministic and Docker-free. Run them with `-m integration`.
+    "-m", "not integration",
 ]
+markers = [
+    "integration: requires the local Docker Compose stack (postgres + redis) to be running",
+]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
 branch = true
