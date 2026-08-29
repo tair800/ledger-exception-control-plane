@@ -170,6 +170,29 @@ Note the phrasing throughout: *effectively-once effect*, never "exactly-once" �
 where the capability table permits it. The mechanism is a retry-independent operation identifier, a
 unique constraint, a transactional outbox, and an adapter contract that can say "I don't know".
 
+## Development
+
+Python 3.12, managed with [uv](https://docs.astral.sh/uv/). The interpreter version is declared in
+`.python-version` and read from there by both local tooling and CI, so the two cannot drift.
+
+```bash
+uv sync                          # install exactly what uv.lock pins
+uv run ruff format --check .     # formatting
+uv run ruff check .              # lint
+uv run mypy                      # strict type check
+uv run pytest                    # tests + coverage (gate: 90%)
+```
+
+The full gate, in the order CI runs it:
+
+```bash
+uv sync --frozen && uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pytest
+```
+
+**Current state:** the tooling baseline and CI gate exist and pass. There is no application code yet —
+the package contains a version and nothing else, and the tests verify the packaging baseline rather
+than any behaviour. See [`PROJECT_STATUS.md`](PROJECT_STATUS.md) for exactly what is and is not built.
+
 ## Documents
 
 | File | Purpose |
@@ -177,8 +200,9 @@ unique constraint, a transactional outbox, and an adapter contract that can say 
 | [`PROJECT_SPEC.md`](PROJECT_SPEC.md) | Implementation-grade specification and acceptance criteria |
 | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | Ordered milestones, tests, exit criteria, commit boundaries |
 | [`DECISIONS.md`](DECISIONS.md) | ADR-style decision log, including what is still open |
+| [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | Current milestone, verified results, next tasks |
 | [`CLAUDE.md`](CLAUDE.md) | Engineering rules that bind work in this repository |
 
 ## Licence
 
-To be added at M0.
+MIT — see [`LICENSE`](LICENSE).

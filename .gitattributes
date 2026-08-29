@@ -14,6 +14,13 @@ Makefile        text eol=lf
 .gitattributes  text eol=lf
 .gitignore      text eol=lf
 
+# Extensionless files that tooling reads. Without an explicit rule these fall through to
+# `* text=auto`, and on a machine with core.autocrlf=true they check out as CRLF —
+# which matters for .python-version, since uv parses it.
+LICENSE         text eol=lf
+.python-version text eol=lf
+py.typed        text eol=lf
+
 # --- Must be CRLF: interpreted by Windows shells ---
 *.bat           text eol=crlf
 *.cmd           text eol=crlf

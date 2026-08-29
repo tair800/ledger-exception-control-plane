@@ -1,0 +1,104 @@
+[project]
+name = "ledger-exception-control-plane"
+version = "0.1.0"
+description = "Finance-ops control plane turning unmatched settlement lines into approved, once-only ledger adjustments."
+requires-python = "==3.12.*"
+readme = "README.md"
+license = { file = "LICENSE" }
+
+# No runtime dependencies at M0.1. This is deliberate, not an oversight: the milestone
+# establishes tooling only. Runtime dependencies are added by the increment that first
+# needs them, never in advance.
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ruff==0.14.5",
+    "mypy==1.18.2",
+    "pytest==8.4.2",
+    "pytest-cov==7.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ledger_exception_control_plane"]
+
+# ----------------------------------------------------------------------------------
+# Ruff owns both linting and formatting. One tool, two responsibilities it implements
+# natively — deliberately avoiding a black + ruff pairing, which duplicates formatting.
+# ----------------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # import sorting
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "PTH",  # prefer pathlib
+    "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use assert freely; that is the point of them.
+"tests/**" = ["S101"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# ----------------------------------------------------------------------------------
+# mypy, strict. NFR-1 requires the codebase to be mypy-clean in CI.
+# ----------------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+warn_unreachable = true
+warn_no_return = true
+show_error_codes = true
+pretty = true
+
+# ----------------------------------------------------------------------------------
+# pytest + coverage
+# ----------------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=ledger_exception_control_plane",
+    "--cov-report=term-missing",
+    "--cov-fail-under=90",
+]
+
+[tool.coverage.run]
+branch = true
+# The source is declared once, here, via --cov in addopts. Declaring it again with
+# source_pkgs made coverage start a second, competing measurement of an already-imported
+# module and emit a `module-not-measured` warning on every run.
+
+[tool.coverage.paths]
+# The package is installed into the venv while the checkout holds it under src/.
+# Without this mapping the two are treated as different files.
+source = ["src/", "*/site-packages/"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]

@@ -167,8 +167,31 @@ repositories stay independent, with no shared library and no submodules.
 
 ## Key commands
 
-Not yet implemented — this section is filled in at M0 as tooling lands. Placeholder so the file has
-one obvious home for them.
+Dependency management is **uv**. The interpreter version lives in `.python-version` and nowhere else,
+so local and CI cannot drift.
+
+```bash
+uv sync                          # install exactly what uv.lock pins (creates .venv)
+uv sync --frozen                 # fail if uv.lock is stale — what CI runs
+uv run ruff format .             # format
+uv run ruff format --check .     # formatting gate
+uv run ruff check .              # lint
+uv run ruff check --fix .        # lint with autofix
+uv run mypy                      # strict type check
+uv run pytest                    # tests + coverage (gate: 90%)
+```
+
+The full local gate, in the order CI runs it:
+
+```bash
+uv sync --frozen && uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pytest
+```
+
+**Never claim a milestone is complete without running that line and seeing it pass.**
+
+Adding a dependency: `uv add <pkg>` for runtime, `uv add --dev <pkg>` for tooling. Both update
+`uv.lock`, which is committed. CI runs `--frozen`, so a dependency change that skipped the lockfile
+cannot reach `main`.
 
 ---
 

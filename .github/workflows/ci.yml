@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A second push to the same branch cancels the first; CI on superseded commits is wasted.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only by default. This workflow publishes nothing and needs no write access.
+permissions:
+  contents: read
+
+env:
+  # Fail the build rather than silently resolving something the lockfile does not pin.
+  UV_FROZEN: "1"
+
+jobs:
+  quality:
+    name: Lint, type check and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.15"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        # The version is read from .python-version, so the interpreter is declared in
+        # exactly one place and CI cannot drift from local development.
+        run: uv python install
+
+      - name: Install dependencies from the lockfile
+        # --frozen fails if uv.lock is out of date with pyproject.toml, so a dependency
+        # change that skipped the lockfile cannot reach main.
+        run: uv sync --frozen
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Type check (strict)
+        run: uv run mypy
+
+      - name: Run tests with coverage
+        run: uv run pytest
