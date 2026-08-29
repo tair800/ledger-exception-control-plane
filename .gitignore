@@ -1,0 +1,58 @@
+# --- Secrets: never commit ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# --- Node / frontend ---
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# --- Local data and infrastructure state ---
+pgdata/
+redisdata/
+*.sqlite3
+*.db
+docker-compose.override.yml
+
+# --- Measurement and evaluation outputs (regenerated, never hand-edited) ---
+# Committed inputs live in evals/golden/ and tests/cassettes/ and are NOT ignored.
+scripts/measure/out/
+evals/results/
+.langfuse/
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Transient ---
+*.tmp
+*.log
+logs/

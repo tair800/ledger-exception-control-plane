@@ -1,0 +1,69 @@
+# Cross-platform line-ending policy (Windows authoring, Linux/CI execution).
+# Normalize all detected text to LF in the repository; check out platform-native.
+* text=auto
+
+# --- Must be LF: executed by shells, containers and CI runners ---
+*.sh            text eol=lf
+*.bash          text eol=lf
+Dockerfile      text eol=lf
+*.dockerfile    text eol=lf
+.dockerignore   text eol=lf
+Makefile        text eol=lf
+*.mk            text eol=lf
+*.env.example   text eol=lf
+.gitattributes  text eol=lf
+.gitignore      text eol=lf
+
+# --- Must be CRLF: interpreted by Windows shells ---
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+*.ps1           text eol=crlf
+
+# --- Source and config: LF for consistency across OS and CI ---
+*.py            text eol=lf diff=python
+*.pyi           text eol=lf diff=python
+*.ts            text eol=lf
+*.tsx           text eol=lf
+*.js            text eol=lf
+*.jsx           text eol=lf
+*.json          text eol=lf
+*.jsonl         text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.toml          text eol=lf
+*.ini           text eol=lf
+*.cfg           text eol=lf
+*.sql           text eol=lf
+*.css           text eol=lf
+*.html          text eol=lf diff=html
+*.md            text eol=lf diff=markdown
+*.txt           text eol=lf
+*.csv           text eol=lf
+
+# --- Binary: never diff, never normalize ---
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.webp          binary
+*.ico           binary
+*.svg           binary
+*.pdf           binary
+*.zip           binary
+*.gz            binary
+*.woff          binary
+*.woff2         binary
+*.db            binary
+*.sqlite3       binary
+*.pyc           binary
+*.mp4           binary
+
+# --- Lockfiles: text, but suppress diff noise in review ---
+package-lock.json   text eol=lf -diff linguist-generated
+pnpm-lock.yaml      text eol=lf -diff linguist-generated
+poetry.lock         text eol=lf -diff linguist-generated
+uv.lock             text eol=lf -diff linguist-generated
+
+# --- Evaluation fixtures: text, kept out of diff noise, not counted as source ---
+evals/golden/**     text eol=lf linguist-generated
+tests/cassettes/**  text eol=lf linguist-generated
