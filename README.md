@@ -4,19 +4,21 @@ PSP settlement files against the general ledger. Deterministic matching clears t
 proposes a treatment from a closed enum whose type has no numeric field. A chaos suite proves no
 double-post against a RED baseline that does.
 
-> ## Status: milestone M1.1 of 31
+> ## Status: milestone M1.2 of 31
 >
 > **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
 > liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
-> correlation-id propagation, the tooling baseline, a green CI gate — and, as of M1.1, the **core
-> reconciliation database schema with Alembic migrations**.
+> correlation-id propagation, the tooling baseline, a green CI gate, and — as of M1.2 — the
+> **complete database schema**: the core reconciliation tables plus the exception, resolution and
+> reliability tables, with Alembic migrations.
 >
 > **What does not exist:** everything the rest of this document describes as behaviour. The schema
-> has tables; nothing writes to them. There is no settlement parsing, no normalisation, no matching,
-> no tolerance arithmetic, no exception model, no treatment proposal, no LLM integration, no ledger
-> adapter, no idempotency execution, no outbox, no DLQ, no audit events and no chaos suite. The
-> architecture below is a *specification of intended behaviour*, not a description of working
-> software.
+> has tables; **nothing writes to them.** There is no settlement parsing, no normalisation, no
+> matching, no tolerance arithmetic, no exception creation, no treatment proposal, no LLM
+> integration, no ledger adapter, no idempotency execution, no dispatcher, no retry, no DLQ replay,
+> no recovery workflow, no audit emission and no chaos suite. An `outbox` table is not a
+> transactional outbox; a `posting_attempt` table is not a write-ahead protocol. The architecture
+> below is a *specification of intended behaviour*, not a description of working software.
 >
 > No measurement here is a result — the `Measured` table is an obligation the build must produce
 > from a committed script, and it will not appear until it does.
@@ -234,7 +236,7 @@ Alembic reads its database URL from the application's `Settings`, not from `alem
 connection string is committed and migrations cannot run against an environment the application
 itself is not configured for.
 
-**Tables at M1.1** — the core reconciliation domain, four tables:
+**Tables at M1.2** — fifteen. The core reconciliation domain:
 
 | Table | Purpose |
 |---|---|
@@ -242,6 +244,52 @@ itself is not configured for.
 | `settlement_line` | One normalised line within a batch, with explicit currency |
 | `ledger_entry` | A general-ledger row available for matching |
 | `match_result` | A line matched to an entry, with the rule and any tolerance applied |
+
+…and the decision path and the machinery that is meant to make it safe:
+
+| Table | Purpose |
+|---|---|
+| `exception` | A residual line needing a decision — one per line, classified, correlated |
+| `evidence` | An addressable evidence record attached to an exception |
+| `treatment_proposal` | Model output. **No numeric column of any kind** — see below |
+| `treatment_proposal_evidence` | Which evidence a proposal cited, as a checked relation |
+| `approval` | The human decision, versioned so a superseded resolution is a different operation |
+| `adjustment` | The computed amount, with a **unique `operation_id`** |
+| `outbox` | Dispatch intent, its attempt count and its last outcome |
+| `posting_attempt` | Write-ahead record of one attempt: sent-at, `in_flight` or resolved |
+| `dlq` | An exhausted dispatch and the envelope needed to replay it |
+| `recovery_queue` | An ambiguous outcome awaiting reconciliation or an operator decision |
+| `audit_event` | Append-only, contract v1 |
+
+Six properties are enforced by the database rather than described in prose, because each is a claim
+the project makes, and a claim asserted only in application code is a claim on trust:
+
+- **The model cannot carry money.** `treatment_proposal` has no `NUMERIC`, no `INTEGER`, no numeric
+  column at all — confidence is a closed band, not a score — and no amount-like column name. A test
+  walks the table and fails on either. The response-schema guard arrives with the provider port
+  in 3.2; this is the persistence half of the same rule.
+- **An ambiguous outcome cannot be filed as a finished one.** `unknown`, `throttled` and
+  `partially_applied` are all representable, and a check constraint forbids any of them — or a
+  missing outcome — on an outbox row marked `settled`.
+- **An attempt record cannot half-exist.** `(state = 'resolved') = (outcome IS NOT NULL AND
+  resolved_at IS NOT NULL)`, so an attempt is either "sent, nothing known" or fully resolved.
+- **`audit_event` is append-only**, enforced by a trigger that refuses `UPDATE`, `DELETE` and
+  `TRUNCATE` from *any* role including the table owner. The insert-only grant to the least-privilege
+  application role is defence in depth, not the primary control: a grant does not constrain the
+  owner, and the owner is the identity a migration or a maintenance script runs as.
+- **An adjustment cannot be authorised by a rejection.** `adjustment` references
+  `(approval.id, approved_treatment, principal)`, not just `approval.id`. A plain foreign key proves
+  an approval *exists*; it does not prove the approval said yes. A rejection carries
+  `approved_treatment IS NULL` and the referencing column is `NOT NULL`, so the bad row is
+  unreachable rather than merely discouraged. An `escalate` treatment cannot be posted either —
+  escalation is what happens when no amount can be computed.
+- **The segregation-of-duties check compares against a verified principal.** The approver's identity
+  reaches `recovery_queue` through composite foreign keys from `approval` via `adjustment`, so it
+  cannot be invented by whichever code path writes the recovery item. The same idiom binds a
+  `posting_attempt` to its adjustment's `operation_id`.
+
+No monetary value may hide in JSONB either — a check constraint rejects amount-like top-level keys
+in the dead-letter envelope, which would otherwise bypass every money rule below.
 
 **Money.** Every monetary column is an *unconstrained* `NUMERIC` mapped to Python `Decimal` —
 deliberately **not** `NUMERIC(20, 4)`. A fixed-scale typmod does not reject an over-precise value, it

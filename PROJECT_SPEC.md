@@ -251,6 +251,7 @@ Indicative, not final; settled at M1.
 | `approval` | Decision, principal, timestamp, edited treatment if any |
 | `adjustment` | Computed amount, currency, account, period, `operation_id`, posting reference |
 | `outbox` | Pending dispatch intent, attempt count, next-attempt-at, last outcome (`CONFIRMED`/`REJECTED`/`UNKNOWN`) |
+| `posting_attempt` | Write-ahead record of one dispatch attempt: `operation_id`, attempt number, sent-at, `IN_FLIGHT`/resolved, outcome (§12.1.1) |
 | `dlq` | Failed envelope, reason, attempts, replay state |
 | `recovery_queue` | `UNKNOWN` outcomes awaiting reconciliation or an operator decision (§13.5) |
 | `audit_event` | Append-only, contract v1 (§11) |
@@ -260,7 +261,10 @@ Constraints that carry the guarantee:
 - `adjustment.operation_id` — **unique** (§12.1, retry-independent).
 - `exception` claim via `SELECT … FOR UPDATE SKIP LOCKED`.
 - `settlement_batch.content_hash` — unique, so re-delivery is a no-op.
-- `audit_event` — insert-only; no `UPDATE`/`DELETE` grant in the application role.
+- `posting_attempt` — unique `(adjustment_id, attempt_no)`, committed **before** the socket write (§12.1.1).
+- `audit_event` — append-only. Enforced by a trigger that refuses `UPDATE`, `DELETE` and `TRUNCATE`
+  from **any** role including the table owner; the insert-only application grant is defence in depth
+  rather than the primary control, because a grant does not constrain the owner (ADR-026).
 
 ## 10. API direction
 

@@ -46,8 +46,14 @@ class Settings(BaseSettings):
     # Development-only placeholder credentials. They are scoped to the local Compose stack,
     # which binds to localhost and holds no real data. Any deployed environment must supply
     # its own values through the environment; nothing here is a production secret.
-    postgres_dsn: SecretStr = SecretStr("postgresql://lecp:lecp_local_dev@localhost:5432/lecp")
-    redis_dsn: SecretStr = SecretStr("redis://localhost:6379/0")
+    #
+    # The ports are the stack's published host ports (15432 / 16379), NOT the service
+    # defaults. This matters: a developer machine very often runs its own PostgreSQL on 5432,
+    # and a default pointing there means an unconfigured `alembic upgrade head` runs DDL
+    # against an unrelated database that happens to accept the credentials. The default must
+    # be wrong-but-harmless (connection refused), never right-for-the-wrong-database.
+    postgres_dsn: SecretStr = SecretStr("postgresql://lecp:lecp_local_dev@localhost:15432/lecp")
+    redis_dsn: SecretStr = SecretStr("redis://localhost:16379/0")
 
     #: Upper bound on each individual readiness probe. Readiness must answer promptly even
     #: when a dependency is hanging rather than refusing connections — an unbounded probe

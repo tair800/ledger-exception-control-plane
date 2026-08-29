@@ -516,6 +516,197 @@ cannot accumulate.
 
 ---
 
+## ADR-025 — `evidence_refs` is a relation, not a `UUID[]` column
+
+**Status:** Accepted (M1.2)
+
+`PROJECT_SPEC.md` §6.1 requires a treatment proposal to record the evidence it cited. Two ways to
+store that: a `UUID[]` column on `treatment_proposal`, or an association table.
+
+**Decision.** An association table, `treatment_proposal_evidence`.
+
+The array keeps the table count at exactly the ten the implementation plan names, and that was the
+argument for it. It was rejected anyway: PostgreSQL cannot enforce a foreign key from an array
+element, so a proposal could cite an evidence id that does not exist, or that was later removed. A
+provenance record pointing at nothing is worse than no provenance record, because it reads as
+evidence during an audit. This project's standing rule is to prefer a database-enforced invariant
+wherever the database can express one cleanly, and here it can.
+
+**This is a realisation of a specified field, not a new business entity.** It has no columns of its
+own beyond the two foreign keys, its primary key is the pair, and a metadata test pins that shape so
+it cannot quietly grow into something else. The eleventh table is bookkeeping, not scope.
+
+---
+
+## ADR-026 — `audit_event` immutability is a trigger; the grant is defence in depth
+
+**Status:** Accepted (M1.2)
+
+`IMPLEMENTATION_PLAN.md` §1.2 specifies an "insert-only grant" and a test that the application role
+cannot `UPDATE` or `DELETE` `audit_event`. Both are delivered — and a second, stronger control was
+added, because the grant alone does not hold.
+
+**Decision.** Two independent controls.
+
+1. **A trigger** (`audit_event_append_only_row`, `audit_event_append_only_truncate`) raising on
+   `UPDATE`, `DELETE` and `TRUNCATE`. This is the primary control.
+2. **An insert-only grant** to a least-privilege `lecp_app` role. Defence in depth.
+
+The trigger is primary because a grant protects only the roles someone remembered to restrict, and it
+does not constrain the table owner at all — and the owner is precisely the identity a migration, a
+maintenance script or a `psql` session runs as. A grant-based control is therefore strongest against
+the application, which is the actor least likely to be the problem, and absent against the operator,
+who is most likely to be.
+
+`TRUNCATE` needs its own statement-level trigger: it bypasses row-level triggers entirely, so an
+append-only table that permits it is not append-only.
+
+**Stated limit, not glossed over.** The table owner can drop the trigger. This stops accidental and
+application-level mutation; it does not stop a determined privileged operator, and nothing inside one
+database can. Detecting that would need audit logging outside this database, which is not in scope
+here.
+
+**The role is provisioned by a script, not a migration.** `scripts/sql/provision_app_role.sql`. A role
+is a cluster-level object while a migration operates on one database, so role DDL in a migration is
+wrong in both directions: it leaks outside the database being migrated, and it fails on a managed
+platform where the migrating identity cannot create roles. Release order is migrate, then provision —
+and that order matters, because `GRANT ... ON ALL TABLES` applies to the tables existing when it runs.
+The schema suite runs the real script and then uses `SET LOCAL ROLE`, so the grant is tested without a
+credential for the role existing anywhere.
+
+---
+
+## ADR-027 — Ambiguity is representable but not settleable
+
+**Status:** Accepted (M1.2)
+
+**Decision.** `outbox` and `posting_attempt` can both hold an ambiguous result, and a check constraint
+forbids an ambiguous outbox row from being marked `settled`:
+
+```sql
+state <> 'settled' OR last_outcome IN ('confirmed', 'rejected')
+```
+
+Two failure modes, opposite in direction, and the schema has to block both. If `UNKNOWN` were not
+storable, the code would be forced to write something false the moment a timeout occurred. If it were
+storable *and* settleable, `UNKNOWN` would quietly become "done" the first time someone wrote a state
+machine that treated a resolved attempt as a finished one. `throttled` and `partially_applied` are
+excluded from the settled set for the same reason.
+
+`posting_attempt` carries the matching rule in the other direction:
+`(state = 'resolved') = (outcome IS NOT NULL AND resolved_at IS NOT NULL)` — an attempt is
+`in_flight` with nothing known, or resolved with both recorded, and never half of either. That is what
+makes the write-ahead record §12.1.1 requires actually usable as recovery evidence: a row that says a
+send happened and nothing came back is exactly the `UNKNOWN` case, and it is distinguishable from a
+crash before the send only because `sent_at` is `NOT NULL`.
+
+---
+
+## ADR-028 — Segregation of duties is enforced by a verified principal, not a copied one
+
+**Status:** Accepted (M1.2). **Superseded in part by its own correction — see below.**
+
+§13.5 requires that the principal resolving an `UNKNOWN` is not the principal who approved it. A check
+constraint cannot reference another table, so enforcing this in the database needs the approver's
+identity on the `recovery_queue` row itself.
+
+**First decision, and it was half right.** Carry `approving_principal` on the recovery item and
+constrain `resolved_by <> approving_principal`. The reasoning recorded at the time was that the
+alternative is an application-level check, and *"a segregation-of-duties control that depends on
+application discipline is not a control — it is a convention that holds until someone writes a second
+code path."*
+
+**An adversarial review then pointed that sentence back at the decision itself, correctly.** If the
+application supplies `approving_principal`, the discipline has been *relocated* from the comparison to
+the copy, not removed. A second code path writing `approving_principal = 'system'` leaves the check
+comparing the resolver against a value nobody approved: `'alice' <> 'system'` is true, every constraint
+passes, and Alice resolves her own `UNKNOWN` while the audit record looks clean. The original ADR
+presented a false dichotomy — denormalised copy versus application check — and never considered the
+third option.
+
+**Corrected decision.** The value is carried *and verified*, by a chain of composite foreign keys:
+
+| Key | Effect |
+|---|---|
+| `approval UNIQUE (id, approved_treatment, principal)` | Gives the chain something to reference |
+| `adjustment (approval_id, approved_treatment, approving_principal) → approval` | The approver is copied from the approval and checked against it |
+| `adjustment UNIQUE (id, approving_principal)` | Gives the next hop something to reference |
+| `recovery_queue (adjustment_id, approving_principal) → adjustment` | The recovery item cannot name anyone else |
+
+`approving_principal` is still denormalised — that cost is real and still accepted, and freezing it is
+still correct, because the question is who approved *this* operation at the time rather than who holds
+the role today. What changed is that it is no longer *trusted*. The check constraint is unchanged; it
+now compares against a value the database has verified rather than one the writer asserted.
+
+**The lesson worth keeping.** The original reasoning was sound and the conclusion did not follow from
+it. That is not a careless error — it is the ordinary failure mode of checking your own work by reading
+it, and it is the reason the increment was reviewed adversarially before commit rather than after.
+
+---
+
+## ADR-030 — An adjustment is bound to what its approval actually authorised
+
+**Status:** Accepted (M1.2)
+
+FR-7 and `CLAUDE.md` rule 3 require a recorded human decision before any ledger write. The schema
+originally expressed that as a plain foreign key, `adjustment.approval_id → approval.id`.
+
+**That proves an approval row exists. It does not prove the approval said yes.** The database accepted
+a fully formed, dispatchable adjustment — with an `operation_id`, eligible for an outbox row — whose
+sole authority was a *rejection*. Two independent review lenses found it. The audit trail would have
+answered "who approved this?" by pointing at someone who declined.
+
+**Decision.** Reference the authorisation itself, not just the approval's identity:
+
+```
+adjustment (approval_id, approved_treatment, approving_principal)
+    → approval (id, approved_treatment, principal)
+```
+
+`approval.approved_treatment` is NULL precisely when the decision was a rejection — that is already
+enforced by `ck_approval_approved_treatment_iff_authorising`. The referencing columns are NOT NULL, so
+a rejection has no value that could ever match. The bad row is not discouraged; it is unreachable.
+
+Both referencing columns must be NOT NULL for this to work at all. PostgreSQL's default `MATCH SIMPLE`
+skips the entire check if *any* referencing column is NULL, so a nullable `approved_treatment` would
+have produced a foreign key that silently enforced nothing.
+
+**Two further constraints from the same idiom:**
+
+- `CHECK (approved_treatment <> 'escalate')` — §6.2 escalates precisely when a case *cannot* be priced
+  deterministically, so an adjustment for an escalated treatment is a computed amount for the case
+  that was referred because no amount could be computed.
+- `posting_attempt (adjustment_id, operation_id) → adjustment (id, operation_id)` — the attempt record
+  duplicates `operation_id` deliberately, so that it is self-contained evidence after a crash. Verified
+  rather than copied, because recovery reads that row to decide whether an irreversible financial write
+  may be repeated. An attempt naming a different operation than its adjustment would be well-formed and
+  wrong, which is the worst thing evidence can be.
+
+The redundant-looking unique constraints (`approval (id, …)`, `adjustment (id, …)`) exist only because
+a foreign key must reference a uniquely-constrained column list. They add index maintenance cost on
+tables that are written once per decision, which is the cheapest possible place to pay it.
+
+---
+
+## ADR-029 — Default DSNs point at the stack's published ports, not the service defaults
+
+**Status:** Accepted (M1.2)
+
+**Decision.** `Settings.postgres_dsn` defaults to port `15432` and `redis_dsn` to `16379` — the ports
+Compose publishes (ADR-019) — rather than `5432` and `6379`.
+
+Found while running migrations during M1.2. The default pointed at `localhost:5432`, so an
+unconfigured `alembic upgrade head` targeted whatever PostgreSQL happened to be on the default port —
+on this machine, a developer's own unrelated instance. It failed on authentication, which is luck, not
+design: had that instance held a matching role and password, the migration would have created fifteen
+tables in someone else's database and reported success.
+
+An unconfigured default must be **wrong-but-harmless** — connection refused — never
+right-for-the-wrong-database. Nothing else changes: the container and CI both set `LECP_POSTGRES_DSN`
+explicitly, so this affects only an unconfigured local run, which is exactly the case that was unsafe.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.

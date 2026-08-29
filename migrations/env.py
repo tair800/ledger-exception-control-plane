@@ -22,6 +22,7 @@ from ledger_exception_control_plane.db.engine import async_dsn, create_engine
 
 # Importing the models registers every table on ``Base.metadata``. Without this,
 # autogenerate would see an empty model set and cheerfully propose dropping every table.
+import ledger_exception_control_plane.db.control  # isort:skip
 import ledger_exception_control_plane.db.models  # noqa: F401  isort:skip
 
 config = context.config
