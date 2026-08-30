@@ -258,6 +258,7 @@ def generate(
                         line_number=number,
                         psp_reference=item.line.psp_reference,
                         merchant_reference=item.line.merchant_reference,
+                        transaction_type=item.line.transaction_type,
                         amount=item.line.amount,
                         currency=item.line.currency.code,
                         value_date=item.line.value_date,

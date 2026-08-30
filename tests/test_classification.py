@@ -28,6 +28,7 @@ from ledger_exception_control_plane.classification import (
     RULE_PRECEDENCE,
     RULES,
     ClassificationRule,
+    MovementType,
     SettlementMovement,
     accounting_period,
     classify,
@@ -46,6 +47,12 @@ CLASSIFICATION_ROOT: Final = (
 ORDER: Final = "ORD-2026-000001"
 NAMESPACE: Final = uuid.UUID("2f6f6b7a-0000-4000-8000-000000000000")
 
+CAPTURE = MovementType.CAPTURE
+FEE = MovementType.FEE
+REFUND = MovementType.REFUND
+CHARGEBACK = MovementType.CHARGEBACK
+CB_REVERSAL = MovementType.CHARGEBACK_REVERSAL
+
 JUNE = dt.date(2026, 6, 15)
 JULY = dt.date(2026, 7, 3)
 
@@ -53,16 +60,23 @@ JULY = dt.date(2026, 7, 3)
 def movement(
     label: str,
     amount: str,
+    kind: MovementType | None,
     *,
     matched: bool = False,
     reference: str | None = ORDER,
     currency: str = "EUR",
     value_date: dt.date = JUNE,
 ) -> SettlementMovement:
-    """One settlement line, addressed by a readable label so failures name the row."""
+    """One settlement line, addressed by a readable label so failures name the row.
+
+    ``kind`` is positional and has no default on purpose. Every rule now turns on the declared
+    movement type, so a test that forgot to state one would be exercising a case the classifier
+    treats as evidence-free — which is exactly the case a default would hide.
+    """
     return SettlementMovement(
         id=uuid.uuid5(NAMESPACE, label),
         merchant_reference=reference,
+        movement=kind,
         amount=decimal.Decimal(amount),
         currency=currency,
         value_date=value_date,
@@ -86,10 +100,54 @@ def outcome(
 
 def test_a_credit_reversing_a_booked_debit_is_a_chargeback_reversal() -> None:
     """The positive case. The ledger carries the chargeback; nothing carries its reversal."""
-    reversal = movement("cb-reversal", "326.92")
-    assert outcome(reversal, movement("cb", "-326.92", matched=True)) == (
+    reversal = movement("cb-reversal", "326.92", CB_REVERSAL)
+    assert outcome(reversal, movement("cb", "-326.92", CHARGEBACK, matched=True)) == (
         ExceptionClassification.CHARGEBACK_REVERSAL,
-        ClassificationRule.REVERSAL_OF_BOOKED_DEBIT,
+        ClassificationRule.REVERSAL_OF_BOOKED_CHARGEBACK,
+    )
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [MovementType.REFUND, MovementType.ADJUSTMENT, MovementType.CAPTURE, MovementType.FEE, None],
+)
+def test_a_credit_that_is_not_a_declared_chargeback_reversal_is_never_classified_as_one(
+    declared: MovementType | None,
+) -> None:
+    """The correction, stated as directly as it can be stated.
+
+    Every case here is a credit that exactly reverses a chargeback the ledger has already booked —
+    identical to the real thing in sign, amount, currency, date and counterpart. Only the declared
+    movement type differs, and none of them says ``chargeback_reversal``.
+
+    The old rule read direction alone and called all of these chargeback reversals. A refund
+    reversal is not a chargeback reversal; an operational correction is not either; and ``None`` —
+    a type this system does not recognise, or a row that predates the column — is not evidence of
+    anything. The safe answer is the fallback, and coverage is not a reason to prefer any other.
+    """
+    credit = movement("credit", "326.92", declared)
+    booked = movement("cb", "-326.92", CHARGEBACK, matched=True)
+
+    classification, rule = outcome(credit, booked)
+    assert classification is not ExceptionClassification.CHARGEBACK_REVERSAL
+    assert classification is ExceptionClassification.UNCLASSIFIED
+    assert rule is ClassificationRule.NO_RULE_MATCHED
+
+
+def test_a_declared_chargeback_reversal_needs_a_declared_chargeback_to_reverse() -> None:
+    """The other half: the declaration on this row is not enough on its own.
+
+    The booked counterpart here is a ``capture``, so there is no chargeback for this credit to
+    reverse whatever the PSP called it. Evidence has to agree with itself — a declared type nobody
+    corroborates is a claim, not a fact — and this is what stops the fix from being "trust the type
+    field", which would be a different single point of failure rather than none.
+    """
+    credit = movement("credit", "326.92", CB_REVERSAL)
+    booked_capture = movement("capture", "-326.92", CAPTURE, matched=True)
+
+    assert outcome(credit, booked_capture) == (
+        ExceptionClassification.UNCLASSIFIED,
+        ClassificationRule.NO_RULE_MATCHED,
     )
 
 
@@ -101,17 +159,18 @@ def test_a_credit_whose_counterpart_the_ledger_never_booked_is_not_a_reversal() 
     ignored ``matched`` would call this a chargeback reversal and be wrong about which of two
     unreconciled rows the ledger holds.
     """
-    reversal = movement("cb-reversal", "326.92")
-    classification, rule = outcome(reversal, movement("cb", "-326.92", matched=False))
+    reversal = movement("cb-reversal", "326.92", CB_REVERSAL)
+    classification, rule = outcome(reversal, movement("cb", "-326.92", CHARGEBACK, matched=False))
     assert classification is ExceptionClassification.UNCLASSIFIED
     assert rule is ClassificationRule.NO_RULE_MATCHED
 
 
 def test_a_credit_reversing_a_different_amount_is_not_a_reversal() -> None:
     """Exact equality, not a band. One cent apart is not a reversal of that movement."""
-    assert outcome(movement("credit", "326.92"), movement("debit", "-326.91", matched=True))[0] is (
-        ExceptionClassification.UNCLASSIFIED
-    )
+    assert outcome(
+        movement("credit", "326.92", CB_REVERSAL),
+        movement("debit", "-326.91", CHARGEBACK, matched=True),
+    )[0] is (ExceptionClassification.UNCLASSIFIED)
 
 
 def test_a_credit_with_two_booked_offsets_refuses_rather_than_choosing() -> None:
@@ -119,9 +178,9 @@ def test_a_credit_with_two_booked_offsets_refuses_rather_than_choosing() -> None
     and nothing says which one it reverses — so the classifier declines, the same way the matcher
     declines a line with two candidate entries."""
     classification, rule = outcome(
-        movement("credit", "50.00"),
-        movement("debit-a", "-50.00", matched=True),
-        movement("debit-b", "-50.00", matched=True),
+        movement("credit", "50.00", CB_REVERSAL),
+        movement("debit-a", "-50.00", CHARGEBACK, matched=True),
+        movement("debit-b", "-50.00", CHARGEBACK, matched=True),
     )
     assert classification is ExceptionClassification.UNCLASSIFIED
     assert rule is ClassificationRule.NO_RULE_MATCHED
@@ -132,8 +191,8 @@ def test_a_counterpart_on_a_different_order_is_not_related() -> None:
     another order explains nothing about this credit."""
     assert (
         outcome(
-            movement("credit", "50.00"),
-            movement("debit", "-50.00", matched=True, reference="ORD-2026-999999"),
+            movement("credit", "50.00", CB_REVERSAL),
+            movement("debit", "-50.00", CHARGEBACK, matched=True, reference="ORD-2026-999999"),
         )[0]
         is ExceptionClassification.UNCLASSIFIED
     )
@@ -144,7 +203,8 @@ def test_a_counterpart_in_another_currency_is_not_related() -> None:
     offset each other — they are incomparable, not merely unequal."""
     assert (
         outcome(
-            movement("credit", "50.00"), movement("debit", "-50.00", matched=True, currency="USD")
+            movement("credit", "50.00", CB_REVERSAL),
+            movement("debit", "-50.00", CHARGEBACK, matched=True, currency="USD"),
         )[0]
         is ExceptionClassification.UNCLASSIFIED
     )
@@ -156,10 +216,12 @@ def test_a_counterpart_in_another_currency_is_not_related() -> None:
 
 
 def test_a_refund_settling_in_a_later_period_is_a_cross_period_refund() -> None:
-    refund = movement("refund", "-540.86", value_date=JULY)
-    assert outcome(refund, movement("capture", "540.86", matched=True, value_date=JUNE)) == (
+    refund = movement("refund", "-540.86", REFUND, value_date=JULY)
+    assert outcome(
+        refund, movement("capture", "540.86", CAPTURE, matched=True, value_date=JUNE)
+    ) == (
         ExceptionClassification.CROSS_PERIOD_REFUND,
-        ClassificationRule.REVERSAL_OF_BOOKED_CREDIT_ACROSS_PERIODS,
+        ClassificationRule.REFUND_OF_BOOKED_CAPTURE_ACROSS_PERIODS,
     )
 
 
@@ -170,9 +232,9 @@ def test_a_refund_settling_in_its_own_period_falls_to_the_fallback() -> None:
     taxonomy has no class for it. Borrowing ``cross_period_refund`` would make the class name a lie
     on every such row, so the line is unclassified and an analyst decides.
     """
-    refund = movement("refund", "-540.86", value_date=dt.date(2026, 6, 28))
+    refund = movement("refund", "-540.86", REFUND, value_date=dt.date(2026, 6, 28))
     classification, rule = outcome(
-        refund, movement("capture", "540.86", matched=True, value_date=JUNE)
+        refund, movement("capture", "540.86", CAPTURE, matched=True, value_date=JUNE)
     )
     assert classification is ExceptionClassification.UNCLASSIFIED
     assert rule is ClassificationRule.NO_RULE_MATCHED
@@ -192,9 +254,9 @@ def test_an_in_period_refund_is_not_relabelled_by_the_group_rule() -> None:
     means the line is a reversal question, and a reversal question the system cannot answer is
     ``unclassified``.
     """
-    booked = movement("capture", "200.00", matched=True, value_date=dt.date(2026, 6, 5))
-    refund = movement("refund", "-200.00", value_date=dt.date(2026, 6, 20))
-    unrelated = movement("second-capture", "250.00", value_date=dt.date(2026, 6, 22))
+    booked = movement("capture", "200.00", CAPTURE, matched=True, value_date=dt.date(2026, 6, 5))
+    refund = movement("refund", "-200.00", REFUND, value_date=dt.date(2026, 6, 20))
+    unrelated = movement("second-capture", "250.00", CAPTURE, value_date=dt.date(2026, 6, 22))
 
     assert outcome(refund, booked, refund, unrelated) == (
         ExceptionClassification.UNCLASSIFIED,
@@ -211,10 +273,10 @@ def test_ambiguous_reversal_evidence_does_not_fall_through_to_the_group_rule() -
     reversal rules decline. Before the fix, the group rule then settled the line anyway — resolving
     an ambiguity by weakening the rule that detected it.
     """
-    subject = movement("credit", "50.00")
-    first = movement("debit-a", "-50.00", matched=True)
-    second = movement("debit-b", "-50.00", matched=True)
-    fee = movement("fee", "-1.00")
+    subject = movement("credit", "50.00", CB_REVERSAL)
+    first = movement("debit-a", "-50.00", CHARGEBACK, matched=True)
+    second = movement("debit-b", "-50.00", CHARGEBACK, matched=True)
+    fee = movement("fee", "-1.00", FEE)
 
     assert outcome(subject, subject, first, second, fee) == (
         ExceptionClassification.UNCLASSIFIED,
@@ -228,8 +290,8 @@ def test_a_fee_split_is_unaffected_by_the_reversal_block() -> None:
     None of a genuine fee split's rows offsets anything the ledger booked, so all three still
     classify. Without this, the two tests above would pass against a rule that never fires.
     """
-    gross = movement("gross", "1244.71")
-    fee = movement("fee", "-7.94")
+    gross = movement("gross", "1244.71", CAPTURE)
+    fee = movement("fee", "-7.94", FEE)
     assert outcome(gross, gross, fee)[0] is ExceptionClassification.FEE_SPLIT
     assert outcome(fee, gross, fee)[0] is ExceptionClassification.FEE_SPLIT
 
@@ -264,22 +326,22 @@ def test_the_period_is_read_from_the_business_date_and_never_from_a_clock() -> N
 def test_a_capture_reported_with_its_fees_is_a_fee_split() -> None:
     """Every row of the split is classified, not just the capture: all three are residual, all
     three belong to the same condition, and each needs its own decision."""
-    gross = movement("gross", "1244.71")
-    scheme = movement("scheme-fee", "-2.13")
-    processing = movement("processing-fee", "-7.94")
+    gross = movement("gross", "1244.71", CAPTURE)
+    scheme = movement("scheme-fee", "-2.13", FEE)
+    processing = movement("processing-fee", "-7.94", FEE)
 
     for subject in (gross, scheme, processing):
         assert outcome(subject, gross, scheme, processing) == (
             ExceptionClassification.FEE_SPLIT,
-            ClassificationRule.DEDUCTIONS_SPLIT_ACROSS_ROWS,
+            ClassificationRule.FEES_DEDUCTED_FROM_A_CAPTURE,
         )
 
 
 def test_rows_of_one_sign_are_not_a_split() -> None:
     """Two captures on one order — the repeated-reference case — carry no deduction, so there is
     nothing split. Without this the rule would fire on any order with more than one row."""
-    first = movement("dup-1", "948.24")
-    second = movement("dup-2", "964.43")
+    first = movement("dup-1", "948.24", CAPTURE)
+    second = movement("dup-2", "964.43", CAPTURE)
     assert outcome(first, first, second)[0] is ExceptionClassification.UNCLASSIFIED
 
 
@@ -290,24 +352,24 @@ def test_a_deduction_that_equals_the_inflow_is_an_offset_not_a_split() -> None:
     same *shape* as a capture with a fee, and a completely different condition. A fee comes out of
     a capture and so must be strictly smaller than it; an equal deduction is a reversal.
     """
-    debit = movement("cb", "-500.00")
-    credit = movement("cb-reversal", "500.00")
+    debit = movement("cb", "-500.00", CHARGEBACK)
+    credit = movement("cb-reversal", "500.00", CB_REVERSAL)
     assert outcome(credit, debit, credit)[0] is ExceptionClassification.UNCLASSIFIED
     assert outcome(debit, debit, credit)[0] is ExceptionClassification.UNCLASSIFIED
 
 
 def test_deductions_exceeding_the_inflow_are_not_a_split() -> None:
     """A deduction larger than what it is deducted from is not a fee, whatever it is."""
-    capture = movement("capture", "10.00")
-    huge = movement("adjustment", "-4000.00")
+    capture = movement("capture", "10.00", CAPTURE)
+    huge = movement("adjustment", "-4000.00", FEE)
     assert outcome(capture, capture, huge)[0] is ExceptionClassification.UNCLASSIFIED
 
 
 def test_a_reconciled_row_is_not_part_of_the_split() -> None:
     """The group is the *unreconciled* rows. A capture the ledger already booked is settled, and
     counting it would let a fee left over from a reconciled capture look like a live split."""
-    fee = movement("fee", "-2.13")
-    assert outcome(fee, movement("gross", "1244.71", matched=True), fee)[0] is (
+    fee = movement("fee", "-2.13", FEE)
+    assert outcome(fee, movement("gross", "1244.71", CAPTURE, matched=True), fee)[0] is (
         ExceptionClassification.UNCLASSIFIED
     )
 
@@ -321,7 +383,7 @@ def test_a_line_with_no_related_movements_is_unclassified() -> None:
     """The lone residual — a partial capture, an FX rounding difference, a near miss. Nothing in
     the settlement data relates it to anything, and the ledger entry that would explain it cannot
     be identified. The fallback is the correct answer, not a failure to reach one."""
-    classification, rule = outcome(movement("lonely", "2799.97"))
+    classification, rule = outcome(movement("lonely", "2799.97", CAPTURE))
     assert classification is ExceptionClassification.UNCLASSIFIED
     assert rule is ClassificationRule.NO_RULE_MATCHED
 
@@ -333,8 +395,8 @@ def test_lines_with_no_merchant_reference_are_never_related_to_each_other() -> N
     split on the strength of a value neither of them has. Manufacturing a relationship out of two
     nulls is the one thing a control system must never do with missing data.
     """
-    credit = movement("anon-credit", "500.00", reference=None)
-    debit = movement("anon-debit", "-2.00", reference=None)
+    credit = movement("anon-credit", "500.00", CAPTURE, reference=None)
+    debit = movement("anon-debit", "-2.00", FEE, reference=None)
     assert outcome(credit, credit, debit)[0] is ExceptionClassification.UNCLASSIFIED
     assert outcome(debit, credit, debit)[0] is ExceptionClassification.UNCLASSIFIED
 
@@ -342,15 +404,15 @@ def test_lines_with_no_merchant_reference_are_never_related_to_each_other() -> N
 def test_a_zero_amount_movement_has_no_direction_and_is_unclassified() -> None:
     """Every rule turns on direction, and zero has none. It falls through rather than being
     silently treated as a credit by a ``>= 0`` written where ``> 0`` was meant."""
-    assert outcome(movement("zero", "0.00"), movement("booked", "0.00", matched=True))[0] is (
-        ExceptionClassification.UNCLASSIFIED
-    )
+    assert outcome(
+        movement("zero", "0.00", CB_REVERSAL), movement("booked", "0.00", CHARGEBACK, matched=True)
+    )[0] is (ExceptionClassification.UNCLASSIFIED)
 
 
 def test_the_fallback_carries_a_rule_id_of_its_own() -> None:
     """``unclassified`` is a decision the system took, not an absence of one. A row recording it
     with no rule id would be indistinguishable from a row written before this classifier existed."""
-    _, rule = outcome(movement("lonely", "1.00"))
+    _, rule = outcome(movement("lonely", "1.00", CAPTURE))
     assert rule is ClassificationRule.NO_RULE_MATCHED
     assert RULE_CLASSIFICATION[rule] is ExceptionClassification.UNCLASSIFIED
 
@@ -371,16 +433,16 @@ def test_exact_offset_evidence_excludes_the_group_rule_entirely() -> None:
     Now the group rule declines whenever any booked offset exists, so a line the reversal family has
     a claim on is never available to it — whatever the family concludes.
     """
-    subject = movement("credit", "500.00")
-    booked = movement("booked-debit", "-500.00", matched=True)
-    stray_fee = movement("fee", "-1.50")
+    subject = movement("credit", "500.00", CB_REVERSAL)
+    booked = movement("booked-debit", "-500.00", CHARGEBACK, matched=True)
+    stray_fee = movement("fee", "-1.50", FEE)
     evidence = _evidence_for(subject, subject, booked, stray_fee)
 
-    assert RULES[ClassificationRule.REVERSAL_OF_BOOKED_DEBIT](evidence)
-    assert not RULES[ClassificationRule.DEDUCTIONS_SPLIT_ACROSS_ROWS](evidence)
+    assert RULES[ClassificationRule.REVERSAL_OF_BOOKED_CHARGEBACK](evidence)
+    assert not RULES[ClassificationRule.FEES_DEDUCTED_FROM_A_CAPTURE](evidence)
     assert outcome(subject, subject, booked, stray_fee) == (
         ExceptionClassification.CHARGEBACK_REVERSAL,
-        ClassificationRule.REVERSAL_OF_BOOKED_DEBIT,
+        ClassificationRule.REVERSAL_OF_BOOKED_CHARGEBACK,
     )
 
 
@@ -402,19 +464,20 @@ def test_no_two_rules_can_ever_fire_on_the_same_line() -> None:
         for offsets in booked_offsets:
             for same_period in (True, False):
                 for extra_fee in (True, False):
-                    subject = movement("subject", amount, value_date=JULY)
+                    subject = movement("subject", amount, CB_REVERSAL, value_date=JULY)
                     context = [subject]
                     for index in range(offsets):
                         context.append(
                             movement(
                                 f"offset-{index}",
                                 str(-decimal.Decimal(amount)),
+                                CHARGEBACK,
                                 matched=True,
                                 value_date=JULY if same_period else JUNE,
                             )
                         )
                     if extra_fee:
-                        context.append(movement("fee", "-1.00", value_date=JULY))
+                        context.append(movement("fee", "-1.00", FEE, value_date=JULY))
 
                     evidence = _evidence_for(subject, *context)
                     fired = [rule for rule, predicate in RULES.items() if predicate(evidence)]
@@ -471,11 +534,11 @@ def test_classification_does_not_depend_on_the_order_the_inputs_arrive_in() -> N
     would be a defect even when both answers looked reasonable.
     """
     rows = [
-        movement("gross", "1000.00"),
-        movement("fee", "-4.00"),
-        movement("booked-capture", "250.00", matched=True),
-        movement("refund", "-250.00", value_date=JULY),
-        movement("orphan", "77.00", reference=None),
+        movement("gross", "1000.00", CAPTURE),
+        movement("fee", "-4.00", FEE),
+        movement("booked-capture", "250.00", CAPTURE, matched=True),
+        movement("refund", "-250.00", REFUND, value_date=JULY),
+        movement("orphan", "77.00", CAPTURE, reference=None),
     ]
     expected = {d.line_id: (d.classification, d.rule_id) for d in classify(rows, rows)}
     assert len(expected) == len(rows)
@@ -489,7 +552,7 @@ def test_classification_does_not_depend_on_the_order_the_inputs_arrive_in() -> N
 
 def test_repeating_the_same_classification_gives_the_same_answer() -> None:
     """Stability across runs, with no clock, counter or random source able to move it."""
-    rows = [movement("gross", "80.00"), movement("fee", "-1.00")]
+    rows = [movement("gross", "80.00", CAPTURE), movement("fee", "-1.00", FEE)]
     first = classify(rows, rows)
     for _ in range(5):
         assert classify(rows, rows) == first
@@ -499,7 +562,7 @@ def test_a_caller_need_not_include_the_subjects_in_the_context() -> None:
     """The context is unioned with the subjects inside :func:`classify`, so forgetting to pass them
     cannot silently change an answer — a group of three rows classified with an empty context would
     otherwise look like three unrelated lines."""
-    rows = [movement("gross", "60.00"), movement("fee", "-2.00")]
+    rows = [movement("gross", "60.00", CAPTURE), movement("fee", "-2.00", FEE)]
     assert classify(rows, []) == classify(rows, rows) == classify(rows, rows + rows)
 
 
@@ -713,6 +776,7 @@ def test_the_classifier_sees_no_free_text_and_no_ledger_field() -> None:
     assert set(SettlementMovement.__dataclass_fields__) == {
         "id",
         "merchant_reference",
+        "movement",
         "amount",
         "currency",
         "value_date",

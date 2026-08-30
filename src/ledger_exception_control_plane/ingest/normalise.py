@@ -60,6 +60,7 @@ _CURRENCY: Final = re.compile(r"^[A-Z]{3}$")
 #: drift in either direction.
 MAX_PSP_REFERENCE: Final = 128
 MAX_MERCHANT_REFERENCE: Final = 128
+MAX_TRANSACTION_TYPE: Final = 64
 
 #: Characters a persisted text field may not contain.
 #:
@@ -80,11 +81,15 @@ _UNSTORABLE = re.compile(r"[\x00-\x1f\x7f]")
 class NormalisedLine:
     """One settlement movement, typed.
 
-    The first six fields are what ``settlement_line`` persists. The rest are declared by the file
-    format (ADR-031) and have no column at M1: they are carried here because FR-2 asks for a typed
-    representation of the *line*, not of the subset that happens to be stored, and they remain
-    available in the immutable raw payload for the increments that need them. Inventing columns
-    for them here would be adding schema this increment was not asked for.
+    The first seven fields are what ``settlement_line`` persists. ``transaction_type`` joined them
+    at M2.3, which is the increment that needed it: FR-4's taxonomy is a taxonomy of *movement
+    kinds*, and a classifier without the kind can only infer it from the sign of the amount — which
+    cannot tell a chargeback reversal from a fee reversal or a correction.
+
+    The rest are declared by the file format (ADR-031) and still have no column: they are carried
+    here because FR-2 asks for a typed representation of the *line*, not of the subset that happens
+    to be stored, and they remain available in the immutable raw payload for the increments that
+    need them.
     """
 
     line_number: int
@@ -93,8 +98,7 @@ class NormalisedLine:
     amount: decimal.Decimal
     currency: str
     value_date: dt.date
-
-    transaction_type: str
+    transaction_type: str | None
     presentment_amount: decimal.Decimal | None
     presentment_currency: str | None
     fx_rate: decimal.Decimal | None
@@ -173,6 +177,19 @@ def normalise(row: ParsedRow) -> tuple[NormalisedLine | None, tuple[Defect, ...]
         elif _UNSTORABLE.search(merchant_reference):
             defects.append(Defect(line, "merchant_reference", QuarantineCode.UNSTORABLE_CHARACTER))
 
+    # Validated only for *storability*, deliberately. The value set is not checked here: an
+    # unfamiliar movement type is a product this system has not met, not a malformed file, and
+    # ADR-040 condemns the whole batch for a defect. What must be checked is what the column can
+    # hold — the same NUL and length rules the references carry, for the same reason. Blank means
+    # the file stated nothing.
+    transaction_type: str | None = None
+    if not _absent(field["transaction_type"]):
+        transaction_type = field["transaction_type"]
+        if len(transaction_type) > MAX_TRANSACTION_TYPE:
+            defects.append(Defect(line, "transaction_type", QuarantineCode.FIELD_TOO_LONG))
+        elif _UNSTORABLE.search(transaction_type):
+            defects.append(Defect(line, "transaction_type", QuarantineCode.UNSTORABLE_CHARACTER))
+
     amount, defect = _money(field["amount"], line, "amount")
     if defect is not None:
         defects.append(defect)
@@ -209,7 +226,7 @@ def normalise(row: ParsedRow) -> tuple[NormalisedLine | None, tuple[Defect, ...]
             amount=amount,
             currency=currency,
             value_date=value_date,
-            transaction_type=field["transaction_type"],
+            transaction_type=transaction_type,
             presentment_amount=presentment_amount,
             presentment_currency=presentment_currency,
             fx_rate=fx_rate,

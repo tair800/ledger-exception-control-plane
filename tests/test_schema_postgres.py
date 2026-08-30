@@ -759,7 +759,7 @@ async def _build_chain(connection: asyncpg.Connection, seed: str = "chain") -> _
             (id, settlement_line_id, line_match_state, classification, status,
              rule_id, classifier_version, correlation_id)
         VALUES ($1, $2, 'unmatched', 'fee_split', 'open',
-                'deductions_split_across_rows', 'residual-r1', 'corr-1')
+                'fees_deducted_from_a_capture', 'residual-r2', 'corr-1')
         """,
         exception_id,
         line_id,
@@ -879,7 +879,7 @@ async def test_one_exception_per_settlement_line() -> None:
                         (id, settlement_line_id, line_match_state, classification, status,
                          rule_id, classifier_version, correlation_id)
                     VALUES ($1, $2, 'unmatched', 'fx_rounding', 'open',
-                            'no_rule_matched', 'residual-r1', 'corr-2')
+                            'no_rule_matched', 'residual-r2', 'corr-2')
                     """,
                     uuid.uuid4(),
                     chain.line,
@@ -1591,7 +1591,7 @@ async def _approval_only(
             (id, settlement_line_id, line_match_state, classification, status,
              rule_id, classifier_version, correlation_id)
         VALUES ($1, $2, 'unmatched', 'fee_split', 'open',
-                'deductions_split_across_rows', 'residual-r1', 'corr-1')
+                'fees_deducted_from_a_capture', 'residual-r2', 'corr-1')
         """,
         exception_id,
         line_id,

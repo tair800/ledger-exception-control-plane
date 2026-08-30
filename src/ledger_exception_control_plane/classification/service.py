@@ -48,7 +48,10 @@ from ledger_exception_control_plane.classification.engine import (
     SettlementMovement,
     classify,
 )
-from ledger_exception_control_plane.classification.taxonomy import CLASSIFIER_VERSION
+from ledger_exception_control_plane.classification.taxonomy import (
+    CLASSIFIER_VERSION,
+    movement_type,
+)
 from ledger_exception_control_plane.db.control import ExceptionRecord, ExceptionStatus
 from ledger_exception_control_plane.db.models import (
     BatchStatus,
@@ -195,6 +198,7 @@ async def _load_residuals(session: AsyncSession, batch_id: uuid.UUID | None) -> 
             SettlementLine.id,
             SettlementLine.line_number,
             SettlementLine.merchant_reference,
+            SettlementLine.transaction_type,
             SettlementLine.amount,
             SettlementLine.currency,
             SettlementLine.value_date,
@@ -221,6 +225,10 @@ async def _load_residuals(session: AsyncSession, batch_id: uuid.UUID | None) -> 
             movement=SettlementMovement(
                 id=row.id,
                 merchant_reference=row.merchant_reference,
+                # Reduced to the closed vocabulary here, at the boundary, so nothing downstream
+                # ever sees the raw string. An unrecognised type becomes None and no rule can fire
+                # on it — the classifier fails closed on a movement it does not understand.
+                movement=movement_type(row.transaction_type),
                 amount=row.amount,
                 currency=row.currency,
                 value_date=row.value_date,
@@ -258,6 +266,7 @@ async def _load_context(
         select(
             SettlementLine.id,
             SettlementLine.merchant_reference,
+            SettlementLine.transaction_type,
             SettlementLine.amount,
             SettlementLine.currency,
             SettlementLine.value_date,
@@ -274,6 +283,7 @@ async def _load_context(
         SettlementMovement(
             id=row.id,
             merchant_reference=row.merchant_reference,
+            movement=movement_type(row.transaction_type),
             amount=row.amount,
             currency=row.currency,
             value_date=row.value_date,

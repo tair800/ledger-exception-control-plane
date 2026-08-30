@@ -1311,8 +1311,10 @@ being true the moment the two increments had to coexist.
 
 ## ADR-045 — The exception taxonomy: three classes reachable, two declared and unassigned (resolves OPEN-3)
 
-**Status:** Accepted (M2.3). **Resolves OPEN-3**, which the plan required to be settled before this
-increment.
+**Status:** Accepted (M2.3), **amended by ADR-046**, which replaced this ADR's direction-based
+reversal evidence with the movement type the PSP declares. The taxonomy and the reachability
+analysis below still stand; the *evidence* each rule requires is stated in ADR-046.
+**Resolves OPEN-3**, which the plan required to be settled before this increment.
 
 OPEN-3 asked whether FR-4's six proposed classes survive contact with the corpus. The answer is that
 **four survive as decidable outcomes and two do not**, and the reason the two fail is structural
@@ -1370,12 +1372,11 @@ requires exactly one.
 *Fallback.* Two booked counterparts both offsetting exactly → `unclassified`. Ambiguity refuses
 rather than picks, the same discipline M2.2 applies to candidate entries.
 
-*Recorded limitation.* This does not prove the original debit was a **chargeback** rather than a fee
-reversal or a correction. The PSP declares a transaction type on every row and M2.1 normalises it,
-but `settlement_line` has no column for it, so the declaration is validated and discarded. Within a
-closed taxonomy whose only reversal class is this one, mapping here is the sanctioned broader-class
-fallback. Persisting `transaction_type` would upgrade this from an inference to a declaration, and
-that is the single highest-value change available to the taxonomy.
+*Superseded by ADR-046.* This rule originally fired on direction alone, and recorded as a limitation
+that it could not prove the original debit was a **chargeback** rather than a fee reversal or a
+correction — then assigned the class anyway, because it was the taxonomy's only reversal class. That
+was the wrong call: taxonomy structure is not transaction evidence. The rule now requires the PSP's
+declared movement type on both sides, and `settlement_line` persists it.
 
 ---
 
@@ -1537,11 +1538,108 @@ cheap: a classifier that fired once and abstained forever would also report zero
 
 ### What would change the answer
 
-Persisting the PSP's declared `transaction_type` — already parsed, validated and discarded by M2.1 —
-would turn three inferences into declarations and is the highest-value change available. It would
-**not** make `partial_capture` or `fx_rounding` reachable: those need the ledger entry identified,
-which is a different and harder problem, and one this project should solve by giving the ledger
-snapshot a settlement reference rather than by guessing.
+Persisting the PSP's declared `transaction_type` turned three inferences into declarations. **Done at
+the M2.3 correction — see ADR-046.**
+
+It did **not** make `partial_capture` or `fx_rounding` reachable: those need the ledger entry
+identified, which is a different and harder problem, and one this project should solve by giving the
+ledger snapshot a settlement reference rather than by guessing.
+
+## ADR-046 — A class is assigned from declared evidence, never from direction
+
+**Status:** Accepted (M2.3, correction). **Amends ADR-045.**
+
+ADR-045 reached `chargeback_reversal` from *direction*: a residual credit that exactly reverses a
+debit the ledger already carries. It recorded the limitation honestly — "this does not prove the
+original debit was a **chargeback** rather than a fee reversal or a correction" — and then assigned
+the class anyway, on the reasoning that within a closed taxonomy whose only reversal class is this
+one, mapping there was the sanctioned broader-class fallback.
+
+**That reasoning was wrong, and the flaw is worth naming precisely.** Taxonomy structure is not
+transaction evidence. "This is the only class that could describe it" says something about the
+enumeration, not about the movement, and a control record that says `chargeback_reversal` because
+nothing else was available is asserting a cause the data does not support. The same error would
+justify any class that happened to be alone in its category.
+
+**Measured, not argued.** Three credits were ingested through the real path, identical in sign,
+amount, currency, value date and counterpart — each exactly reversing a booked debit on its own
+order — and differing only in the movement type the PSP declared: `chargeback_reversal`,
+`refund_reversal`, `adjustment`. All three came back `chargeback_reversal`. Two of those three
+statements were false, and each would have carried a wrong class into a treatment, an approval and a
+posting. A fourth case, a declared `chargeback_reversal` whose booked counterpart was a *capture*,
+was also accepted.
+
+### Why the fix is to persist the declared type rather than to drop the class
+
+Dropping the rule and mapping those residuals to `unclassified` was the obvious narrow fix, and it
+was rejected because **it does not stop at one rule**. The same objection applies to
+`cross_period_refund` — a debit reversing a booked credit is equally a refund, a chargeback, a
+clawback or a correction — and to `fee_split`, where a credit with smaller unreconciled debits could
+as easily be a capture with partial refunds. Applying the safety rule consistently removes all three
+and leaves a classifier that assigns nothing but `unclassified`.
+
+That would not be an honest limitation. It would be a self-inflicted one, because the evidence
+exists and the system already reads it:
+
+| | |
+|---|---|
+| Is the movement type in the approved contract? | **Yes** — ADR-031 declares `transaction_type` as column 3 of the settlement format |
+| Does M2.1 have it? | **Yes** — `NormalisedLine.transaction_type`, parsed and validated |
+| Is it persisted? | **No** — `settlement_line` had no column, so it was validated and discarded |
+| Did anything forbid the column? | **No** — §9's data model is "indicative, not final; settled at M1" |
+
+M2.1's own decision record settles it: those fields "remain available in the immutable raw payload
+**for the increments that need them**". This is that increment. FR-4's taxonomy is a taxonomy of
+movement kinds — capture, fee, chargeback, refund — and a classifier without the kind can only read
+the sign.
+
+**Decision.** Persist `transaction_type` on `settlement_line` (migration `46dcf131f47d`), and require
+declared evidence in every rule. Nothing else from the format is added: presentment amount,
+presentment currency and FX rate would not make `fx_rounding` reachable, because that class needs the
+ledger entry identified and no deterministic key does that. A column that changes no outcome is
+schema for its own sake.
+
+### The rules after the correction
+
+| Rule | Class | Evidence |
+|---|---|---|
+| `reversal_of_booked_chargeback` | `chargeback_reversal` | This row is a declared `chargeback_reversal`; **exactly one** movement on the order is a declared `chargeback` the ledger reconciled; it is the exact negation |
+| `refund_of_booked_capture_across_periods` | `cross_period_refund` | This row is a declared `refund`; exactly one reconciled `capture` on the order is its exact negation; different calendar months |
+| `fees_deducted_from_a_capture` | `fee_split` | This row is a declared `capture` or `fee`; the order carries at least one unreconciled row of each; the deductions are strictly smaller than the largest inflow |
+
+Both halves of each rule matter. A declared type nobody corroborates is a claim rather than a fact —
+a `chargeback_reversal` reversing a booked *capture* is refused — and a corroborating shape with no
+declaration is the defect this ADR corrects.
+
+**The closed vocabulary lives in the classifier, not in the column.** `settlement_line` stores what
+the file said, constrained only to be non-blank. A `CHECK` on the value set would mean a PSP adding a
+product could not be ingested at all: the receipt is committed before the payload is read (ADR-041),
+so a rejected INSERT would strand a batch that can never reach `parsed` or `quarantined`, and
+re-delivery would reproduce it forever. Quarantining instead would condemn a whole settlement file
+over one unfamiliar row, which is not what a malformed file means. So an unrecognised type ingests
+normally and maps to *no evidence*: it can only ever produce `unclassified`. Fail-closed at the
+decision, not at the boundary.
+
+No case folding and no aliasing, for the reason ADR-039 gives: accepting `CAPTURE` as `capture`
+would be deciding that two spellings denote the same movement, which nobody has recorded. The
+conservatism costs coverage, never correctness.
+
+### What it changed, and what it did not
+
+**Measured results are identical** — 13, 39, 207 and 833 residuals, zero wrong at every scale, the
+same per-class counts. The old rules were right on this corpus and wrong in general, which is exactly
+why the defect needed an adversarial case rather than a measurement: the corpus never contained a
+credit whose declared type disagreed with its shape.
+
+`partial_capture` and `fx_rounding` remain unreachable, unchanged by this. They need the ledger entry
+identified, which a movement type does not provide.
+
+Matching is untouched and must stay so: a rule that consulted the declared type would make two
+amounts reconcile or not depending on what the PSP called them, which is a matching policy nobody
+has decided and ADR-042 does not contain. A scope test asserts the matching package cannot reach the
+column.
+
+---
 
 ---
 

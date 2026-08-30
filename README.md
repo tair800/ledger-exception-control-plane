@@ -4,7 +4,7 @@ PSP settlement files against the general ledger. Deterministic matching clears t
 proposes a treatment from a closed enum whose type has no numeric field. A chaos suite proves no
 double-post against a RED baseline that does.
 
-> ## Status: milestone M2.2 of 31
+> ## Status: milestone M2.3 of 31
 >
 > **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
 > liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
@@ -428,10 +428,23 @@ conclusion:
 
 | Rule | Class | Evidence |
 |---|---|---|
-| `reversal_of_booked_debit` | `chargeback_reversal` | A credit whose exact negation is **exactly one** already-reconciled line on the same merchant reference |
-| `reversal_of_booked_credit_across_periods` | `cross_period_refund` | The same, with the signs reversed, and the two value dates in different calendar months |
-| `deductions_split_across_rows` | `fee_split` | Unreconciled lines on one reference carrying a credit and debits, the debits strictly smaller than the largest credit |
+| `reversal_of_booked_chargeback` | `chargeback_reversal` | This row is a declared `chargeback_reversal`; **exactly one** movement on the order is a declared `chargeback` the ledger reconciled, and is its exact negation |
+| `refund_of_booked_capture_across_periods` | `cross_period_refund` | This row is a declared `refund`; exactly one reconciled `capture` on the order is its exact negation; different calendar months |
+| `fees_deducted_from_a_capture` | `fee_split` | This row is a declared `capture` or `fee`; the order carries at least one unreconciled row of each; the deductions are strictly smaller than the largest inflow |
 | `no_rule_matched` | `unclassified` | Nothing could be proved |
+
+**A class is assigned from declared evidence, never from direction.** The first version of these
+rules read the sign of the amount: a credit reversing a booked debit was a chargeback reversal. It is
+not — it is equally a fee reversal, a clawback or an operational correction, and three credits
+identical in sign, currency, date and counterpart, differing only in the type the PSP declared, all
+came back `chargeback_reversal`. Two of those statements were false, and each would have carried a
+wrong class into a treatment, an approval and a posting.
+
+The fix was not to delete the rule. The same objection applies to every other rule, so applying it
+consistently would leave a classifier that assigns nothing — and the evidence was never missing, only
+unpersisted: the approved settlement format declares a movement type on every row, ingestion parses
+it, and the column to keep it simply did not exist. Now it does, and both halves of each rule must
+agree: a declared reversal whose booked counterpart is a capture is refused.
 
 Where a rule needs a corroborating movement it requires *exactly one* — two candidates make the
 classification unprovable, not twice as likely — and every comparison is exact `Decimal` equality.

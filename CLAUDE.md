@@ -17,7 +17,11 @@ adjustments, **dispatched at most once per operation identifier**, with an effec
 Deterministic matching clears the bulk. The model proposes a *treatment* for the residual — never an
 amount.
 
-**Status: planning. No application code exists.**
+**Status: implementation in progress.** M0 (scaffold, stack), M1 (schema, fixture corpus) and M2.1
+through M2.3 (ingestion, deterministic matching, residual classification and exception creation) are
+complete. **M2.4 — the deterministic adjustment calculator — is next**, and OPEN-4 must be settled
+first. Nothing beyond that is implemented: no amount calculation, no model layer, no ledger adapter,
+no dispatcher, no console. `PROJECT_STATUS.md` is the authority on exactly what exists.
 
 ---
 

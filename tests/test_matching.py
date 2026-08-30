@@ -665,6 +665,28 @@ def test_production_matching_does_not_depend_on_the_fixture_package() -> None:
             assert label not in source, f"{name} references {label}"
 
 
+def test_the_matching_package_never_reads_the_declared_movement_type() -> None:
+    """``transaction_type`` is classification evidence, not matching evidence.
+
+    M2.3 persisted it so the taxonomy could be proved rather than guessed. Matching must stay
+    exactly as it was: a rule that consulted the declared type would make two amounts match or not
+    match depending on what the PSP called them, which is a matching policy nobody has decided and
+    which ADR-042 does not contain. The column exists; this package may not see it.
+    """
+    for name, tree in _matching_sources():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                assert node.attr != "transaction_type", f"{name} reads transaction_type"
+            if isinstance(node, ast.Name):
+                assert node.id not in {"transaction_type", "MovementType", "movement_type"}, (
+                    f"{name} references {node.id}"
+                )
+            if isinstance(node, ast.alias):
+                assert node.name.rsplit(".", 1)[-1] not in {"MovementType", "movement_type"}, (
+                    f"{name} imports {node.name}"
+                )
+
+
 def test_the_matcher_sees_no_free_text_field() -> None:
     """Containment by construction: the candidate types carry no memo, reference or description,
     so no rule can be written against free text however tempting it looks."""

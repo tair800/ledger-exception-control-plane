@@ -49,7 +49,9 @@ from ledger_exception_control_plane.classification.taxonomy import (
     RULE_CLASSIFICATION,
     RULE_PRECEDENCE,
     ClassificationRule,
+    MovementType,
     accounting_period,
+    movement_type,
 )
 
 __all__ = [
@@ -60,9 +62,11 @@ __all__ = [
     "Classification",
     "ClassificationRule",
     "ClassificationRun",
+    "MovementType",
     "SettlementMovement",
     "accounting_period",
     "classify",
     "correlation_id_for",
+    "movement_type",
     "run_classification",
 ]

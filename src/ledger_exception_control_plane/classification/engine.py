@@ -35,6 +35,7 @@ from ledger_exception_control_plane.classification.taxonomy import (
     RULE_CLASSIFICATION,
     RULE_PRECEDENCE,
     ClassificationRule,
+    MovementType,
     accounting_period,
 )
 from ledger_exception_control_plane.db.control import ExceptionClassification
@@ -44,13 +45,21 @@ from ledger_exception_control_plane.db.control import ExceptionClassification
 class SettlementMovement:
     """A settlement line as the classifier sees it. Deliberately not the ORM row.
 
-    Six fields, and none of them from the ledger: no entry, no account, no description, and no
+    Seven fields, and none of them from the ledger: no entry, no account, no description, and no
     free text of any kind. ``matched`` is the whole of what M2.2 concluded about this line, which
     is all any rule needs — whether the ledger already carries this movement.
+
+    ``movement`` is what the PSP *declared* this row to be, reduced to a closed vocabulary. It is
+    the field that makes the taxonomy provable rather than guessed: every substantive class in FR-4
+    names a kind of movement, and without the kind a classifier can only read the sign of the
+    amount — which cannot tell a chargeback reversal from a fee reversal or an operational
+    correction. ``None`` means the file stated nothing, the row predates the column, or the type is
+    one this system does not recognise; all three mean *no evidence*, and no rule fires on it.
     """
 
     id: uuid.UUID
     merchant_reference: str | None
+    movement: MovementType | None
     amount: decimal.Decimal
     currency: str
     value_date: dt.date
@@ -80,18 +89,37 @@ class _Evidence:
     subject: SettlementMovement
     related: tuple[SettlementMovement, ...]
 
-    def exact_offsets_already_booked(self) -> tuple[SettlementMovement, ...]:
-        """Related movements the ledger has *already* reconciled that this one exactly reverses.
+    def booked_offsets_of_type(self, kind: MovementType) -> tuple[SettlementMovement, ...]:
+        """Reconciled movements of a **declared kind** that this one exactly reverses.
 
-        Exact ``Decimal`` equality, not a band. A reversal that does not restore the original
-        amount is not evidence of a reversal, and the one tolerance policy in this system belongs
-        to matching (ADR-042) — reusing it here would apply a band to a question nobody decided it
-        for.
+        Three conditions, all load-bearing. ``matched`` says the ledger carries the movement being
+        reversed — without it the pair is two unreconciled rows and there is nothing booked to
+        reverse. ``kind`` says what that booked movement *was*, which is the evidence this module
+        previously did not have and could not infer: a credit reversing a booked debit is equally a
+        chargeback reversal, a fee reversal or a correction, and the sign cannot separate them.
+
+        Exact ``Decimal`` equality, not a band. A reversal that does not restore the original amount
+        is not evidence of a reversal, and the one tolerance policy in this system belongs to
+        matching (ADR-042) — reusing it here would apply a band to a question nobody decided it for.
         """
         return tuple(
             movement
             for movement in self.related
-            if movement.matched and movement.amount == -self.subject.amount
+            if movement.matched
+            and movement.movement is kind
+            and movement.amount == -self.subject.amount
+        )
+
+    def any_booked_offset(self) -> bool:
+        """Whether *any* reconciled movement on this order exactly reverses the subject.
+
+        Deliberately blind to the declared kind, unlike the method above. It answers "does the
+        reversal family have a claim on this line", which is what keeps an unresolved reversal
+        question away from the group rule — see :func:`_fees_deducted_from_a_capture`.
+        """
+        return any(
+            movement.matched and movement.amount == -self.subject.amount
+            for movement in self.related
         )
 
     def unreconciled_group(self) -> tuple[SettlementMovement, ...]:
@@ -99,42 +127,50 @@ class _Evidence:
         return (self.subject, *(m for m in self.related if not m.matched))
 
 
-def _reversal_of_booked_debit(evidence: _Evidence) -> bool:
-    """A credit that exactly reverses a debit the ledger already carries.
+def _reversal_of_booked_chargeback(evidence: _Evidence) -> bool:
+    """A declared chargeback reversal that restores a chargeback the ledger already booked.
 
-    The taxonomy's class for the reversal of a booked movement is ``chargeback_reversal``, and this
-    is the evidence available for it: the merchant's order carries an earlier negative movement
-    that M2.2 reconciled, this residual restores exactly that amount, and the ledger has nothing
-    matching the restoration.
+    Three pieces of evidence, and the class is asserted only when all three agree:
 
-    **What this cannot prove, stated plainly.** That the original debit was a *chargeback* rather
-    than a fee reversal or a correction. The PSP declares a transaction type on every row and M2.1
-    normalises it, but ``settlement_line`` has no column for it, so the declaration is validated
-    and discarded before anything can read it. Within a closed taxonomy whose only reversal class
-    is this one, mapping here is the sanctioned fallback (ADR-045); the limitation is recorded
-    rather than papered over.
+    * the PSP declared **this** row a ``chargeback_reversal``;
+    * exactly one movement on the same order is a declared ``chargeback`` the ledger reconciled;
+    * that chargeback is the exact negation of this credit.
+
+    **Direction alone used to be enough here, and that was the defect.** A positive residual
+    reversing a booked debit was called a chargeback reversal whatever either row actually was, so
+    an ordinary refund reversal and an operational correction received the same class — two false
+    statements in a control record that a treatment, an approval and a posting all rest on. Proven
+    by ingesting three credits identical in sign, amount, currency and date, differing only in
+    declared type: all three came back ``chargeback_reversal``.
+
+    Requiring *exactly one* corroborating chargeback is the discipline M2.2 applies to candidate
+    entries. Two make the reversal unprovable, not twice as likely.
     """
+    if evidence.subject.movement is not MovementType.CHARGEBACK_REVERSAL:
+        return False
     if evidence.subject.amount <= 0:
         return False
-    return len(evidence.exact_offsets_already_booked()) == 1
+    return len(evidence.booked_offsets_of_type(MovementType.CHARGEBACK)) == 1
 
 
-def _reversal_of_booked_credit_across_periods(evidence: _Evidence) -> bool:
-    """A debit that exactly reverses a credit the ledger already carries, in a later period.
+def _refund_of_booked_capture_across_periods(evidence: _Evidence) -> bool:
+    """A declared refund reversing a booked capture, settling in a later accounting period.
 
-    The direction is the discriminator and it is an accounting fact, not a corpus artefact: a
-    capture is a credit and its refund a debit, while a chargeback is a debit and its reversal a
-    credit. Both rules require the counterpart to have been *booked*, so neither fires on a pair
-    the ledger never saw.
+    The same correction applies as above, for the same reason: a debit reversing a booked credit is
+    equally a refund, a chargeback, a clawback or a correction, and direction cannot tell them
+    apart. The PSP's declaration does, on both sides — this row is a ``refund`` and the movement it
+    reverses is a ``capture``.
 
     The period test is what makes this the taxonomy's ``cross_period_refund`` rather than a refund
-    in general — and the taxonomy has no class for a refund that settles in its own period, so one
-    falls to the fallback rather than borrowing this label. Periods are calendar months read from
-    the two business dates; no clock is consulted, and no posting period is assigned here.
+    in general. The taxonomy has no class for a refund settling in its own period, so one falls to
+    the fallback rather than borrowing this label. Periods are calendar months read from the two
+    business dates; no clock is consulted, and no posting period is assigned here.
     """
+    if evidence.subject.movement is not MovementType.REFUND:
+        return False
     if evidence.subject.amount >= 0:
         return False
-    offsets = evidence.exact_offsets_already_booked()
+    offsets = evidence.booked_offsets_of_type(MovementType.CAPTURE)
     if len(offsets) != 1:
         return False
     return accounting_period(offsets[0].value_date) != accounting_period(
@@ -142,42 +178,36 @@ def _reversal_of_booked_credit_across_periods(evidence: _Evidence) -> bool:
     )
 
 
-def _deductions_split_across_rows(evidence: _Evidence) -> bool:
-    """One economic movement the PSP reported across several rows, none of which reconciled.
+def _fees_deducted_from_a_capture(evidence: _Evidence) -> bool:
+    """A capture and its fees, reported on separate rows, none of which reconciled.
 
-    A fee split is a gross amount reduced by deductions that the ledger booked as a single net
-    entry, so no individual row equals any individual entry — which is exactly why every row of it
-    survives matching. The observable shape is a group of unreconciled movements on one order
-    carrying both a credit and debits, where **the debits together are strictly smaller than the
-    largest credit**.
+    A fee split is a gross amount reduced by deductions the ledger booked as a single net entry, so
+    no individual row equals any individual entry — which is why every row of it survives matching.
+    The evidence is now declarative rather than shape-based: the PSP says this row is a ``capture``
+    or a ``fee``, and the same order carries at least one unreconciled row of each.
 
-    That last condition is doing real work rather than tidying. It is what a deduction *is*: a fee
-    comes out of a capture and cannot exceed it. Without it the rule would also fire on a
-    chargeback and its reversal when neither reconciled — equal and opposite, which is an offset
-    and not a deduction — and would label a reversal pair a fee split.
+    The magnitude test is kept as corroboration rather than as the rule. It is what a deduction *is*
+    — a fee comes out of a capture and cannot exceed it — and it catches a group whose declared
+    types agree but whose numbers do not.
 
-    **A line the reversal family has a claim on is not available to this rule**, whether or not
-    that family reached a conclusion. This is the same defect M2.2 corrected in ADR-043, in a new
-    place: precedence orders the rules that *fire*, so a higher-priority rule that examines a line
-    and then declines leaves it to be settled by a lower-priority one — which is an unresolved
-    claim being resolved by a weaker rule, exactly what precedence exists to prevent.
-
-    It is reachable and it was reached. A full refund of an already-booked capture *in the same
-    period* is the case the taxonomy has no class for, and the period test declines it correctly;
-    but with one further unmatched credit on the same order, the group shape then matched and the
-    refund was named ``fee_split``. Adding an unrelated row to an order changed the class of the
-    refund, and a customer refund was labelled a PSP deduction. Two booked offsets — ambiguous
-    reversal evidence — fell through the same way. Both now stop here.
-
-    Note it is the *evidence* that blocks, not the verdict: any exact offset already booked means
-    this line is a reversal question, and a reversal question the system cannot answer is
-    ``unclassified``, never a fee split.
+    **A line the reversal family has a claim on is not available here**, whether or not that family
+    reached a conclusion. Precedence orders the rules that *fire*, so a higher-priority rule that
+    examines a line and then declines would otherwise leave it to be settled by this one: an
+    unresolved claim settled by a weaker rule, which is the defect ADR-043 corrected for matching
+    tiers and this guard corrects for classification rules.
     """
-    if evidence.exact_offsets_already_booked():
+    if evidence.subject.movement not in {MovementType.CAPTURE, MovementType.FEE}:
         return False
+    if evidence.any_booked_offset():
+        return False
+
     group = evidence.unreconciled_group()
-    inflows = [m.amount for m in group if m.amount > 0]
-    deductions = [-m.amount for m in group if m.amount < 0]
+    kinds = {m.movement for m in group}
+    if not {MovementType.CAPTURE, MovementType.FEE} <= kinds:
+        return False
+
+    inflows = [m.amount for m in group if m.movement is MovementType.CAPTURE and m.amount > 0]
+    deductions = [-m.amount for m in group if m.movement is MovementType.FEE and m.amount < 0]
     if not inflows or not deductions:
         return False
     return sum(deductions) < max(inflows)
@@ -187,11 +217,11 @@ def _deductions_split_across_rows(evidence: _Evidence) -> bool:
 #: :data:`~..taxonomy.RULE_PRECEDENCE`, which is declared separately so precedence is a statement
 #: rather than a consequence of dictionary order.
 RULES: dict[ClassificationRule, Callable[[_Evidence], bool]] = {
-    ClassificationRule.REVERSAL_OF_BOOKED_DEBIT: _reversal_of_booked_debit,
-    ClassificationRule.REVERSAL_OF_BOOKED_CREDIT_ACROSS_PERIODS: (
-        _reversal_of_booked_credit_across_periods
+    ClassificationRule.REVERSAL_OF_BOOKED_CHARGEBACK: _reversal_of_booked_chargeback,
+    ClassificationRule.REFUND_OF_BOOKED_CAPTURE_ACROSS_PERIODS: (
+        _refund_of_booked_capture_across_periods
     ),
-    ClassificationRule.DEDUCTIONS_SPLIT_ACROSS_ROWS: _deductions_split_across_rows,
+    ClassificationRule.FEES_DEDUCTED_FROM_A_CAPTURE: _fees_deducted_from_a_capture,
 }
 
 
@@ -244,7 +274,7 @@ def classify(
     Today no line can satisfy two rules, so the declared order decides nothing — a test sweeps the
     shapes that could collide and asserts it. That is deliberate: precedence orders the rules that
     *fire*, which is exactly the hole a rule declining on its last condition used to fall through
-    (see :func:`_deductions_split_across_rows`), so the rule set is now built to have no overlap
+    (see :func:`_fees_deducted_from_a_capture`), so the rule set is now built to have no overlap
     rather than to resolve one.
 
     Output order follows the subject order the caller supplied. The *decisions* do not depend on

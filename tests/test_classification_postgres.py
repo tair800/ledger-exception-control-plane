@@ -117,16 +117,21 @@ async def _wipe() -> None:
 
 
 async def _seed_batch(
-    lines: list[tuple[str, str, dt.date, str | None]],
+    lines: list[tuple[str, str, dt.date, str | None, str | None]],
     *,
     marker: str,
     status: str = "parsed",
 ) -> tuple[uuid.UUID, list[uuid.UUID], str]:
     """Insert one settlement batch and its lines directly.
 
+    Each line states ``(amount, currency, value_date, merchant_reference, transaction_type)``. The
+    declared movement type is required rather than optional: every classification rule turns on it,
+    so a row seeded without one exercises the evidence-free path, and a default would quietly make
+    half of this file test that instead of what it says it tests.
+
     Direct SQL rather than the ingestion path: these tests are about the exception boundary, and
-    building each case as a CSV would make the input harder to read than the assertion. The corpus
-    end-to-end test below does go through ingestion.
+    building each case as a CSV would make the input harder to read than the assertion. The
+    end-to-end tests below do go through ingestion.
     """
     batch_id = uuid.uuid4()
     content_hash = uuid.uuid4().hex + uuid.uuid4().hex
@@ -144,17 +149,18 @@ async def _seed_batch(
             status,
             "line 1: amount invalid" if status == "quarantined" else None,
         )
-        for number, (amount, currency, day, reference) in enumerate(lines, start=1):
+        for number, (amount, currency, day, reference, movement) in enumerate(lines, start=1):
             line_id = uuid.uuid4()
             await connection.execute(
                 "INSERT INTO settlement_line (id, settlement_batch_id, line_number, psp_reference,"
-                " merchant_reference, amount, currency, value_date, match_state)"
-                " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'unmatched')",
+                " merchant_reference, transaction_type, amount, currency, value_date, match_state)"
+                " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'unmatched')",
                 line_id,
                 batch_id,
                 number,
                 f"psp_{marker}_{number}",
                 reference,
+                movement,
                 decimal.Decimal(amount),
                 currency,
                 day,
@@ -214,7 +220,9 @@ async def _exceptions() -> list[asyncpg.Record]:
 
 @pytest.mark.asyncio
 async def test_a_residual_line_becomes_exactly_one_exception(engine: AsyncEngine) -> None:
-    _, line_ids, content_hash = await _seed_batch([("2799.97", "EUR", JUNE, ORDER)], marker="basic")
+    _, line_ids, content_hash = await _seed_batch(
+        [("2799.97", "EUR", JUNE, ORDER, "capture")], marker="basic"
+    )
 
     run = await run_classification(engine)
 
@@ -231,7 +239,8 @@ async def test_a_residual_line_becomes_exactly_one_exception(engine: AsyncEngine
 async def test_a_matched_line_never_becomes_an_exception(engine: AsyncEngine) -> None:
     """The central eligibility rule. A reconciled line has no residual to explain."""
     _, line_ids, _ = await _seed_batch(
-        [("500.00", "EUR", JUNE, ORDER), ("77.00", "EUR", JUNE, None)], marker="matched"
+        [("500.00", "EUR", JUNE, ORDER, "capture"), ("77.00", "EUR", JUNE, None, "capture")],
+        marker="matched",
     )
     await _mark_matched(line_ids[0], amount="500.00")
 
@@ -249,7 +258,7 @@ async def test_a_quarantined_batch_generates_no_exception(engine: AsyncEngine) -
     someone persists a partial parse, this test fails instead of a reconciliation exception being
     raised against a row nobody vouched for."""
     _, line_ids, _ = await _seed_batch(
-        [("120.00", "EUR", JUNE, ORDER)], marker="quarantined", status="quarantined"
+        [("120.00", "EUR", JUNE, ORDER, "capture")], marker="quarantined", status="quarantined"
     )
 
     run = await run_classification(engine)
@@ -263,7 +272,9 @@ async def test_a_quarantined_batch_generates_no_exception(engine: AsyncEngine) -
 async def test_a_batch_still_at_received_generates_no_exception(engine: AsyncEngine) -> None:
     """A crash between ingestion's two transactions leaves a batch at ``received``. Nothing has
     vouched for its contents, so nothing there is residual — it is unfinished."""
-    await _seed_batch([("120.00", "EUR", JUNE, ORDER)], marker="received", status="received")
+    await _seed_batch(
+        [("120.00", "EUR", JUNE, ORDER, "capture")], marker="received", status="received"
+    )
 
     assert (await run_classification(engine)).residuals == 0
     assert await _exceptions() == []
@@ -274,7 +285,7 @@ async def test_a_line_already_carrying_an_exception_is_not_reclassified(
     engine: AsyncEngine,
 ) -> None:
     """Idempotence at the eligibility level: the second run has no work, not duplicate work."""
-    await _seed_batch([("2799.97", "EUR", JUNE, ORDER)], marker="idem")
+    await _seed_batch([("2799.97", "EUR", JUNE, ORDER, "capture")], marker="idem")
 
     first = await run_classification(engine)
     second = await run_classification(engine)
@@ -291,7 +302,8 @@ async def test_repeated_runs_are_stable_in_class_rule_and_correlation_id(
     """Nothing about the persisted row moves between runs — not the class, not the rule, not the
     correlation id. A clock or a counter anywhere in the path would show up here."""
     await _seed_batch(
-        [("1244.71", "EUR", JUNE, ORDER), ("-7.94", "EUR", JUNE, ORDER)], marker="stable"
+        [("1244.71", "EUR", JUNE, ORDER, "capture"), ("-7.94", "EUR", JUNE, ORDER, "fee")],
+        marker="stable",
     )
 
     await run_classification(engine)
@@ -314,9 +326,9 @@ async def test_every_exception_records_the_rule_the_ruleset_and_its_lifecycle_st
     ruleset, when, and in what state — without joining to anything that could have changed since."""
     _, _, content_hash = await _seed_batch(
         [
-            ("1244.71", "EUR", JUNE, ORDER),
-            ("-2.13", "EUR", JUNE, ORDER),
-            ("50.21", "EUR", JUNE, None),
+            ("1244.71", "EUR", JUNE, ORDER, "capture"),
+            ("-2.13", "EUR", JUNE, ORDER, "fee"),
+            ("50.21", "EUR", JUNE, None, "capture"),
         ],
         marker="prov",
     )
@@ -334,7 +346,7 @@ async def test_every_exception_records_the_rule_the_ruleset_and_its_lifecycle_st
 
     by_class = {row["classification"]: row["rule_id"] for row in rows}
     assert by_class == {
-        "fee_split": "deductions_split_across_rows",
+        "fee_split": "fees_deducted_from_a_capture",
         "unclassified": "no_rule_matched",
     }
 
@@ -351,7 +363,9 @@ async def test_direct_sql_cannot_raise_an_exception_for_a_matched_line() -> None
     A check constraint cannot reference another table, so this is a composite foreign key onto
     ``(settlement_line.id, 'unmatched')``. Bypassing the service does not bypass it.
     """
-    _, line_ids, _ = await _seed_batch([("500.00", "EUR", JUNE, ORDER)], marker="direct1")
+    _, line_ids, _ = await _seed_batch(
+        [("500.00", "EUR", JUNE, ORDER, "capture")], marker="direct1"
+    )
     await _mark_matched(line_ids[0], amount="500.00")
 
     connection = await asyncpg.connect(DSN)
@@ -361,7 +375,7 @@ async def test_direct_sql_cannot_raise_an_exception_for_a_matched_line() -> None
                 "INSERT INTO exception (id, settlement_line_id, line_match_state, classification,"
                 " status, rule_id, classifier_version, correlation_id)"
                 " VALUES ($1, $2, 'unmatched', 'unclassified', 'open', 'no_rule_matched',"
-                " 'residual-r1', 'lecp:x:000001')",
+                " 'residual-r2', 'lecp:x:000001')",
                 uuid.uuid4(),
                 line_ids[0],
             )
@@ -379,7 +393,9 @@ async def test_direct_sql_cannot_match_a_line_that_already_has_an_exception(
     afterwards. The foreign key refuses that too, because the row it references would cease to
     exist.
     """
-    _, line_ids, _ = await _seed_batch([("2799.97", "EUR", JUNE, ORDER)], marker="direct2")
+    _, line_ids, _ = await _seed_batch(
+        [("2799.97", "EUR", JUNE, ORDER, "capture")], marker="direct2"
+    )
     await run_classification(engine)
     assert len(await _exceptions()) == 1
 
@@ -396,7 +412,9 @@ async def test_direct_sql_cannot_match_a_line_that_already_has_an_exception(
 @pytest.mark.asyncio
 async def test_direct_sql_cannot_write_two_exceptions_for_one_residual() -> None:
     """FR-4's one-per-residual rule is a unique constraint, not an application convention."""
-    _, line_ids, _ = await _seed_batch([("2799.97", "EUR", JUNE, ORDER)], marker="direct3")
+    _, line_ids, _ = await _seed_batch(
+        [("2799.97", "EUR", JUNE, ORDER, "capture")], marker="direct3"
+    )
 
     connection = await asyncpg.connect(DSN)
     try:
@@ -405,7 +423,7 @@ async def test_direct_sql_cannot_write_two_exceptions_for_one_residual() -> None
                 "INSERT INTO exception (id, settlement_line_id, line_match_state, classification,"
                 " status, rule_id, classifier_version, correlation_id)"
                 " VALUES ($1, $2, 'unmatched', 'unclassified', 'open', 'no_rule_matched',"
-                " 'residual-r1', $3)",
+                " 'residual-r2', $3)",
                 uuid.uuid4(),
                 line_ids[0],
                 f"lecp:x:00000{attempt}",
@@ -443,14 +461,16 @@ async def test_direct_sql_cannot_write_a_value_outside_the_declared_vocabulary(
     prose still cannot get in. ``line_match_state`` is pinned to one value, which is what turns the
     composite foreign key into the invariant it enforces.
     """
-    _, line_ids, _ = await _seed_batch([("2799.97", "EUR", JUNE, ORDER)], marker=f"vocab{column}")
+    _, line_ids, _ = await _seed_batch(
+        [("2799.97", "EUR", JUNE, ORDER, "capture")], marker=f"vocab{column}"
+    )
     values = {
         "settlement_line_id": line_ids[0],
         "line_match_state": "unmatched",
         "classification": "unclassified",
         "status": "open",
         "rule_id": "no_rule_matched",
-        "classifier_version": "residual-r1",
+        "classifier_version": "residual-r2",
         "correlation_id": "lecp:x:000001",
     }
     values[column] = value
@@ -479,7 +499,9 @@ async def test_direct_sql_cannot_write_a_value_outside_the_declared_vocabulary(
 async def test_an_exception_without_provenance_is_refused() -> None:
     """``rule_id`` and ``classifier_version`` are NOT NULL. An exception that cannot say how it was
     reached is not a control record."""
-    _, line_ids, _ = await _seed_batch([("2799.97", "EUR", JUNE, ORDER)], marker="noprov")
+    _, line_ids, _ = await _seed_batch(
+        [("2799.97", "EUR", JUNE, ORDER, "capture")], marker="noprov"
+    )
 
     connection = await asyncpg.connect(DSN)
     try:
@@ -539,7 +561,7 @@ async def test_two_workers_classifying_one_residual_create_one_exception(
     engine: AsyncEngine,
 ) -> None:
     """Both read the same residual and reach the same class. Only one row may exist."""
-    await _seed_batch([("2799.97", "EUR", JUNE, ORDER)], marker="race1")
+    await _seed_batch([("2799.97", "EUR", JUNE, ORDER, "capture")], marker="race1")
     first, second = create_engine(_settings()), create_engine(_settings())
     try:
         outcomes = await asyncio.gather(
@@ -571,7 +593,7 @@ async def test_the_loser_of_a_forced_classification_race_writes_nothing_and_know
     Releasing the first transaction lets the classifier proceed, and it must find the work already
     done — one exception, no error, and a run that reports the loss instead of claiming the win.
     """
-    _, line_ids, _ = await _seed_batch([("2799.97", "EUR", JUNE, ORDER)], marker="race2")
+    _, line_ids, _ = await _seed_batch([("2799.97", "EUR", JUNE, ORDER, "capture")], marker="race2")
 
     holder = await asyncpg.connect(DSN)
     try:
@@ -581,7 +603,7 @@ async def test_the_loser_of_a_forced_classification_race_writes_nothing_and_know
             "INSERT INTO exception (id, settlement_line_id, line_match_state, classification,"
             " status, rule_id, classifier_version, correlation_id)"
             " VALUES ($1, $2, 'unmatched', 'unclassified', 'open', 'no_rule_matched',"
-            " 'residual-r1', 'lecp:held:000001')",
+            " 'residual-r2', 'lecp:held:000001')",
             uuid.uuid4(),
             line_ids[0],
         )
@@ -615,7 +637,7 @@ async def test_a_line_matched_mid_run_is_dropped_rather_than_violating_the_invar
     no longer unmatched, and writes nothing — so the composite foreign key never has to reject
     anything, which is the difference between a graceful loss and an aborted run.
     """
-    _, line_ids, _ = await _seed_batch([("500.00", "EUR", JUNE, ORDER)], marker="race3")
+    _, line_ids, _ = await _seed_batch([("500.00", "EUR", JUNE, ORDER, "capture")], marker="race3")
 
     holder = await asyncpg.connect(DSN)
     try:
@@ -678,9 +700,9 @@ async def test_a_group_whose_evidence_is_matched_mid_run_is_not_persisted_from_t
     """
     _, line_ids, _ = await _seed_batch(
         [
-            ("1244.71", "EUR", JUNE, ORDER),
-            ("-2.13", "EUR", JUNE, ORDER),
-            ("-7.94", "EUR", JUNE, ORDER),
+            ("1244.71", "EUR", JUNE, ORDER, "capture"),
+            ("-2.13", "EUR", JUNE, ORDER, "fee"),
+            ("-7.94", "EUR", JUNE, ORDER, "fee"),
         ],
         marker="ctxrace",
     )
@@ -742,7 +764,9 @@ async def test_matching_leaves_alone_a_line_that_is_already_under_exception_cont
     later ledger snapshot would silently revoke a claim the system had already made — so M2.2
     excludes it, and the run completes normally rather than colliding with the foreign key.
     """
-    _, line_ids, _ = await _seed_batch([("500.00", "EUR", JUNE, ORDER)], marker="control")
+    _, line_ids, _ = await _seed_batch(
+        [("500.00", "EUR", JUNE, ORDER, "capture")], marker="control"
+    )
     await run_classification(engine)
     assert len(await _exceptions()) == 1
 
@@ -881,7 +905,8 @@ async def test_classification_writes_nothing_into_the_money_path(engine: AsyncEn
     nobody computed and an approval nobody gave.
     """
     await _seed_batch(
-        [("1244.71", "EUR", JUNE, ORDER), ("-7.94", "EUR", JUNE, ORDER)], marker="scope"
+        [("1244.71", "EUR", JUNE, ORDER, "capture"), ("-7.94", "EUR", JUNE, ORDER, "fee")],
+        marker="scope",
     )
     await run_classification(engine)
     assert len(await _exceptions()) == 2
@@ -903,10 +928,10 @@ async def test_the_classification_of_one_world_does_not_depend_on_insertion_orde
     Row order in PostgreSQL is not a guarantee, and a classifier that read a group in physical
     order could reach a different answer for the same world. The class must come from the evidence.
     """
-    rows: list[tuple[str, str, dt.date, str | None]] = [
-        ("1244.71", "EUR", JUNE, ORDER),
-        ("-2.13", "EUR", JUNE, ORDER),
-        ("-7.94", "EUR", JUNE, ORDER),
+    rows: list[tuple[str, str, dt.date, str | None, str | None]] = [
+        ("1244.71", "EUR", JUNE, ORDER, "capture"),
+        ("-2.13", "EUR", JUNE, ORDER, "fee"),
+        ("-7.94", "EUR", JUNE, ORDER, "fee"),
     ]
 
     await _seed_batch(rows, marker="orderA")
@@ -919,4 +944,4 @@ async def test_the_classification_of_one_world_does_not_depend_on_insertion_orde
     backwards = sorted((row["classification"], row["rule_id"]) for row in await _exceptions())
 
     assert forwards == backwards
-    assert forwards == [("fee_split", "deductions_split_across_rows")] * 3
+    assert forwards == [("fee_split", "fees_deducted_from_a_capture")] * 3

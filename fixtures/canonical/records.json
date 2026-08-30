@@ -12,6 +12,7 @@
           "merchant_reference": "ORD-2026-903098",
           "psp_reference": "psp_5deeabafcd26",
           "scenario_id": "SC-001-exact-match",
+          "transaction_type": "capture",
           "value_date": "2026-06-03"
         },
         {
@@ -22,6 +23,7 @@
           "merchant_reference": "ORD-2026-794442",
           "psp_reference": "psp_5916e44797e5",
           "scenario_id": "SC-002-reference-mismatch",
+          "transaction_type": "capture",
           "value_date": "2026-06-04"
         },
         {
@@ -32,6 +34,7 @@
           "merchant_reference": "ORD-2026-105567",
           "psp_reference": "psp_4cebb7922b67",
           "scenario_id": "SC-003-near-amount-difference",
+          "transaction_type": "capture",
           "value_date": "2026-06-05"
         },
         {
@@ -42,6 +45,7 @@
           "merchant_reference": "ORD-2026-413909",
           "psp_reference": "psp_c08e712f6fe1",
           "scenario_id": "SC-004-partial-capture",
+          "transaction_type": "capture",
           "value_date": "2026-06-06"
         },
         {
@@ -52,6 +56,7 @@
           "merchant_reference": "ORD-2026-764755",
           "psp_reference": "psp_5687ae2d8196",
           "scenario_id": "SC-005-fee-split",
+          "transaction_type": "capture",
           "value_date": "2026-06-07"
         },
         {
@@ -62,6 +67,7 @@
           "merchant_reference": "ORD-2026-764755",
           "psp_reference": "psp_5687ae2d8196-fee1",
           "scenario_id": "SC-005-fee-split",
+          "transaction_type": "fee",
           "value_date": "2026-06-07"
         },
         {
@@ -72,6 +78,7 @@
           "merchant_reference": "ORD-2026-764755",
           "psp_reference": "psp_5687ae2d8196-fee2",
           "scenario_id": "SC-005-fee-split",
+          "transaction_type": "fee",
           "value_date": "2026-06-07"
         },
         {
@@ -82,6 +89,7 @@
           "merchant_reference": "ORD-2026-532726",
           "psp_reference": "psp_5525be44e9d5",
           "scenario_id": "SC-006-chargeback-reversal",
+          "transaction_type": "chargeback",
           "value_date": "2026-06-08"
         },
         {
@@ -92,6 +100,7 @@
           "merchant_reference": "ORD-2026-532726",
           "psp_reference": "psp_5525be44e9d5-rev",
           "scenario_id": "SC-006-chargeback-reversal",
+          "transaction_type": "chargeback_reversal",
           "value_date": "2026-06-10"
         },
         {
@@ -102,6 +111,7 @@
           "merchant_reference": "ORD-2026-181802",
           "psp_reference": "psp_e5d430885187",
           "scenario_id": "SC-007-fx-rounding",
+          "transaction_type": "capture",
           "value_date": "2026-06-09"
         },
         {
@@ -112,6 +122,7 @@
           "merchant_reference": "ORD-2026-510910",
           "psp_reference": "psp_1f49fd9d23ec",
           "scenario_id": "SC-008-cross-period-refund",
+          "transaction_type": "capture",
           "value_date": "2026-06-26"
         },
         {
@@ -122,6 +133,7 @@
           "merchant_reference": null,
           "psp_reference": "psp_f3cd2653ca3b",
           "scenario_id": "SC-009-unclassified",
+          "transaction_type": "adjustment",
           "value_date": "2026-06-11"
         },
         {
@@ -132,6 +144,7 @@
           "merchant_reference": null,
           "psp_reference": "psp_6608182739b3",
           "scenario_id": "SC-010-missing-merchant-reference",
+          "transaction_type": "capture",
           "value_date": "2026-06-12"
         },
         {
@@ -142,6 +155,7 @@
           "merchant_reference": "ORD-2026-732696",
           "psp_reference": "psp_3f92565cb9fd",
           "scenario_id": "SC-011-ambiguous-memo",
+          "transaction_type": "capture",
           "value_date": "2026-06-13"
         },
         {
@@ -152,6 +166,7 @@
           "merchant_reference": "ORD-2026-120815",
           "psp_reference": "psp_46b14f7b835a",
           "scenario_id": "SC-012-repeated-psp-reference",
+          "transaction_type": "capture",
           "value_date": "2026-06-14"
         },
         {
@@ -162,6 +177,7 @@
           "merchant_reference": "ORD-2026-120815",
           "psp_reference": "psp_46b14f7b835a",
           "scenario_id": "SC-012-repeated-psp-reference",
+          "transaction_type": "capture",
           "value_date": "2026-06-14"
         }
       ],
@@ -182,6 +198,7 @@
           "merchant_reference": "ORD-2026-510910",
           "psp_reference": "psp_1f49fd9d23ec-rfnd",
           "scenario_id": "SC-008-cross-period-refund",
+          "transaction_type": "refund",
           "value_date": "2026-07-08"
         }
       ],

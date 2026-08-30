@@ -199,6 +199,7 @@ async def _settle(
                     line_number=line.line_number,
                     psp_reference=line.psp_reference,
                     merchant_reference=line.merchant_reference,
+                    transaction_type=line.transaction_type,
                     amount=line.amount,
                     currency=line.currency,
                     value_date=line.value_date,

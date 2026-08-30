@@ -44,11 +44,50 @@ from typing import Final
 from ledger_exception_control_plane.db.control import ExceptionClassification
 
 
+class MovementType(enum.StrEnum):
+    """The movement kinds this system can reason about, as the PSP declares them (ADR-031).
+
+    **Closed, and matched exactly.** ``settlement_line.transaction_type`` stores whatever the file
+    stated, because an unfamiliar movement type is a product this system has not met rather than a
+    malformed file, and quarantining would condemn a whole settlement batch over one row. The
+    closure belongs here instead, where a decision is actually taken: anything not in this
+    enumeration resolves to ``None`` and is treated as *no evidence*, so an unknown type can only
+    ever produce ``unclassified``.
+
+    No case folding and no aliasing, deliberately. ADR-039 preserves what the file said, and a
+    classifier that quietly accepted ``CAPTURE`` would be deciding that two spellings mean the same
+    movement — a judgement nobody has recorded. The conservatism is visible and fails safe: an
+    unexpected spelling costs coverage, never correctness.
+    """
+
+    CAPTURE = "capture"
+    FEE = "fee"
+    REFUND = "refund"
+    CHARGEBACK = "chargeback"
+    CHARGEBACK_REVERSAL = "chargeback_reversal"
+    ADJUSTMENT = "adjustment"
+
+
+def movement_type(declared: str | None) -> MovementType | None:
+    """The declared type as a closed value, or ``None`` when this system does not recognise it.
+
+    ``None`` covers three genuinely different situations — the file stated nothing, the row predates
+    the column, or the type is one nothing here knows — and they are deliberately not distinguished.
+    All three mean the same thing to a rule: no evidence of what this movement is.
+    """
+    if declared is None:
+        return None
+    try:
+        return MovementType(declared)
+    except ValueError:
+        return None
+
+
 class ClassificationRule(enum.StrEnum):
     """The closed set of ways a residual may be classified. Persisted in ``exception.rule_id``.
 
     The identifiers name the **evidence**, not the class, and deliberately so. ``fee_split`` says
-    what was concluded; ``deductions_split_across_rows`` says what was observed, which is what an
+    what was concluded; ``fees_deducted_from_a_capture`` says what was observed, which is what an
     analyst reviewing the decision — or an auditor asking why it was taken — actually needs.
 
     ``NO_RULE_MATCHED`` is a first-class member rather than an absence. A residual nothing could
@@ -56,20 +95,20 @@ class ClassificationRule(enum.StrEnum):
     would be indistinguishable from a row written before the classifier existed.
     """
 
-    REVERSAL_OF_BOOKED_DEBIT = "reversal_of_booked_debit"
-    REVERSAL_OF_BOOKED_CREDIT_ACROSS_PERIODS = "reversal_of_booked_credit_across_periods"
-    DEDUCTIONS_SPLIT_ACROSS_ROWS = "deductions_split_across_rows"
+    REVERSAL_OF_BOOKED_CHARGEBACK = "reversal_of_booked_chargeback"
+    REFUND_OF_BOOKED_CAPTURE_ACROSS_PERIODS = "refund_of_booked_capture_across_periods"
+    FEES_DEDUCTED_FROM_A_CAPTURE = "fees_deducted_from_a_capture"
     NO_RULE_MATCHED = "no_rule_matched"
 
 
 #: What each rule concludes. A total mapping over the enum, checked by test, so a rule cannot be
 #: added without stating which class it assigns.
 RULE_CLASSIFICATION: Final[dict[ClassificationRule, ExceptionClassification]] = {
-    ClassificationRule.REVERSAL_OF_BOOKED_DEBIT: ExceptionClassification.CHARGEBACK_REVERSAL,
-    ClassificationRule.REVERSAL_OF_BOOKED_CREDIT_ACROSS_PERIODS: (
+    ClassificationRule.REVERSAL_OF_BOOKED_CHARGEBACK: (ExceptionClassification.CHARGEBACK_REVERSAL),
+    ClassificationRule.REFUND_OF_BOOKED_CAPTURE_ACROSS_PERIODS: (
         ExceptionClassification.CROSS_PERIOD_REFUND
     ),
-    ClassificationRule.DEDUCTIONS_SPLIT_ACROSS_ROWS: ExceptionClassification.FEE_SPLIT,
+    ClassificationRule.FEES_DEDUCTED_FROM_A_CAPTURE: ExceptionClassification.FEE_SPLIT,
     ClassificationRule.NO_RULE_MATCHED: ExceptionClassification.UNCLASSIFIED,
 }
 
@@ -88,7 +127,7 @@ RULE_CLASSIFICATION: Final[dict[ClassificationRule, ExceptionClassification]] = 
 #: higher-priority rule that *declines*: precedence orders the rules that fire, so a reversal rule
 #: examining a line and then declining left it to be settled by the group rule. An in-period refund,
 #: which the taxonomy deliberately has no class for, came back ``fee_split`` as soon as the order
-#: carried one more unmatched credit. The fix is in :func:`~..engine._deductions_split_across_rows`:
+#: carried one more unmatched credit. The fix is in :func:`~..engine._fees_deducted_from_a_capture`:
 #: a line the reversal family has a claim on is not available to the group rule, whatever the family
 #: concludes. Same lesson as ADR-043 in M2.2 — an unresolved higher-priority claim must never be
 #: settled by a lower-priority rule.
@@ -96,9 +135,9 @@ RULE_CLASSIFICATION: Final[dict[ClassificationRule, ExceptionClassification]] = 
 #: The list stays because a fourth rule may not be disjoint from the other three, and the order it
 #: would then need should be a decision on record rather than one made in a hurry.
 RULE_PRECEDENCE: Final[tuple[ClassificationRule, ...]] = (
-    ClassificationRule.REVERSAL_OF_BOOKED_DEBIT,
-    ClassificationRule.REVERSAL_OF_BOOKED_CREDIT_ACROSS_PERIODS,
-    ClassificationRule.DEDUCTIONS_SPLIT_ACROSS_ROWS,
+    ClassificationRule.REVERSAL_OF_BOOKED_CHARGEBACK,
+    ClassificationRule.REFUND_OF_BOOKED_CAPTURE_ACROSS_PERIODS,
+    ClassificationRule.FEES_DEDUCTED_FROM_A_CAPTURE,
 )
 
 #: The rule set's revision, persisted on every exception it classifies.
@@ -108,7 +147,7 @@ RULE_PRECEDENCE: Final[tuple[ClassificationRule, ...]] = (
 #: about what would decide it the same way again. Bumped by hand whenever a rule's evidence,
 #: precedence or fallback behaviour changes — never derived from a clock, a commit or a file hash,
 #: all of which would move without a decision having been taken.
-CLASSIFIER_VERSION: Final = "residual-r1"
+CLASSIFIER_VERSION: Final = "residual-r2"
 
 
 def accounting_period(value_date: dt.date) -> str:

@@ -32,7 +32,11 @@ import dataclasses
 
 import pytest
 
-from ledger_exception_control_plane.classification import SettlementMovement, classify
+from ledger_exception_control_plane.classification import (
+    SettlementMovement,
+    classify,
+    movement_type,
+)
 from ledger_exception_control_plane.db.control import ExceptionClassification
 from ledger_exception_control_plane.fixtures.generator import generate
 from ledger_exception_control_plane.fixtures.schema import Profile
@@ -82,6 +86,7 @@ def measure(profile: Profile, instances: int = 200) -> Measurement:
         SettlementMovement(
             id=row.id,
             merchant_reference=row.merchant_reference,
+            movement=movement_type(row.transaction_type),
             amount=row.amount,
             currency=row.currency,
             value_date=row.value_date,
@@ -194,9 +199,9 @@ def test_precision_is_reported_in_full_for_the_canonical_corpus() -> None:
     }
     assert result.by_rule == {
         "no_rule_matched": 8,
-        "deductions_split_across_rows": 3,
-        "reversal_of_booked_debit": 1,
-        "reversal_of_booked_credit_across_periods": 1,
+        "fees_deducted_from_a_capture": 3,
+        "reversal_of_booked_chargeback": 1,
+        "refund_of_booked_capture_across_periods": 1,
     }
 
 

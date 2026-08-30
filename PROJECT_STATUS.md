@@ -625,7 +625,9 @@ with no model call anywhere in the path.
 - **A cross-table invariant the database enforces** (ADR-044): an exception can exist only for a line
   that is unmatched, and a line carrying an exception cannot be marked matched. Both directions are
   one composite foreign key, and direct SQL cannot get round either.
-- **Tests** — 46 unit and 15 measurement tests (Docker-free), plus 26 against real PostgreSQL.
+- **Tests** — 54 unit and 15 measurement tests (Docker-free), plus 30 against real PostgreSQL,
+  four of which ingest movement types through the whole path to prove direction alone is not
+  evidence.
 
 ### The classifier sees settlement lines and nothing else
 
@@ -711,10 +713,14 @@ Deliberately small, and none of it optional.
 
 | Change | Why |
 |---|---|
+| `settlement_line.transaction_type` | FR-4's taxonomy is a taxonomy of movement kinds. Declared in the approved format (ADR-031), parsed by M2.1, and discarded for want of a column — so classification could only read the sign. Nullable, and not value-constrained: see ADR-046 |
 | `exception.rule_id`, `exception.classifier_version` | Classification is deterministic *for a given rule set*. A row carrying the outcome and not the ruleset says what was decided and nothing about what would decide it the same way again. FR-3 already requires a matched line to record the rule that matched it. |
 | `exception.line_match_state` pinned to `unmatched`, plus `settlement_line UNIQUE (id, match_state)` and a composite foreign key | A check constraint cannot reference another table. This is ADR-028's pattern: carry the value and let a foreign key verify it. |
 
-Migration `138145789fda`, forward-only. It deviates from autogenerate in three places, each recorded
+Migrations `138145789fda` and `46dcf131f47d`, both forward-only. The first is described below; the
+second adds the movement type, and adds nothing else from the format — presentment amount,
+presentment currency and FX rate would not make `fx_rounding` reachable, because that class needs the
+ledger entry identified, and a column that changes no outcome is schema for its own sake. It deviates from autogenerate in three places, each recorded
 in the migration itself: the unique constraint is created *before* the key that references it
 (autogenerate emitted them in an order that cannot execute), `line_match_state` is backfilled and
 then verified by the key itself, and `rule_id`/`classifier_version` are **not** backfilled — they are
@@ -773,6 +779,40 @@ now runs where the measurement is honest — the whole suite against a real data
 PostgreSQL job and via `make coverage-gate` — where the same code measures **98.75%**. The default
 run still reports coverage; it just no longer gates on a figure it cannot compute.
 
+### The correction that mattered most: evidence, not direction
+
+`chargeback_reversal` was originally reached from *direction* — a residual credit exactly reversing a
+debit the ledger already carried. ADR-045 recorded honestly that this could not prove the debit was a
+**chargeback** rather than a fee reversal or a correction, and assigned the class anyway on the
+grounds that it was the taxonomy's only reversal class.
+
+**That reasoning was wrong.** Taxonomy structure is not transaction evidence: "this is the only class
+that could describe it" says something about the enumeration, not about the movement.
+
+Proven rather than argued. Three credits were ingested through the real path, identical in sign,
+currency, value date and counterpart — each exactly reversing a booked debit on its own order — and
+differing only in the type the PSP declared: `chargeback_reversal`, `refund_reversal`, `adjustment`.
+All three came back `chargeback_reversal`; two of those statements were false. A fourth case, a
+declared `chargeback_reversal` whose booked counterpart was a *capture*, was also accepted.
+
+**Dropping the rule was the obvious narrow fix, and it was rejected because it does not stop at one
+rule.** The same objection applies to `cross_period_refund` — a debit reversing a booked credit is
+equally a refund, a chargeback, a clawback or a correction — and to `fee_split`, where a credit with
+smaller unreconciled debits could as easily be a capture with partial refunds. Applied consistently it
+removes all three and leaves a classifier that assigns nothing. That would not be an honest
+limitation but a self-inflicted one, because the evidence exists and the pipeline already reads it:
+ADR-031 declares `transaction_type` in the approved format, M2.1 parses and validates it, and M2.1's
+own record deferred persisting it "for the increments that need them".
+
+So `settlement_line` now stores the declared movement type, and every rule requires it on both sides.
+Both halves matter: a declared reversal whose booked counterpart is a capture is refused, and a
+corroborating shape with no declaration is the defect being corrected. See ADR-046.
+
+**Measured results are identical** — same residual counts, same per-class counts, zero wrong at every
+scale. The old rules were right on this corpus and wrong in general, which is exactly why this needed
+an adversarial case rather than a measurement: the corpus never contained a credit whose declared
+type disagreed with its shape.
+
 ### Access path, recorded rather than optimised
 
 Two reads. Residuals come from `settlement_line` filtered on `match_state` with `NOT EXISTS` against
@@ -807,18 +847,25 @@ Every row was run; nothing here is inferred from a previous milestone.
 | Check | Result |
 |---|---|
 | Clean `uv sync --frozen` / `uv lock --check` | PASS |
-| `ruff format --check` / `ruff check` | PASS — 57 files |
-| `mypy` strict | PASS — 52 source files |
-| Unit suite (Docker-free) | PASS — 495 passed |
-| **Coverage gate, whole suite against real PostgreSQL** | **PASS — 98.75% (gate 90%)** |
-| Classification unit tests | PASS — 46 |
+| `ruff format --check` / `ruff check` | PASS — 59 files |
+| `mypy` strict | PASS — 53 source files |
+| **Coverage gate, whole suite against real PostgreSQL** | **PASS — 98.27% (gate 90%), 663 tests** |
+| **Declared movement type required for a class** | **PASS — 4 adversarial cases through real ingestion** |
+| **Three credits, same shape, different declared type** | **PASS — no longer all `chargeback_reversal`** |
+| **Declared reversal of a booked *capture*** | PASS — refused, `unclassified` |
+| **Unrecognised movement type** | PASS — ingests, classifies `unclassified`, batch not quarantined |
+| Classification unit tests | PASS — 54 |
 | Classification measurement tests | PASS — 15 |
-| Classification against real PostgreSQL | PASS — 26 |
+| Classification against real PostgreSQL | PASS — 26 + 4 |
+| Migration base → head → base → head | PASS — `46dcf131f47d` |
+| Matching cannot read the declared type | PASS — AST guard |
+| Canonical corpus regenerates byte-identically | PASS — raw CSVs unchanged |
 | Matching against real PostgreSQL | PASS — 27 |
 | Ingestion against real PostgreSQL | PASS — 21 |
 | Fixture corpus loads against real PostgreSQL | PASS — 8 |
 | Schema integrity against real PostgreSQL | PASS — 76 |
 | Migration up → down → up on a clean database | PASS — `138145789fda` |
+| Corpus containment guard | PASS — structural, proven in both directions |
 | Model/migration drift (`alembic check`) | PASS — no new operations |
 | Fixture corpus byte-identical | PASS — no drift |
 | **Wrong classifications, four corpus sizes** | **PASS — 0 at every scale** |
@@ -976,17 +1023,14 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-unit:         495 passed, 162 deselected  (Docker-free)
-coverage:     98.75% over the whole suite against a real database (gate 90%)
-ruff format:  57 files already formatted
+whole suite:  663 passed against a real database
+coverage:     98.27% (gate 90%)
+ruff format:  59 files already formatted
 ruff check:   All checks passed!
-mypy:         Success: no issues found in 52 source files
+mypy:         Success: no issues found in 53 source files
 alembic:      No new upgrade operations detected
-schema:        76 passed against real PostgreSQL (migrations, drift, constraints, grants)
-fixtures:       8 passed against real PostgreSQL (corpus loads with constraints enforced)
-ingest:        21 passed against real PostgreSQL (receipt, quarantine, re-delivery, concurrency)
-matching:      27 passed against real PostgreSQL (persistence, ambiguity, races, timezone)
-classification: 26 passed against real PostgreSQL (taxonomy, provenance, integrity, forced races)
+corpus:       matches the generator byte for byte
+classification evidence: 4 passed (declared movement type required for a class)
 ```
 
 Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-08-30.
@@ -995,7 +1039,7 @@ Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 47 ADRs and 9 OPEN items. OPEN-2 was resolved at M2.2 (ADR-042) and OPEN-3 at
+`DECISIONS.md` holds 48 ADRs and 9 OPEN items. OPEN-2 was resolved at M2.2 (ADR-042) and OPEN-3 at
 M2.3 (ADR-045). None blocks M2.4; **OPEN-4** (account mapping and period-assignment rules) is the next
 one due, and M2.4 cannot start without it. Still relevant:
 

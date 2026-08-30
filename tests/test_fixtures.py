@@ -551,9 +551,25 @@ def test_the_corpus_contains_no_model_output_at_all() -> None:
         "operation_id",
         "evidence",
     )
-    text = result.files["records.json"].decode("utf-8").lower()
-    for term in forbidden:
-        assert term not in text, f"records.json mentions {term}"
+
+    # Checked against the **field names**, not the raw text.
+    #
+    # This was a substring scan over the whole file until M2.3 persisted the PSP's declared movement
+    # type, at which point a legitimate settlement row — SC-009 is an `adjustment` — started
+    # tripping a guard aimed at the `adjustment` *table*. Widening the exception list would have
+    # blunted the guard; matching on structure sharpens it instead. A model artefact has to arrive
+    # under some key, so a key scan catches `treatment_proposal_id` as readily as `treatment`, and
+    # cannot be fooled by a value that happens to share a word with an entity M5 owns.
+    def keys(node: object) -> list[str]:
+        if isinstance(node, dict):
+            return [str(k) for k in node] + [x for v in node.values() for x in keys(v)]
+        if isinstance(node, list):
+            return [x for item in node for x in keys(item)]
+        return []
+
+    for key in keys(payload):
+        for term in forbidden:
+            assert term not in key.lower(), f"records.json carries a {term} field: {key}"
 
 
 def test_no_artifact_contains_credential_shaped_material() -> None:

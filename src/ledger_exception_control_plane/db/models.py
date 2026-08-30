@@ -155,6 +155,20 @@ class SettlementLine(Base):
     #: The merchant's own reference, where the PSP passes one through.
     merchant_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
+    #: What the PSP declared this movement to be — capture, fee, refund, chargeback and so on.
+    #:
+    #: Stored exactly as stated, and **not constrained to a value set**. A closed CHECK here would
+    #: mean a PSP adding a product could not be ingested at all: the receipt is committed before the
+    #: payload is read (ADR-041), so a rejected INSERT would leave a batch that can never reach
+    #: ``parsed`` or ``quarantined`` and re-delivery would reproduce it forever. Quarantining
+    #: instead would condemn a whole settlement file over one unfamiliar row, which is not what a
+    #: malformed file means. The closed vocabulary lives where the decision is taken: classification
+    #: maps this to a typed enum and treats anything it does not recognise as no evidence at all.
+    #:
+    #: Nullable because rows ingested before this column existed genuinely have no recorded type;
+    #: inventing one would be worse than admitting it is unknown.
+    transaction_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     amount: Mapped[decimal.Decimal] = money_column(nullable=False)
     currency: Mapped[str] = currency_column(nullable=False)
 
@@ -183,6 +197,12 @@ class SettlementLine(Base):
         # composite key on ``exception`` and ADR-044.
         UniqueConstraint("id", "match_state", name="uq_settlement_line_id_match_state"),
         CheckConstraint("line_number > 0", name="line_number_positive"),
+        # Present or genuinely absent, never blank: an empty declared type is not a type, and
+        # storing one would give the classifier a value it would have to special-case.
+        CheckConstraint(
+            "transaction_type IS NULL OR length(btrim(transaction_type)) > 0",
+            name="transaction_type_not_blank",
+        ),
         currency_format_constraint("currency", "currency_format"),
         # Reject an over-precise amount instead of letting storage round it. Split in two
         # so a rejection names its cause: asyncpg reports the constraint, not the column.

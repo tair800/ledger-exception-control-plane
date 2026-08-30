@@ -122,6 +122,10 @@ class SettlementLineRecord(_Artifact):
     line_number: int = Field(gt=0)
     psp_reference: str = Field(min_length=1, max_length=128)
     merchant_reference: str | None = Field(default=None, max_length=128)
+    #: What the PSP declared the movement to be. Present from M2.3, when ``settlement_line`` gained
+    #: the column: this record represents the state *after* ingestion, so omitting a field
+    #: ingestion now writes would make the corpus describe a database that no longer exists.
+    transaction_type: str | None = Field(default=None, min_length=1, max_length=64)
     amount: decimal.Decimal
     currency: CurrencyCode
     value_date: dt.date
