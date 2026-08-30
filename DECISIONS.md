@@ -1241,21 +1241,318 @@ Across the canonical corpus and bulk corpora of 215, 1,075 and 4,300 lines: **ze
 Ambiguity rises with volume (0, 0, 2, 20) while false matches stay at zero — coincidences are
 refused, not resolved, which is the whole point of the rule.
 
+## ADR-044 — An exception may exist only for a line the ledger did not reconcile
+
+**Status:** Accepted (M2.3)
+
+An exception is the control record for a residual. An exception attached to a *matched* line is a
+contradiction with consequences: it says a line both reconciled and needs a decision, and everything
+downstream — evidence, a treatment proposal, an approval, an adjustment, a ledger posting — is built
+on top of it. The posting would be for a movement the ledger already carries.
+
+**A check constraint cannot express it**, because the fact lives in another table. Three options were
+weighed and two rejected.
+
+An **application check** was rejected on the reasoning ADR-028 arrived at the hard way: a control that
+depends on application discipline is a convention that holds until someone writes a second code path.
+A **trigger** was rejected because a relational constraint can express this cleanly, and a trigger
+that duplicates a foreign key is a second mechanism to keep correct.
+
+**Decision: carry the value and let a composite foreign key verify it**, the pattern ADR-028 corrected
+its way into.
+
+| Key | Effect |
+|---|---|
+| `settlement_line UNIQUE (id, match_state)` | Gives the key something to reference |
+| `exception.line_match_state` + `CHECK (= 'unmatched')` | The column can hold exactly one value |
+| `exception (settlement_line_id, line_match_state) → settlement_line (id, match_state)` | The referenced pair is `(id, 'unmatched')`, so the row exists only while the line really is unmatched |
+
+The denormalised column is not the liability it was in ADR-028. There, `approving_principal` could
+hold anything a writer asserted, and the correction was to verify it. Here the check constraint pins
+it to one value, so there is nothing for a second code path to get wrong: the column is a *shape*
+that makes the foreign key say what a check constraint cannot.
+
+**The same key refuses the reverse, and that is a feature rather than a side effect.** Marking a line
+matched while an exception claims it fails, because the tuple the exception references would cease to
+exist. That is the invariant read from the other end. Once a residual has become an exception it has a
+decision path of its own, and matching it later — after a fresh ledger snapshot, say — would silently
+revoke a claim the system had already made, leaving one line with two resolutions and no record of
+the reversal. Withdrawing an exception is workflow, and workflow is a later increment's; until then
+the honest behaviour is to refuse.
+
+**A foreign key resolves a race by failing, which is safe and expensive.** A line matched between
+M2.3's read and its insert would abort the whole classification run over one row, and the mirror case
+would abort a whole matching run. So both writers re-check under a row lock taken **in the same
+order**: matching drops lines that acquired an exception, classification drops lines that acquired a
+match. Whichever arrives second observes the other's decision instead of colliding with it, the
+shared ordering keeps them from deadlocking over rows the other holds, and the foreign key stops
+being the mechanism and becomes what it should be — the backstop for anything that bypasses both,
+including direct SQL. Proven by two deliberately interleaved tests that block one writer on the
+other's lock rather than gathering two calls and hoping they overlap.
+
+**The lock covers the evidence, not only the subject**, and the first version did not. A
+classification is derived from the state of *other* rows: three unreconciled rows on one order read
+as a `fee_split`, and if the gross is matched before the write lands, two fee rows are persisted as a
+split whose capture has gone. The composite key cannot catch that — the rows it constrains are still
+unmatched, and the conclusion is wrong for a reason no constraint can see. Found by review, proven
+against a real database, and fixed by locking the residuals *and* the movements that explain them,
+re-reading them under that lock, and only then classifying. It is the reason classification runs in
+one transaction where matching runs in two: matching's decision concerns one line and one entry and
+the unique constraints arbitrate a stale proposal at write time, so it can afford to think outside a
+transaction. Nothing arbitrates a stale *group*.
+
+**The cost, stated.** Matching now reads the exception table. The scope guard that previously banned
+the import outright was narrowed rather than lifted, and replaced with two that state the actual
+rule: matching may observe *that* a line is under exception control, and may not write the table or
+read what the control says. A blanket ban would have been a proxy for those, and the proxy stopped
+being true the moment the two increments had to coexist.
+
+---
+
+## ADR-045 — The exception taxonomy: three classes reachable, two declared and unassigned (resolves OPEN-3)
+
+**Status:** Accepted (M2.3). **Resolves OPEN-3**, which the plan required to be settled before this
+increment.
+
+OPEN-3 asked whether FR-4's six proposed classes survive contact with the corpus. The answer is that
+**four survive as decidable outcomes and two do not**, and the reason the two fail is structural
+rather than a gap in the rules.
+
+### What a residual actually offers
+
+After M2.2, a residual line carries what `settlement_line` persists: a PSP reference, a merchant
+reference, a signed amount, a currency, a value date, and whether it matched. The ledger side offers
+`external_ref`, `account_code`, an amount, a booking timestamp and a free-text `description`.
+
+**No deterministic key links a settlement line to a ledger entry.** Neither reference appears in the
+other system's record. Amount, currency and date are exactly what M2.2 already matches on — and where
+they identify an entry uniquely, M2.2 has already consumed it. A line is residual *precisely because*
+those three did not resolve it. Measured on the corpus, the gap is not marginal: at 4,300 lines a
+residual typically shares its currency and date window with two hundred unconsumed entries. The only
+remaining route is substring-matching the ledger description, which M2.2 refused for the same reason
+(`matching.policy.MatchRule`) and which this increment must not introduce.
+
+That single fact decides the taxonomy. **Any class that asserts a relationship to one particular
+ledger entry is unprovable.** What *is* provable is the relationship between settlement lines
+themselves, keyed on the merchant's own reference — an exact key the PSP passes through, needing no
+canonicalisation and no fuzzy comparison — together with each line's match state, which is the whole
+of what the ledger has said about it.
+
+### The classes
+
+Each is stated the same way: identifier, meaning, minimum evidence, what distinguishes it, what may
+**not** be used to infer it, precedence, and the fallback when evidence runs out.
+
+---
+
+**`chargeback_reversal`** — rule `reversal_of_booked_debit`
+
+*Meaning.* A credit that undoes a debit the ledger already carries, with nothing in the ledger to
+match the undoing.
+
+*Minimum evidence.* The subject is unmatched with a positive amount and a merchant reference;
+**exactly one** other line on that reference and currency has the exact negated amount and is
+matched.
+
+*Distinguishes it.* Direction plus the counterpart's match state. A credit reversing a *booked* debit
+is a reversal of something the ledger has; a credit beside an unbooked debit is two rows nobody has
+reconciled, which is a different condition.
+
+*Must not be used to infer it.* The ledger's `account_code` (a chart-of-accounts semantic is OPEN-4's
+to define, and a second uncoordinated mapping here would pre-empt it); the ledger `description`; the
+PSP reference's shape. The corpus builds reversals as `X` and `X-rev`, so a classifier reading the
+PSP reference could score perfectly on this corpus while encoding one generator's naming habit.
+
+*Precedence.* Disjoint from both other rules: from `cross_period_refund` by the sign of the
+subject, and from `fee_split` because that rule requires *zero* booked offsets where this one
+requires exactly one.
+
+*Fallback.* Two booked counterparts both offsetting exactly → `unclassified`. Ambiguity refuses
+rather than picks, the same discipline M2.2 applies to candidate entries.
+
+*Recorded limitation.* This does not prove the original debit was a **chargeback** rather than a fee
+reversal or a correction. The PSP declares a transaction type on every row and M2.1 normalises it,
+but `settlement_line` has no column for it, so the declaration is validated and discarded. Within a
+closed taxonomy whose only reversal class is this one, mapping here is the sanctioned broader-class
+fallback. Persisting `transaction_type` would upgrade this from an inference to a declaration, and
+that is the single highest-value change available to the taxonomy.
+
+---
+
+**`cross_period_refund`** — rule `reversal_of_booked_credit_across_periods`
+
+*Meaning.* A refund that settles in a later accounting period than the capture it reverses.
+
+*Minimum evidence.* The subject is unmatched with a negative amount and a merchant reference;
+**exactly one** other line on that reference and currency has the exact negated amount and is
+matched; the two value dates fall in different calendar months.
+
+*Distinguishes it.* The direction is an accounting fact, not a corpus artefact: a capture is a credit
+and its refund a debit, while a chargeback is a debit and its reversal a credit.
+
+*Must not be used to infer it.* The current month, the run date, or any clock — a classification that
+moved with the day it was re-run would not be a classification. Nor a day count: "different period"
+is exactly a calendar-month boundary, and one day across a month end qualifies while twenty-nine days
+inside one does not.
+
+*Period definition.* `YYYY-MM` of the settlement `value_date`, the format `adjustment.period` already
+commits to. M2.3 **detects that a boundary was crossed**; it does not assign a posting period, which
+is OPEN-4's decision and M2.4's to make.
+
+*Precedence.* Disjoint from both other rules, for the same two reasons as above.
+
+*Fallback.* A refund settling in its own period → `unclassified`. The taxonomy has no in-period
+refund class, and borrowing this one would make the class name false on every such row.
+
+**This is where the review found the increment's one real defect.** Declining on the period test is
+correct, but a declining rule used to leave the line available to `fee_split`, so an in-period refund
+came back a fee split as soon as the order carried one more unmatched credit — a customer refund
+labelled a PSP deduction, and an order's unrelated row changing the class of the refund. Fixed by
+excluding any line with a booked exact offset from the group rule. See the precedence section below.
+
+---
+
+**`fee_split`** — rule `deductions_split_across_rows`
+
+*Meaning.* One economic movement the PSP reported across several rows — a gross capture and its fees
+— which the ledger booked as a single net entry, so no individual row equals any individual entry.
+
+*Minimum evidence.* Among the unreconciled lines sharing the subject's merchant reference and
+currency there is at least one credit and at least one debit, and **the debits together are strictly
+smaller than the largest credit**.
+
+*Distinguishes it.* Strictness is doing real work rather than tidying: it is what a deduction *is*, a
+fee comes out of a capture and cannot exceed it. Without it the rule would also fire on a chargeback
+and its reversal when neither reconciled — equal and opposite, which is an offset, not a deduction —
+and would label a reversal pair a fee split.
+
+*Must not be used to infer it.* The memo text ("looks like a fee"); the PSP reference stem, which the
+corpus builds as `X`, `X-fee1`, `X-fee2`; and the sum of the group against a candidate ledger entry,
+which would be matching by another name.
+
+*Precedence.* Does not arise: this rule requires **zero** booked exact offsets, so a line the
+reversal family has a claim on is never available to it. That is stronger than ranking it below the
+reversal rules, and it is the fix for the defect recorded above — evidence about the line itself
+excludes evidence about the company it keeps, rather than merely outranking it.
+
+*Fallback.* Rows of one sign, or deductions that equal or exceed the largest credit → `unclassified`.
+
+---
+
+**`partial_capture`** — **declared, assigned by nothing**
+
+*Meaning.* The merchant captured less than the ledger accrued.
+
+*Why unreachable.* "Less than **the ledger accrued**" names a specific entry. Identifying it needs a
+key that does not exist. What remains observable is a lone residual capture with a merchant
+reference — a shape shared by an FX rounding difference, a near-amount miss and a line that lost a
+matching ambiguity. At canonical scale a classifier could appear to resolve it, because the corpus
+holds one instance of each; at volume that is a classifier that works on a toy.
+
+*Must not be used to infer it.* "The only nearby larger entry", which is a matcher with a weaker rule
+and would consume evidence M2.2 declined to consume.
+
+*Fallback.* `unclassified`. Measured: 140 of 833 residuals at bulk 4,000, every one of them
+unclassified and none given a neighbouring class.
+
+---
+
+**`fx_rounding`** — **declared, assigned by nothing**
+
+*Meaning.* The settlement and the ledger converted the same movement independently and landed a
+minor unit or two apart.
+
+*Why unreachable.* Two pieces of evidence are missing, not one. The ledger's own converted amount
+needs the entry to be identified, and the fact that a conversion happened at all lives in
+`presentment_currency` and `fx_rate` — which M2.1 normalises and `settlement_line` does not store.
+The only trace of FX in persisted data is the word inside a ledger description, and classifying on
+that is the substring guess this increment is forbidden to make.
+
+*Must not be used to infer it.* "A difference of two or three minor units is a rounding artefact." It
+is not evidence of a *currency conversion*; a single-currency near-miss produces the identical shape,
+and the corpus contains 158 of them. Naming this class without conversion evidence would put a cause
+into a financial control record that nothing supports.
+
+*Fallback.* `unclassified`. Measured: 55 of 833 residuals at bulk 4,000.
+
+---
+
+**`unclassified`** — rule `no_rule_matched`
+
+*Meaning.* No rule could prove a condition from the available evidence.
+
+*Why it is a feature.* Insufficient evidence is not permission to invent a class. The exception still
+exists, still carries provenance, and still reaches an analyst — the system has simply not pretended
+to know more than it does. `no_rule_matched` is a rule identifier of its own rather than an absence,
+so a row recording it is distinguishable from one written before this classifier existed.
+
+---
+
+### Precedence — declared, and deliberately never exercised
+
+`RULE_PRECEDENCE` is an explicit tuple. Every rule is evaluated for every residual and the
+highest-precedence firing rule wins; evaluating all of them rather than returning at the first hit is
+what makes precedence inspectable, because a rule then cannot win by being written earlier in the
+file.
+
+**The rule set is pairwise disjoint, so the order decides nothing.** The two reversal rules differ by
+the sign of the subject, and the group rule requires zero booked exact offsets where both reversal
+rules require exactly one. A test sweeps the shapes that could plausibly collide and asserts at most
+one rule fires.
+
+That is not how it started, and the difference is the increment's most useful finding. The rule set
+originally admitted one overlap and this list resolved it correctly. What a precedence list cannot
+resolve is a higher-priority rule that **declines**: it orders the rules that *fire*, so a reversal
+rule examining a line and then failing its last condition left the line to be settled by the group
+rule. Two reachable inputs went wrong — an in-period refund, and a subject with two booked offsets
+whose reversal evidence was ambiguous. Both were named `fee_split`.
+
+It is the same defect as ADR-043's, in a new place: **an unresolved higher-priority claim must never
+be settled by a lower-priority rule.** M2.2 learned it about matching tiers and fixed it by
+withdrawing contested entries; M2.3 learned it about classification rules and fixed it by excluding
+any line the reversal family has a claim on from the group rule, whatever that family concludes. The
+rule set is now built to have no overlap rather than to resolve one, and `RULE_PRECEDENCE` remains as
+the decision a fourth rule would need rather than as something today's answers depend on.
+
+Neither input occurs in the committed corpus — verified at all four scales — so the measured table
+below was never wrong. That is exactly why it was worth finding by adversarial review rather than by
+measurement: a corpus that does not contain a case cannot fail on it.
+
+### Measured, at four scales
+
+| Corpus | Residuals | Correct | Under-classified | **Wrong** | No declared intent |
+|---|---|---|---|---|---|
+| `canonical` | 13 | 9 | 3 | **0** | 1 |
+| `bulk` @ 200 | 39 | 23 | 9 | **0** | 7 |
+| `bulk` @ 1000 | 207 | 115 | 46 | **0** | 46 |
+| `bulk` @ 4000 | 833 | 460 | 195 | **0** | 178 |
+
+**No wrong deterministic classification at any scale**, and precision on assigned classes is exactly
+1: everything that got a name got the right one. Coverage is 43% at bulk 4,000, and the shortfall is
+almost entirely the two unreachable classes. That ordering is deliberate — a wrong class is the first
+step of a wrong posting, while an unclassified residual is a decision a human makes.
+
+Every instance of a reachable class is classified, which is what stops the precision figure being
+cheap: a classifier that fired once and abstained forever would also report zero wrong answers.
+
+### What would change the answer
+
+Persisting the PSP's declared `transaction_type` — already parsed, validated and discarded by M2.1 —
+would turn three inferences into declarations and is the highest-value change available. It would
+**not** make `partial_capture` or `fx_rounding` reachable: those need the ledger entry identified,
+which is a different and harder problem, and one this project should solve by giving the ledger
+snapshot a settlement reference rather than by guessing.
+
 ---
 
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.
 
-**OPEN-1** (settlement file format) was resolved at M1.3 as ADR-031, and **OPEN-2** (tolerance band
-configuration and defaults) at M2.2 as ADR-042. Both are removed from this list rather than left with
-a "resolved" marker, because an open-decisions list that accumulates closed items stops being read.
-
-## OPEN-3 — Exception classification taxonomy, final form
-
-**Must decide:** whether the six proposed classes (partial capture, fee split, chargeback reversal, FX
-rounding, cross-period refund, unclassified) survive contact with the fixture corpus.
-**Needed before:** increment 2.3. Related to the ADR-001 enum-closure gate at 3.1.
+**OPEN-1** (settlement file format) was resolved at M1.3 as ADR-031, **OPEN-2** (tolerance band
+configuration and defaults) at M2.2 as ADR-042, and **OPEN-3** (the exception taxonomy) at M2.3 as
+ADR-045. All three are removed from this list rather than left with a "resolved" marker, because an
+open-decisions list that accumulates closed items stops being read.
 
 ## OPEN-4 — Account mapping and period-assignment rules
 

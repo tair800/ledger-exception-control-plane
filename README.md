@@ -12,17 +12,19 @@ double-post against a RED baseline that does.
 > schema** with Alembic migrations, a **deterministic synthetic fixture corpus**, and — as of
 > M2.1 — **settlement ingestion**: a settlement file is received, hashed, persisted immutably,
 > parsed, normalised, and either accepted as typed settlement lines or quarantined with a reason;
-> and as of M2.2 — **deterministic matching**: those lines are reconciled against ledger entries by
-> exact amount and by a per-currency tolerance band, with ambiguity refused rather than guessed.
+> as of M2.2 — **deterministic matching**: those lines are reconciled against ledger entries by
+> exact amount and by a per-currency tolerance band, with ambiguity refused rather than guessed; and
+> as of M2.3 — **residual classification**: every line that fails to match becomes exactly one
+> `exception`, carrying a class from the closed taxonomy, the rule that assigned it and the version
+> of the rule set, or `unclassified` where the evidence cannot support a class.
 >
-> **What does not exist: everything after the match.** A line that fails to match is left unmatched
-> and nothing describes *why*. Nothing detects a residual as a business event, classifies an
-> exception, assembles evidence, proposes a treatment, computes an adjustment, obtains an approval
-> or posts anything. There is no LLM integration, no ledger adapter, no dispatcher, no retry, no
-> DLQ replay, no recovery workflow, no audit emission and no chaos suite. An `outbox` table is not a transactional outbox; a
-> `posting_attempt` table is not a write-ahead protocol; **a fixture labelled `fee_split` is a
-> constructed input, not evidence that anything can classify a fee split.** Everything below that
-> is not listed as existing is a *specification of intended behaviour*.
+> **What does not exist: everything with a monetary consequence.** Nothing computes an adjustment
+> amount, selects an account, assigns a posting period, assembles evidence for a model, proposes a
+> treatment, obtains an approval or posts anything. There is no LLM integration, no ledger adapter,
+> no dispatcher, no retry, no DLQ replay, no recovery workflow, no audit emission and no chaos
+> suite. An `outbox` table is not a transactional outbox and a `posting_attempt` table is not a
+> write-ahead protocol. Everything below that is not listed as existing is a *specification of
+> intended behaviour*.
 >
 > No measurement here is a result — the `Measured` table is an obligation the build must produce
 > from a committed script, and it will not appear until it does.
@@ -405,9 +407,83 @@ make db-up
 make match-verify   # matching, tolerance, ambiguity and races against real PostgreSQL
 ```
 
-**Still absent, deliberately:** anything that says *why* a line did not match. Residual detection,
-the exception taxonomy and evidence assembly are M2.3, and the matching package imports nothing that
-would let it reach an exception table — a test walks its AST to keep it that way.
+A line that has become an exception leaves the matching pool. Matching it after a later ledger
+snapshot would silently revoke a claim the system had already made, and the database refuses it.
+
+### Residual classification
+
+Every line matching leaves behind becomes exactly one `exception`, classified deterministically. The
+classifier is handed six fields per settlement line — id, merchant reference, amount, currency, value
+date, and whether matching reconciled it — and nothing else. No ledger entry, no account, no
+description, no memo, and no PSP reference. That last exclusion is deliberate: the fixture corpus
+builds a fee split as `X`, `X-fee1`, `X-fee2`, so a classifier able to read the PSP's reference could
+score perfectly against this corpus while encoding nothing but one generator's naming habit.
+
+The consequence is structural rather than promised: **pairing a line with a ledger entry is not
+expressible in this package**, so M2.3 cannot re-run matching under a weaker rule, and matching
+remains the only code that consumes a ledger entry.
+
+Three rules, each corroborated and each with a stable identifier naming the evidence rather than the
+conclusion:
+
+| Rule | Class | Evidence |
+|---|---|---|
+| `reversal_of_booked_debit` | `chargeback_reversal` | A credit whose exact negation is **exactly one** already-reconciled line on the same merchant reference |
+| `reversal_of_booked_credit_across_periods` | `cross_period_refund` | The same, with the signs reversed, and the two value dates in different calendar months |
+| `deductions_split_across_rows` | `fee_split` | Unreconciled lines on one reference carrying a credit and debits, the debits strictly smaller than the largest credit |
+| `no_rule_matched` | `unclassified` | Nothing could be proved |
+
+Where a rule needs a corroborating movement it requires *exactly one* — two candidates make the
+classification unprovable, not twice as likely — and every comparison is exact `Decimal` equality.
+M2.3 introduces no tolerance of its own; the system has one tolerance policy and it belongs to
+matching.
+
+The three rules are **pairwise disjoint**, so the outcome does not depend on their order at all.
+That is stronger than resolving an overlap by precedence, and it is what adversarial review pushed
+the design to: a precedence list orders the rules that *fire*, so a higher-priority rule that
+examines a line and then declines used to leave it to be settled by a weaker one. An in-period
+refund — a case the taxonomy deliberately has no class for — came back `fee_split` as soon as the
+order carried one more unmatched credit. A line the reversal rules have a claim on is now excluded
+from the group rule whatever they conclude, and a test sweeps the colliding shapes to prove no two
+rules can fire together.
+
+**Two of the six declared classes are reachable by nothing, and it is the same reason twice.**
+`partial_capture` and `fx_rounding` are claims about a line's relationship to *one particular ledger
+entry* — and no deterministic key links a settlement line to a ledger entry. Amount, currency and date
+are exactly what matching already uses; where they identify an entry uniquely, matching has already
+consumed it. At 4,300 lines a residual typically shares its currency and date window with two hundred
+unconsumed entries. The only route left is substring-matching the ledger's free-text description,
+which this project does not do. Those residuals are `unclassified`, and the class names stay unused
+rather than being attached to a shape that merely resembles them.
+
+**Coverage is the secondary number; precision is the one that matters.** A wrong class is not a
+mislabel — it is the first step of a wrong posting. Every decision is graded against the scenario each
+line was constructed for:
+
+| Corpus | Residuals | Correct | Under-classified | **Wrong** |
+|---|---|---|---|---|
+| `canonical` | 13 | 9 | 3 | **0** |
+| `bulk` @ 1000 | 207 | 115 | 46 | **0** |
+| `bulk` @ 4000 | 833 | 460 | 195 | **0** |
+
+**No wrong classification at any scale**, and precision on assigned classes is exactly 1: everything
+that got a name got the right one. Coverage at 4,000 instances is 43%, and the shortfall is almost
+entirely the two unreachable classes. *Under-classified* means `unclassified` where a class was
+intended — safe, because a human decides.
+
+An exception can exist only for a line the ledger did not reconcile, and a line carrying an exception
+cannot be marked matched. Both directions are one composite foreign key, so direct SQL cannot produce
+the contradiction either.
+
+```bash
+make db-up
+make classify-verify   # taxonomy, provenance, integrity and races against real PostgreSQL
+```
+
+**Still absent, deliberately:** any monetary consequence. Nothing prices a residual, selects an
+account or assigns a posting period — that is M2.4 — and the classification package imports nothing
+that would let it reach the adjustment, approval or treatment tables. A test walks its AST to keep it
+that way, and each guard is proven to fail against a deliberately injected violation.
 
 ### Deterministic fixture corpus
 

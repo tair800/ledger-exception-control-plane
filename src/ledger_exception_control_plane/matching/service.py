@@ -14,6 +14,18 @@ and unique on the entry, and inserts go in with ``ON CONFLICT DO NOTHING``. A wo
 race simply does not insert that pair, does not mark that line, and leaves it unmatched — which is
 the correct retryable state, because the next run reads the world as it now is. No in-process lock
 is involved, and none would help: the competing worker is another process.
+
+**A line under exception control is not matchable.** Once M2.3 has raised an exception for a
+residual, that line has an open control record and a decision path of its own; matching it later —
+after a fresh ledger snapshot, say — would silently revoke a claim the system had already made,
+leaving one line with two contradictory resolutions and no record of the reversal. The database
+refuses it outright (ADR-044), so this module excludes such lines from eligibility and re-checks
+under a row lock before writing. That keeps the foreign key as a backstop rather than as the
+mechanism: without the re-check a single line acquiring an exception mid-run would abort the whole
+matching transaction.
+
+**This module still classifies nothing.** It reads whether an exception exists and nothing about
+what it says — not its class, not its status. Reversing that claim is what M2.3's workflow owns.
 """
 
 from __future__ import annotations
@@ -26,6 +38,7 @@ from sqlalchemy import Date, cast, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from ledger_exception_control_plane.db.control import ExceptionRecord
 from ledger_exception_control_plane.db.models import (
     LedgerEntry,
     MatchResult,
@@ -132,6 +145,10 @@ async def _load_candidates(
     ).where(
         SettlementLine.match_state == MatchState.UNMATCHED,
         ~select(MatchResult.id).where(MatchResult.settlement_line_id == SettlementLine.id).exists(),
+        # An open control record makes the line M2.3's, not this module's. See the docstring.
+        ~select(ExceptionRecord.id)
+        .where(ExceptionRecord.settlement_line_id == SettlementLine.id)
+        .exists(),
     )
     if batch_id is not None:
         line_query = line_query.where(SettlementLine.settlement_batch_id == batch_id)
@@ -198,13 +215,41 @@ async def _persist(
     ``ON CONFLICT DO NOTHING`` covers both unique constraints — the line and the entry — so a pair
     lost to a concurrent worker is skipped rather than aborting the run. The line state is then set
     only for the pairs that really landed, which is what keeps the two writes from diverging.
+
+    The lines are locked in id order first, and any that acquired an exception since the read are
+    dropped. Both halves matter. Without the lock, M2.3 could raise an exception between the check
+    and the update, and the composite foreign key would then abort this whole transaction over one
+    line. Without the shared id ordering, two writers holding rows the other wants could deadlock.
+    M2.3 takes the same lock in the same order and drops the lines *this* module matched, so
+    whichever gets there second observes the other's decision instead of colliding with it.
     """
     if not outcome.matches:
         return []
 
     inserted: list[uuid.UUID] = []
     async with session.begin():
+        proposed_line_ids = sorted({proposed.line_id for proposed in outcome.matches})
+        await session.execute(
+            select(SettlementLine.id)
+            .where(SettlementLine.id.in_(proposed_line_ids))
+            .order_by(SettlementLine.id)
+            .with_for_update()
+        )
+        under_exception = set(
+            (
+                await session.execute(
+                    select(ExceptionRecord.settlement_line_id).where(
+                        ExceptionRecord.settlement_line_id.in_(proposed_line_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
         for proposed in outcome.matches:
+            if proposed.line_id in under_exception:
+                continue
             statement = (
                 pg_insert(MatchResult)
                 .values(

@@ -342,7 +342,12 @@ def test_required_foreign_keys_exist_with_intended_delete_behaviour() -> None:
         # M1.2. The rule is RESTRICT everywhere on the decision and money path: each of these
         # rows is evidence that a financial decision was taken, and a cascade would delete the
         # record of a decision as a side effect of tidying up something upstream.
+        # M2.3 made this one composite. ``line_match_state`` is pinned to ``unmatched`` by a check
+        # constraint, so the referenced pair is ``(settlement_line.id, 'unmatched')`` and an
+        # exception can exist only while the line really is unmatched — the cross-table rule a
+        # check constraint cannot express. See ADR-044.
         ("exception", "settlement_line_id", "settlement_line", "RESTRICT"),
+        ("exception", "line_match_state", "settlement_line", "RESTRICT"),
         ("treatment_proposal", "exception_id", "exception", "RESTRICT"),
         ("approval", "exception_id", "exception", "RESTRICT"),
         ("approval", "treatment_proposal_id", "treatment_proposal", "RESTRICT"),
@@ -391,6 +396,7 @@ def test_required_unique_constraints_are_declared() -> None:
         # Redundant as uniqueness claims — `id` is already the primary key — and required,
         # because a foreign key must reference a uniquely-constrained column list.
         ("approval", ("id", "approved_treatment", "principal")),
+        ("settlement_line", ("id", "match_state")),
         ("adjustment", ("id", "operation_id")),
         ("adjustment", ("id", "approving_principal")),
         # 12.2: duplicate suppression is a database guarantee, not application logic.

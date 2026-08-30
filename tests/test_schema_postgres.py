@@ -755,8 +755,11 @@ async def _build_chain(connection: asyncpg.Connection, seed: str = "chain") -> _
     )
     await connection.execute(
         """
-        INSERT INTO exception (id, settlement_line_id, classification, status, correlation_id)
-        VALUES ($1, $2, 'fee_split', 'open', 'corr-1')
+        INSERT INTO exception
+            (id, settlement_line_id, line_match_state, classification, status,
+             rule_id, classifier_version, correlation_id)
+        VALUES ($1, $2, 'unmatched', 'fee_split', 'open',
+                'deductions_split_across_rows', 'residual-r1', 'corr-1')
         """,
         exception_id,
         line_id,
@@ -873,8 +876,10 @@ async def test_one_exception_per_settlement_line() -> None:
                 await connection.execute(
                     """
                     INSERT INTO exception
-                        (id, settlement_line_id, classification, status, correlation_id)
-                    VALUES ($1, $2, 'fx_rounding', 'open', 'corr-2')
+                        (id, settlement_line_id, line_match_state, classification, status,
+                         rule_id, classifier_version, correlation_id)
+                    VALUES ($1, $2, 'unmatched', 'fx_rounding', 'open',
+                            'no_rule_matched', 'residual-r1', 'corr-2')
                     """,
                     uuid.uuid4(),
                     chain.line,
@@ -1582,8 +1587,11 @@ async def _approval_only(
     )
     await connection.execute(
         """
-        INSERT INTO exception (id, settlement_line_id, classification, status, correlation_id)
-        VALUES ($1, $2, 'fee_split', 'open', 'corr-1')
+        INSERT INTO exception
+            (id, settlement_line_id, line_match_state, classification, status,
+             rule_id, classifier_version, correlation_id)
+        VALUES ($1, $2, 'unmatched', 'fee_split', 'open',
+                'deductions_split_across_rows', 'residual-r1', 'corr-1')
         """,
         exception_id,
         line_id,

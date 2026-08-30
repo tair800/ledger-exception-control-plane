@@ -52,7 +52,7 @@ from ledger_exception_control_plane.db.base import (
     money_scale_constraint,
     uuid_pk,
 )
-from ledger_exception_control_plane.db.models import SettlementLine
+from ledger_exception_control_plane.db.models import MatchState, SettlementLine
 
 SHA256_HEX = "^[0-9a-f]{64}$"
 
@@ -215,22 +215,46 @@ class ExceptionRecord(Base):
 
     Named ``ExceptionRecord`` in Python because ``Exception`` is a builtin; the table is
     ``exception``, as the specification names it.
+
+    **An exception can only exist for a line the ledger did not reconcile**, and that is a
+    referential fact rather than an application convention — see ``line_match_state`` and
+    ADR-044.
     """
 
     __tablename__ = "exception"
 
     id: Mapped[uuid.UUID] = uuid_pk()
 
-    # RESTRICT, not CASCADE: an exception is the control record for a line that failed to
-    # reconcile. Deleting the line must not erase the evidence that it needed a decision.
-    settlement_line_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("settlement_line.id", ondelete="RESTRICT"), nullable=False
+    #: The residual line. The foreign key is declared at table level because it is composite —
+    #: see ``fk_exception_settlement_line``.
+    #:
+    #: RESTRICT, not CASCADE: an exception is the control record for a line that failed to
+    #: reconcile. Deleting the line must not erase the evidence that it needed a decision.
+    settlement_line_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+
+    #: Pinned to ``unmatched`` by a check constraint, and carried into the composite foreign
+    #: key above so the *database* refuses an exception for a line that reconciled. The column
+    #: can hold exactly one value, so unlike the denormalised copy ADR-028 had to correct, there
+    #: is nothing here for a second code path to get wrong.
+    line_match_state: Mapped[MatchState] = mapped_column(
+        String(16), nullable=False, default=MatchState.UNMATCHED
     )
 
     classification: Mapped[ExceptionClassification] = mapped_column(String(32), nullable=False)
     status: Mapped[ExceptionStatus] = mapped_column(
         String(16), nullable=False, default=ExceptionStatus.OPEN
     )
+
+    #: Which deterministic rule assigned the classification, including the fallback. FR-3
+    #: requires a matched line to record the rule that matched it; a *classified* line owes the
+    #: same answer, and "unclassified" is a decision that needs explaining as much as any other.
+    rule_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    #: Which version of the rule set produced it. Classification is deterministic only *for a
+    #: given rule set*, so without this a later revision makes every historical decision
+    #: unexplainable — the row would say what was decided and nothing about what would decide it
+    #: the same way again.
+    classifier_version: Mapped[str] = mapped_column(String(32), nullable=False)
 
     #: Spans ingestion → posting (§11). Not nullable: an action with no correlation id cannot
     #: be traced, which defeats the audit trail.
@@ -244,10 +268,34 @@ class ExceptionRecord(Base):
         # FR-4: one exception per residual line. Without this, a re-run of exception creation
         # would produce a second decision path for one line.
         UniqueConstraint("settlement_line_id", name="uq_exception_settlement_line_id"),
+        # A check constraint cannot reference another table, so "the line is unmatched" is
+        # enforced the way ADR-028 enforces segregation of duties: carry the value and let a
+        # composite foreign key verify it. The pinned column makes the pair
+        # ``(settlement_line_id, 'unmatched')``, so the row exists only while the line really is
+        # unmatched — and the same key refuses the reverse, marking a line matched while an
+        # exception claims it. Both directions are the same invariant. See ADR-044.
+        ForeignKeyConstraint(
+            ["settlement_line_id", "line_match_state"],
+            ["settlement_line.id", "settlement_line.match_state"],
+            ondelete="RESTRICT",
+            name="fk_exception_settlement_line",
+        ),
+        CheckConstraint(
+            f"line_match_state = '{MatchState.UNMATCHED.value}'",
+            name="line_is_unmatched",
+        ),
         CheckConstraint(
             _closed("classification", ExceptionClassification), name="classification_valid"
         ),
         CheckConstraint(_closed("status", ExceptionStatus), name="status_valid"),
+        # Stable machine identifiers, not prose. The permitted shape is constrained rather than
+        # the permitted values: the rule set evolves with ``classifier_version``, so enumerating
+        # rule ids here would demand a migration for every new rule and would leave rows written
+        # under an older set unrepresentable.
+        CheckConstraint("rule_id ~ '^[a-z][a-z0-9_]{0,63}$'", name="rule_id_shape"),
+        CheckConstraint(
+            "classifier_version ~ '^[a-z0-9][a-z0-9.-]{0,31}$'", name="classifier_version_shape"
+        ),
         # The analyst queue reads open exceptions; also the claim path
         # (SELECT … FOR UPDATE SKIP LOCKED, §13.1). The PK does not order by status.
         Index("ix_exception_status_created_at", "status", "created_at"),

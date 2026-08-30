@@ -3,11 +3,12 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M2.2 complete. **Next:** M2.3 — exception creation and classification.
-**Residual work is identified but not yet described.** A settlement file is ingested, normalised and
-either accepted or quarantined; its lines are then matched deterministically against ledger entries,
-with tolerance. What does *not* exist: any classification of the lines that fail to match. Nothing
-creates an exception, assigns a taxonomy class, assembles evidence or computes an adjustment.
+**Current milestone:** M2.3 complete. **Next:** M2.4 — the deterministic adjustment calculator.
+**Residual work is now described, but not priced.** A settlement file is ingested, normalised and
+either accepted or quarantined; its lines are matched deterministically against ledger entries with
+tolerance; and every line that fails to match becomes exactly one classified exception. What does
+*not* exist: any monetary consequence. Nothing computes an adjustment amount, selects an account,
+assigns a posting period, assembles evidence for a model, or proposes a treatment.
 
 ---
 
@@ -22,7 +23,8 @@ creates an exception, assigns a taxonomy class, assembles evidence or computes a
 | **1.3 Seeded fixture generator** | **DONE** | 12 scenarios, byte-identical regeneration, loads into real PostgreSQL |
 | **2.1 Normalisation and quarantine** | **DONE** | Parser, normaliser, batch-level quarantine with closed reason codes |
 | **2.2 Matching engine with tolerance bands** | **DONE** | Two rules, per-currency bands, mutual-uniqueness ambiguity refusal |
-| 2.3 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **2.3 Exception creation and classification** | **DONE** | Three reachable classes plus a fallback; zero wrong classifications measured at four scales |
+| 2.4 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -605,6 +607,238 @@ instance of every condition — three of its twelve scenarios are matched-intent
 the shape of the catalogue, not the matcher's reach. Every one of those matches is deterministic,
 with no model call anywhere in the path.
 
+## What M2.3 delivered
+
+- **A deterministic classifier** in `src/ledger_exception_control_plane/classification/`: the rule
+  set, a pure decision function, and the persistence that writes one exception per residual.
+- **OPEN-3 resolved** (ADR-045). Of FR-4's six classes, **three are reachable** — `fee_split`,
+  `chargeback_reversal`, `cross_period_refund` — one is the fallback, and **two are declared and
+  assigned by nothing**, for a structural reason recorded below rather than for want of effort.
+- **Three rules, explicit precedence**, each with a stable identifier naming the *evidence* rather
+  than the conclusion: `reversal_of_booked_debit`, `reversal_of_booked_credit_across_periods`,
+  `deductions_split_across_rows`, plus `no_rule_matched` for the fallback. All four are persisted in
+  `exception.rule_id` alongside `classifier_version`.
+- **Ambiguity refuses, as it does in matching.** A rule needing a corroborating movement requires
+  *exactly one*; two candidates make the classification unprovable, not twice as likely.
+- **The rule set is pairwise disjoint**, so the declared precedence decides nothing today — a
+  stronger position than resolving an overlap, and the outcome of the review finding below.
+- **A cross-table invariant the database enforces** (ADR-044): an exception can exist only for a line
+  that is unmatched, and a line carrying an exception cannot be marked matched. Both directions are
+  one composite foreign key, and direct SQL cannot get round either.
+- **Tests** — 46 unit and 15 measurement tests (Docker-free), plus 26 against real PostgreSQL.
+
+### The classifier sees settlement lines and nothing else
+
+`SettlementMovement` carries six fields: id, merchant reference, amount, currency, value date, and
+whether M2.2 matched the line. No ledger entry, no account code, no description, no memo — and no PSP
+reference, which is excluded as deliberately as the memo is, because the corpus builds a fee split as
+`X`, `X-fee1`, `X-fee2` and a reversal as `X`, `X-rev`. A classifier that could read those suffixes
+would score beautifully here while encoding nothing but one generator's naming habit.
+
+The consequence worth stating: **"run a second matcher" is not expressible in this package.** Pairing
+a line with a ledger entry needs a ledger entry, and the type system does not offer one. M2.2 remains
+the only code in the system that consumes an entry or writes a `match_result`.
+
+### Measured precision
+
+Coverage says how many residuals were given a name. It says nothing about whether the names were
+right, and the two pull in opposite directions — a classifier that guessed the commonest class every
+time would report excellent coverage. Because an exception is what a treatment, an approval and
+eventually a posting are built on, a wrong class is not a mislabel; it is the first step of a wrong
+posting. Every decision is therefore graded against the scenario each line was *constructed* for.
+
+| Corpus | Residuals | Correct | Under-classified | **Wrong** | No declared intent |
+|---|---|---|---|---|---|
+| `canonical` | 13 | 9 | 3 | **0** | 1 |
+| `bulk` @ 200 | 39 | 23 | 9 | **0** | 7 |
+| `bulk` @ 1000 | 207 | 115 | 46 | **0** | 46 |
+| `bulk` @ 4000 | 833 | 460 | 195 | **0** | 178 |
+
+**No wrong deterministic classification at any scale**, and precision on assigned classes is exactly
+1: everything that got a name got the right one. *Under-classified* means `unclassified` where a class
+was intended — safe, because a human decides. *No declared intent* is SC-001/2/3, whose scenarios
+decline to predict their own outcome, so they are counted separately rather than scored as correct.
+
+Every instance of a reachable class is classified, which is what keeps the precision figure from
+being cheap: a classifier that fired once and abstained forever would also report zero wrong answers.
+
+### Measured coverage — the secondary number
+
+| Corpus | Residuals | Classified | Unclassified | Coverage |
+|---|---|---|---|---|
+| `bulk` @ 4000 | 833 | 360 | 473 | **43.2%** |
+| `canonical` | 13 | 5 | 8 | 38.5% |
+
+Reported alongside precision rather than instead of it. The shortfall is almost entirely the two
+classes below, and closing it by pointing a rule at a shape that merely resembles one of them would
+trade the zero above for a bigger number here.
+
+### Two classes are declared and unreachable, and it is the same reason twice
+
+`partial_capture` and `fx_rounding` are both claims about a residual's relationship to **one
+particular ledger entry** — "captured less than *the entry* authorised", "differs from *the entry's*
+own conversion by a rounding artefact". Proving either needs that entry identified, and **no
+deterministic key links a settlement line to a ledger entry**: neither reference appears in the
+other's record, and amount, currency and date are exactly what M2.2 already matches on — where they
+identify an entry uniquely, M2.2 has already consumed it. Measured, the gap is not marginal: at 4,300
+lines a residual typically shares its currency and date window with two hundred unconsumed entries.
+The only route left is substring-matching the ledger description, which M2.2 refused for the same
+reason and which this increment is forbidden to introduce.
+
+`fx_rounding` is missing a second piece as well. The evidence that a conversion happened at all lives
+in `presentment_currency` and `fx_rate`, which M2.1 normalises and `settlement_line` does not store.
+
+So both fall to `unclassified` — 140 and 55 residuals respectively at bulk 4,000, every one of them
+unclassified and none given a neighbouring class. That is the taxonomy being honest, not failing.
+
+### What would change the answer
+
+Persisting the PSP's declared `transaction_type` — already parsed and validated by M2.1, then
+discarded because M1.1 gave `settlement_line` no column for it — would turn three inferences into
+declarations. Most concretely, `chargeback_reversal` is currently inferred from *direction*: a credit
+exactly reversing a booked debit. That does not prove the original debit was a chargeback rather than
+a fee reversal or a correction; within a closed taxonomy whose only reversal class is this one,
+mapping there is the sanctioned broader-class fallback (ADR-045), and the limitation is recorded
+rather than papered over.
+
+It would **not** make `partial_capture` or `fx_rounding` reachable. Those need the ledger entry
+identified, which is a different and harder problem — one to solve by giving the ledger snapshot a
+settlement reference, not by guessing.
+
+### Schema change: two provenance columns and one integrity key
+
+Deliberately small, and none of it optional.
+
+| Change | Why |
+|---|---|
+| `exception.rule_id`, `exception.classifier_version` | Classification is deterministic *for a given rule set*. A row carrying the outcome and not the ruleset says what was decided and nothing about what would decide it the same way again. FR-3 already requires a matched line to record the rule that matched it. |
+| `exception.line_match_state` pinned to `unmatched`, plus `settlement_line UNIQUE (id, match_state)` and a composite foreign key | A check constraint cannot reference another table. This is ADR-028's pattern: carry the value and let a foreign key verify it. |
+
+Migration `138145789fda`, forward-only. It deviates from autogenerate in three places, each recorded
+in the migration itself: the unique constraint is created *before* the key that references it
+(autogenerate emitted them in an order that cannot execute), `line_match_state` is backfilled and
+then verified by the key itself, and `rule_id`/`classifier_version` are **not** backfilled — they are
+set `NOT NULL`, which fails if any row exists, because there is no honest value to invent for a
+classification this rule set did not make. **No dependency added.**
+
+### What adversarial review found, and it found real defects
+
+Three focused reviewer lenses — domain/taxonomy, database/concurrency, test/scope — produced 18
+candidate findings. Each was then handed to a verifier told to **refute it by default** and to prove
+its claim against the running code rather than reason from the summary. Sixteen were refuted. Two
+survived, both reproduced against the real code, and both were fixed.
+
+**1. A declining rule left its line to a weaker one (high).** Precedence orders the rules that
+*fire*. When `reversal_of_booked_credit_across_periods` examined an in-period refund and declined —
+correctly, because the taxonomy has no in-period refund class — nothing stopped the group rule from
+claiming the same line. A full refund of an already-booked capture came back `fee_split` as soon as
+the order carried one further unmatched credit: an unrelated row changing the class of the refund,
+and a customer refund labelled a PSP deduction. Ambiguous reversal evidence — two booked offsets —
+fell through the same way.
+
+This is ADR-043's defect in a new place: **an unresolved higher-priority claim must never be settled
+by a lower-priority rule.** Fixed by excluding any line with a booked exact offset from the group
+rule, whatever the reversal family concludes. The three rules are now pairwise disjoint, proven by a
+sweep over the colliding shapes rather than by reading them.
+
+**2. The decision was persisted from a stale snapshot (medium).** A classification is derived from
+the state of *other* rows, and only the subject was locked. Three unreconciled rows read as a
+`fee_split`; if the gross was matched before the write landed, two fee rows were persisted as a split
+whose capture had gone. The composite foreign key cannot catch it — the rows it constrains are still
+unmatched. Fixed by locking the residuals *and* their evidence, re-reading under that lock, and
+classifying only then. Both fixes carry regression tests, the second against real PostgreSQL with a
+forced interleaving.
+
+**Neither input occurs in the committed corpus**, verified at all four scales, so the measured table
+above was never wrong. That is precisely why they were worth finding by review rather than by
+measurement: a corpus that does not contain a case cannot fail on it.
+
+A third observation, about the process rather than the product: one verifier **edited production
+source in place** to test whether the precision suite would catch an over-fitted rule, and left the
+mutation behind. It was caught by the format gate, reverted, and the working tree re-verified before
+commit. Worth recording because an automated reviewer with write access is a supply-chain risk, and
+the only reason it did not reach a commit is that the gate runs after the review rather than before.
+
+### The coverage gate moved, and it was a correction
+
+`uv run pytest` excludes integration tests, so it cannot see the modules whose entire contract is
+database behaviour: `matching.service` measured 31% and `classification.service` 0% while both were
+being exercised thoroughly by suites that run deselects. Gating on that number measures how much of
+the system happens to be unit-testable, not how well it is tested — and it drifts down every time a
+database module lands. It reached **89.94%** at M2.3, below the 90% gate, with 495 tests passing and
+no untested logic anywhere.
+
+Lowering the threshold would have been the wrong fix, and so would excluding the modules. The gate
+now runs where the measurement is honest — the whole suite against a real database, in CI's
+PostgreSQL job and via `make coverage-gate` — where the same code measures **98.75%**. The default
+run still reports coverage; it just no longer gates on a figure it cannot compute.
+
+### Access path, recorded rather than optimised
+
+Two reads. Residuals come from `settlement_line` filtered on `match_state` with `NOT EXISTS` against
+`match_result` and `exception`, joined to `settlement_batch` for the status and the content hash.
+Related movements come from `settlement_line` filtered by `merchant_reference IN (…)` — the
+references of the residuals just read.
+
+**No index was added for the second one.** It is a sequential scan today, and at real volume the
+`IN` list would carry one entry per distinct residual reference, so `merchant_reference` is where a
+later increment should start. Nothing here has measured a workload that justifies the index now, and
+adding one on a guess is the premature optimisation this project has avoided elsewhere. Recorded so
+the next person does not have to rediscover which column matters.
+
+### One change to M2.2, and why it belongs here
+
+A line under exception control is no longer matchable. Matching it after a later ledger snapshot
+would silently revoke a claim the system had already made, leaving one line with two contradictory
+resolutions. The database now refuses it, so `run_matching` excludes such lines and re-checks under a
+row lock before writing — without the re-check, a single line acquiring an exception mid-run would
+abort a whole matching transaction over one row.
+
+The matching scope guard that banned `db.control` outright was **narrowed rather than lifted**, and
+replaced by two that state the rule the ban was standing in for: matching may observe *that* a line
+is under exception control, may not write that table, and may not read what the control says. The
+blanket ban was a proxy, and the proxy stopped being true the moment the two increments had to
+coexist.
+
+## M2.3 verification
+
+Every row was run; nothing here is inferred from a previous milestone.
+
+| Check | Result |
+|---|---|
+| Clean `uv sync --frozen` / `uv lock --check` | PASS |
+| `ruff format --check` / `ruff check` | PASS — 57 files |
+| `mypy` strict | PASS — 52 source files |
+| Unit suite (Docker-free) | PASS — 495 passed |
+| **Coverage gate, whole suite against real PostgreSQL** | **PASS — 98.75% (gate 90%)** |
+| Classification unit tests | PASS — 46 |
+| Classification measurement tests | PASS — 15 |
+| Classification against real PostgreSQL | PASS — 26 |
+| Matching against real PostgreSQL | PASS — 27 |
+| Ingestion against real PostgreSQL | PASS — 21 |
+| Fixture corpus loads against real PostgreSQL | PASS — 8 |
+| Schema integrity against real PostgreSQL | PASS — 76 |
+| Migration up → down → up on a clean database | PASS — `138145789fda` |
+| Model/migration drift (`alembic check`) | PASS — no new operations |
+| Fixture corpus byte-identical | PASS — no drift |
+| **Wrong classifications, four corpus sizes** | **PASS — 0 at every scale** |
+| Matched line cannot become an exception (application) | PASS |
+| Matched line cannot become an exception (direct SQL) | PASS — foreign key violation |
+| Matched line cannot be marked matched under an exception | PASS — foreign key violation |
+| Two exceptions for one residual (direct SQL) | PASS — unique violation |
+| Invalid taxonomy, status, rule id or ruleset value | PASS — 7 check violations |
+| Exception without provenance | PASS — not-null violation |
+| Two workers, one residual | PASS — one exception |
+| Forced interleaving: classifier loses to a prior writer | PASS — blocked on the lock, wrote nothing |
+| Forced interleaving: line matched mid-run | PASS — dropped, no constraint violation |
+| Forced interleaving: evidence matched mid-run | PASS — reclassified, not persisted stale |
+| Repeated runs stable in class, rule and correlation id | PASS |
+| Classification independent of insertion order | PASS — unit permutations and database |
+| Production classifier cannot reach fixture truth | PASS — AST guards, each proven against an injected violation |
+| No adjustment, approval or proposal row written | PASS — asserted against the database |
+| `git diff --check` | PASS |
+| Secret and attribution scan | PASS — 0 findings |
+
 ## M2.2 verification
 
 | Check | Result |
@@ -742,25 +976,33 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-409 passed, 131 deselected         coverage 92.19% (required 90%)
-ruff format: all files formatted
-ruff check:  All checks passed!
-mypy:        Success: no issues found in 44 source files
-schema:      76 passed against real PostgreSQL (migrations, drift, constraints, grants)
-fixtures:     8 passed against real PostgreSQL (corpus loads with constraints enforced)
-ingest:      21 passed against real PostgreSQL (receipt, quarantine, re-delivery, concurrency)
-matching:    23 passed against real PostgreSQL (persistence, ambiguity, races, timezone)
+unit:         495 passed, 162 deselected  (Docker-free)
+coverage:     98.75% over the whole suite against a real database (gate 90%)
+ruff format:  57 files already formatted
+ruff check:   All checks passed!
+mypy:         Success: no issues found in 52 source files
+alembic:      No new upgrade operations detected
+schema:        76 passed against real PostgreSQL (migrations, drift, constraints, grants)
+fixtures:       8 passed against real PostgreSQL (corpus loads with constraints enforced)
+ingest:        21 passed against real PostgreSQL (receipt, quarantine, re-delivery, concurrency)
+matching:      27 passed against real PostgreSQL (persistence, ambiguity, races, timezone)
+classification: 26 passed against real PostgreSQL (taxonomy, provenance, integrity, forced races)
 ```
+
+Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-08-30.
 
 Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-08-29.
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 45 ADRs and 10 OPEN items. OPEN-2 was resolved at M2.2 (ADR-042). None blocks M2.3; **OPEN-3** (the final form of the exception taxonomy) is the next one due. Still relevant:
+`DECISIONS.md` holds 47 ADRs and 9 OPEN items. OPEN-2 was resolved at M2.2 (ADR-042) and OPEN-3 at
+M2.3 (ADR-045). None blocks M2.4; **OPEN-4** (account mapping and period-assignment rules) is the next
+one due, and M2.4 cannot start without it. Still relevant:
 
 - **LICENSE copyright holder** is `tair800` (the configured Git identity). Replace with a legal name
   if that matters for a public repository.
-- **Coverage threshold of 90%** was a judgement, not a specified requirement; revisit as real code
-  lands.
+- **Coverage threshold of 90%** was a judgement, not a specified requirement. Revisited at M2.3:
+  the number stands, but it is now measured over the whole suite against a real database rather than
+  over the partial run that cannot see the database modules. See the note above.
 - **OPEN-6** (evaluation threshold) and **OPEN-7** (measurement load profile) remain unanswerable
   until a baseline exists, exactly as recorded.

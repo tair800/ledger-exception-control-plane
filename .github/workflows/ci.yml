@@ -134,6 +134,28 @@ jobs:
       - name: Verify deterministic matching against real PostgreSQL
         run: uv run pytest tests/test_matching_postgres.py -m integration --no-cov
 
+      # Classification's integrity rules live in the database — an exception may exist only for an
+      # unmatched line, one residual yields one exception, and the vocabulary is closed — so none of
+      # them is observable without one. The concurrency cases are the reason this cannot be folded
+      # into the unit job: they force a real interleaving by blocking one writer on another's row
+      # lock, which needs a server, not a mock. Reuses the PostgreSQL service already running above.
+      - name: Verify residual classification against real PostgreSQL
+        run: uv run pytest tests/test_classification_postgres.py -m integration --no-cov
+
+      # The authoritative coverage gate, and the only place it can be honest.
+      #
+      # The unit job cannot see `matching.service` or `classification.service` — their entire
+      # contract is database behaviour and the suites that exercise them are deselected there, so
+      # they measured 31% and 0% while being thoroughly tested. Gating on that measures how much of
+      # the system is unit-testable rather than how well it is tested, and it drifts down every time
+      # a database module lands: 89.94% at M2.3, with 495 passing tests and no untested logic.
+      #
+      # This runs the whole suite against the database in one process. `test_integration_stack.py`
+      # is excluded because it needs the composed application container, which this job does not
+      # start; nothing else is. Measured here at M2.3: 98.75%.
+      - name: Coverage gate over the whole suite
+        run: uv run pytest -m "" --ignore=tests/test_integration_stack.py --cov-fail-under=90
+
   container:
     name: Build container image
     runs-on: ubuntu-latest

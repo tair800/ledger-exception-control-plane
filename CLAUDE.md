@@ -178,13 +178,24 @@ uv run ruff format --check .     # formatting gate
 uv run ruff check .              # lint
 uv run ruff check --fix .        # lint with autofix
 uv run mypy                      # strict type check
-uv run pytest                    # tests + coverage (gate: 90%)
+uv run pytest                    # unit tests + coverage report (no gate — see below)
 ```
 
 The full local gate, in the order CI runs it:
 
 ```bash
 uv sync --frozen && uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pytest
+```
+
+**The coverage gate is not on that line, and moving it was a correction rather than a relaxation.**
+`uv run pytest` excludes integration tests, so it cannot see the modules whose whole contract is
+database behaviour — those measured 31% and 0% while being thoroughly exercised by suites the run
+deselects. Gating there measures how much of the system is unit-testable, not how well it is tested,
+and the number drifts down every time a database module lands. The gate lives where the measurement
+is honest:
+
+```bash
+make db-up && make coverage-gate   # whole suite, real database, requires 90%
 ```
 
 **Never claim a milestone is complete without running that line and seeing it pass.**

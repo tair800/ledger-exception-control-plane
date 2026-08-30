@@ -108,6 +108,10 @@ async def clean_slate() -> AsyncIterator[None]:
 async def _wipe() -> None:
     connection = await asyncpg.connect(DSN)
     try:
+        # ``exception`` first. It references the settlement line under RESTRICT (ADR-044), so a
+        # control record left by another module blocks the line's own deletion — which is the
+        # foreign key working, not clutter.
+        await connection.execute("DELETE FROM exception")
         await connection.execute("DELETE FROM match_result")
         await connection.execute("DELETE FROM settlement_line")
         await connection.execute("DELETE FROM settlement_batch")

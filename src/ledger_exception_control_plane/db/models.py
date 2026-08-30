@@ -176,6 +176,12 @@ class SettlementLine(Base):
         UniqueConstraint(
             "settlement_batch_id", "line_number", name="uq_settlement_line_batch_line_number"
         ),
+        # Redundant as a uniqueness claim — ``id`` is already the primary key — and required
+        # anyway, because a foreign key must reference a uniquely-constrained column list.
+        # ``exception`` references this pair so that "the line this exception was raised for is
+        # unmatched" is a *referential* fact rather than an application convention. See the
+        # composite key on ``exception`` and ADR-044.
+        UniqueConstraint("id", "match_state", name="uq_settlement_line_id_match_state"),
         CheckConstraint("line_number > 0", name="line_number_positive"),
         currency_format_constraint("currency", "currency_format"),
         # Reject an over-precise amount instead of letting storage round it. Split in two

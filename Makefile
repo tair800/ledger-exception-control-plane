@@ -1,6 +1,6 @@
 # Developer commands. `make help` lists them.
 .DEFAULT_GOAL := help
-.PHONY: help install fmt fmt-check lint types test gate up down down-volumes logs ps smoke build \n        db-up migrate migrate-down schema-verify \n        fixtures fixtures-check fixtures-load fixtures-verify ingest-verify match-verify
+.PHONY: help install fmt fmt-check lint types test gate coverage-gate up down down-volumes logs ps smoke build \n        db-up migrate migrate-down schema-verify \n        fixtures fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -24,6 +24,9 @@ test: ## Unit tests with coverage (no Docker required)
 	uv run pytest
 
 gate: install fmt-check lint types test ## Run the full local quality gate, in CI order
+
+coverage-gate: ## The authoritative coverage gate: whole suite, real database (needs db-up)
+	uv run pytest -m "" --ignore=tests/test_integration_stack.py --cov-fail-under=90
 
 build: ## Build the application container
 	docker compose build app
@@ -83,3 +86,8 @@ ingest-verify: ## Prove ingestion and quarantine against real PostgreSQL (needs 
 
 match-verify: ## Prove matching, tolerance and concurrency against real PostgreSQL (needs db-up)
 	uv run pytest tests/test_matching_postgres.py -m integration -p no:cacheprovider --no-cov
+
+# --- residual classification (M2.3) ---
+
+classify-verify: ## Prove the taxonomy, provenance, integrity and races against real PostgreSQL (needs db-up)
+	uv run pytest tests/test_classification_postgres.py -m integration -p no:cacheprovider --no-cov

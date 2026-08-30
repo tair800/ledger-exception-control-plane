@@ -546,8 +546,15 @@ def test_no_float_appears_anywhere_in_the_matching_package() -> None:
 
 
 def test_the_matching_package_imports_nothing_that_could_make_it_a_classifier() -> None:
-    """An allowlist. ``db.control`` holds the exception, proposal and approval tables, and matching
-    has no business touching any of them."""
+    """An allowlist.
+
+    ``db.control`` was banned outright until M2.3, on the reasoning that matching has no business
+    touching the exception, proposal or approval tables. The ban has been narrowed rather than
+    lifted: matching now has one legitimate question for that module — *is this line already under
+    exception control* — because a line M2.3 has raised an exception for must not be silently
+    matched afterwards (ADR-044). What it must still never do is create or alter that control, and
+    the two tests below say so directly instead of leaving a blanket import ban to imply it.
+    """
     permitted_stdlib = {
         "__future__",
         "collections",
@@ -562,6 +569,7 @@ def test_the_matching_package_imports_nothing_that_could_make_it_a_classifier() 
     permitted_internal = {
         "ledger_exception_control_plane.matching",
         "ledger_exception_control_plane.db.models",
+        "ledger_exception_control_plane.db.control",
     }
     for name, tree in _matching_sources():
         for node in ast.walk(tree):
@@ -585,7 +593,6 @@ def test_the_matching_package_never_references_classification_concepts() -> None
     """Names M2.3 and later own. An exception created here would ship the answer with the
     question."""
     forbidden = {
-        "ExceptionRecord",
         "ExceptionClassification",
         "ExceptionStatus",
         "Evidence",
@@ -605,6 +612,48 @@ def test_the_matching_package_never_references_classification_concepts() -> None
                 assert node.attr not in forbidden, f"{name} references {node.attr}"
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 assert node.value not in forbidden, f"{name} contains the literal {node.value!r}"
+
+
+def test_the_matching_package_only_reads_the_exception_table_never_writes_it() -> None:
+    """The narrowed ban, stated as the rule it actually is.
+
+    Matching may observe that a line is under exception control. It may not raise one, resolve one,
+    or edit one — creating an exception here would be M2.3 done in the wrong module, and the
+    classification would arrive with no rule, no ruleset version and no residual analysis behind
+    it. Checked by walking every write-shaped call rather than by trusting the import allowlist,
+    which now permits the module the table lives in.
+    """
+    writers = {"insert", "pg_insert", "update", "delete"}
+    for name, tree in _matching_sources():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            called = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if called not in writers:
+                continue
+            for argument in node.args:
+                assert not (isinstance(argument, ast.Name) and argument.id == "ExceptionRecord"), (
+                    f"{name} writes to the exception table via {called}()"
+                )
+
+
+def test_the_matching_package_reads_no_classification_column() -> None:
+    """Reading *that* an exception exists is eligibility; reading *what it says* is classification.
+
+    Only the identifying column may be touched. If matching ever consulted the class, the status or
+    the assigning rule, it would be branching on M2.3's decision — and a matcher whose behaviour
+    depends on how a residual was classified is no longer a deterministic matcher.
+    """
+    permitted = {"id", "settlement_line_id"}
+    for name, tree in _matching_sources():
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "ExceptionRecord"
+            ):
+                assert node.attr in permitted, f"{name} reads ExceptionRecord.{node.attr}"
 
 
 def test_production_matching_does_not_depend_on_the_fixture_package() -> None:
