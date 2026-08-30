@@ -3,9 +3,10 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M1.3 complete. **Next:** M2.1 — settlement normalisation and quarantine.
-**No business functionality is implemented.** There is a complete schema and a corpus to put in it;
-no code processes that data.
+**Current milestone:** M2.1 complete. **Next:** M2.2 — matching engine with tolerance bands.
+**Reconciliation does not exist.** A settlement file can now be ingested, normalised and either
+accepted or quarantined. Nothing matches a line to a ledger entry, evaluates a tolerance, classifies
+a residual or creates an exception.
 
 ---
 
@@ -18,7 +19,8 @@ no code processes that data.
 | **1.1 Core reconciliation schema** | **DONE** | SQLAlchemy 2.x + Alembic; `settlement_batch`, `settlement_line`, `ledger_entry`, `match_result` |
 | **1.2 Exception, resolution and reliability schema** | **DONE** | 11 tables, append-only audit trigger, least-privilege role script |
 | **1.3 Seeded fixture generator** | **DONE** | 12 scenarios, byte-identical regeneration, loads into real PostgreSQL |
-| 2.1 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **2.1 Normalisation and quarantine** | **DONE** | Parser, normaliser, batch-level quarantine with closed reason codes |
+| 2.2 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -446,6 +448,102 @@ checkable and the "committed sample loads" criterion would be satisfied by inser
 is an under-specification in the plan's wording resolved by its own stated goal, not a contradiction
 between documents — recorded here so the decision is visible rather than assumed.
 
+## What M2.1 delivered
+
+- **The ingestion boundary** in `src/ledger_exception_control_plane/ingest/`: parser, normaliser,
+  quarantine vocabulary and persistence orchestration. Callable without HTTP; no endpoint and no CLI
+  were added, because §2.1 asks for neither.
+- **Raw before parse (FR-1)** — the receipt commits in its own transaction before anything reads the
+  payload, so a malformed file leaves behind the bytes it was rejected for (ADR-041).
+- **Batch-level quarantine (FR-2)** — one bad row condemns the file. A trusted partial settlement
+  file would turn every dropped movement into an unexplained residual downstream (ADR-040).
+- **A closed reason vocabulary** — 15 codes plus a line and a column, bounded, allowlisted, and
+  carrying neither the offending value nor an exception message (ADR-038).
+- **Money from text, never through a float** — `Decimal` straight from the string, value-based
+  precision matching the column's `trunc(amount, 4) = amount`, over-precision rejected rather than
+  quantised. `float` appears nowhere in the package, enforced by an AST guard — the plan's exit
+  criterion for this increment.
+- **References preserved exactly** — no case folding, no punctuation stripping, no whitespace
+  collapsing. Canonicalisation is a matching decision and M2.2 owns it (ADR-039).
+- **Re-delivery is a no-op the database arbitrates** — `ON CONFLICT DO NOTHING` on the unique
+  content hash, never check-then-insert, with the batch claimed under `SELECT … FOR UPDATE`.
+- **Tests** — 114 unit (Docker-free) plus 21 ingestion tests against real PostgreSQL.
+
+**No schema change was required.** The M1 tables express the whole contract; the columns the file
+declares but `settlement_line` does not hold — transaction type, presentment amount and currency, FX
+rate, memo — are carried in the typed representation and remain in the immutable raw payload for the
+increments that need them. **No dependency was added**; the standard library parses the format.
+
+## M2.1 verification
+
+| Check | Result |
+|---|---|
+| `ruff format --check` / `ruff check` / `mypy` strict | PASS — 38 source files |
+| Unit suite + coverage | PASS — 350 passed, 93%+ (gate 90%) |
+| Canonical settlement files normalise to the recorded values | PASS — both periods, amounts compared as strings so scale is proven too |
+| Money never passes through a float | PASS — AST guard, verified by injection |
+| Over-precise amount rejected, never rounded | PASS — and trailing zeros beyond four places accepted, matching ADR-020 |
+| Locale-dependent numbers and dates refused | PASS — comma decimals, Arabic-Indic digits, `03/06/2026` |
+| Normalisation is deterministic across runs | PASS |
+| Content hash taken from the original bytes | PASS — a BOM makes it a different artifact |
+| Receipt survives a parse failure | PASS — asserted against stored rows |
+| Malformed committed fixtures reach the right quarantine code | PASS — all four |
+| One bad row leaves no line from the batch | PASS — asserted against `settlement_line` |
+| Quarantine reason bounded, allowlisted, free of input and internals | PASS |
+| Exact re-delivery creates no second batch or line | PASS |
+| Two concurrent deliveries produce exactly one batch | PASS — real concurrency, separate engines |
+| Unique index still refuses a hand-written duplicate | PASS |
+| Interrupted attempt is completed rather than restarted | PASS |
+| Integrity failure during line persistence leaves no partial state | PASS — batch stays `received` |
+| No constraint disabled | PASS — `session_replication_role` still `origin` |
+| No row written to any later increment's table | PASS |
+| Existing schema and fixture suites | PASS — 76 + 8 |
+| `alembic check` | PASS — no schema change |
+| `git diff --check`, secret scan, attribution scan | PASS |
+
+## Known issues and findings
+
+### M2.1 — adversarial review: a single byte could jam a batch permanently (2026-08-30)
+
+Five lenses, each finding verified by a separate skeptic. **23 findings raised; 8 survived**, and four
+of the eight were the same defect found independently by four different lenses.
+
+1. **A NUL in a reference was a poison pill.** U+0000 is valid UTF-8, survives `decode`, survives
+   `csv.reader`, is not whitespace and is under the length limit — so it normalised cleanly and then
+   failed the INSERT, because PostgreSQL cannot store it in a character type. That alone would be an
+   unhandled error instead of a quarantine. What made it serious is that the receipt is already
+   committed and the payload is immutable, so **every re-delivery reproduced it** and the batch could
+   never reach `parsed` or `quarantined`. Text fields are now checked for characters the destination
+   column cannot hold.
+2. **The precision rule contradicted the ADR it cited.** The check counted digits after the decimal
+   point; ADR-020 explicitly chose a *value-based* rule and records `1.230000` as accepted. So
+   `120.450000` — which the column stores exactly — quarantined an entire batch, and the stated
+   rationale was falsified by the code's own silent handling of leading zeros. Now value-based, and a
+   test asserts ingestion never accepts something the column would refuse.
+3. **A `ParseResult` docstring stated an invariant the code violates in both directions.** It claimed
+   "either rows or defects, never both, never neither"; a file with one good row and one short row
+   produces both, and a header-only file produces neither. A caller trusting it would have consumed
+   rows from a condemned file.
+4. **No test asserted the *content* of a quarantine reason** — only its length, ordering and
+   character set. A reason could have degraded to something well-formed and useless.
+
+The remaining 15 findings were refuted on verification.
+
+### M2.1 — a concurrency race the single-threaded tests could not see
+
+Two simultaneous deliveries of one payload both observed the receipt at `received` and both proceeded
+to interpret it. The unique constraint on `(settlement_batch_id, line_number)` caught the second
+write — the guard working exactly as designed — but the loser got an integrity error where FR-1 says
+a re-delivery is a no-op. Found by running two ingests concurrently on separate engines; every
+sequential test passed. Closed with `SELECT … FOR UPDATE` (ADR-041).
+
+### M2.1 — a guard that failed its own guard
+
+The quarantine reason has a length cap and a character allowlist. The truncation branch appended
+`"..."`, and the allowlist contains no full stop — so a reason long enough to be truncated would have
+raised instead of being stored, leaving the batch stuck at `received`. Unreachable with today's codes,
+and found by a test that exercised the branch rather than reasoning about it.
+
 ## Deployment state
 
 Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources exist.
@@ -453,19 +551,20 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-200 passed, 88 deselected          coverage 94.48% (required 90%)
+364 passed, 110 deselected         coverage 93%+ (required 90%)
 ruff format: all files formatted
 ruff check:  All checks passed!
-mypy:        Success: no issues found in 31 source files
+mypy:        Success: no issues found in 38 source files
 schema:      76 passed against real PostgreSQL (migrations, drift, constraints, grants)
 fixtures:     8 passed against real PostgreSQL (corpus loads with constraints enforced)
+ingest:      21 passed against real PostgreSQL (receipt, quarantine, re-delivery, concurrency)
 ```
 
 Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-08-29.
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 39 ADRs and 11 OPEN items. OPEN-1 was resolved at M1.3 (ADR-031). None blocks M2.1. Still relevant:
+`DECISIONS.md` holds 43 ADRs and 11 OPEN items. None blocks M2.2. **OPEN-2** (tolerance band configuration) is now the next one due — M2.1 deliberately declined to decide it, and the corpus carries the near-miss cases needed to settle it. Still relevant:
 
 - **LICENSE copyright holder** is `tair800` (the configured Git identity). Replace with a legal name
   if that matters for a public repository.

@@ -975,6 +975,133 @@ ledger entry to decide what a scenario is, and no M2 logic was introduced to val
 
 ---
 
+## ADR-038 — The ingestion boundary validates explicitly, not through Pydantic
+
+**Status:** Accepted (M2.1) · A narrow exception to NFR-2
+
+NFR-2 says every boundary schema is a Pydantic v2 model with `extra="forbid"`, and the settlement
+file is unquestionably a boundary. This increment does not use Pydantic for it, and the reason is the
+quarantine reason.
+
+**Decision.** Parse and validate with explicit code, and report failures as a closed
+`QuarantineCode` enum plus a line and a column.
+
+FR-2 requires an invalid batch to be quarantined **with a reason**, and that reason is stored in a
+financial control record. Three properties follow, and Pydantic's `ValidationError` has none of them:
+
+| Required | Pydantic's error strings |
+|---|---|
+| A **closed** vocabulary an operator can write a runbook against | Open, and they change between library versions |
+| **Bounded** length, so the reason cannot grow with the input | Grow with the number and size of the failing fields |
+| **Free of the offending input** | Interpolate the input by design — that is what makes them useful in a stack trace and unsuitable in a control record |
+
+The third is the one that settles it. `PROJECT_SPEC.md` §17 treats a stored string as a log line
+waiting to happen, and a validation message containing a fragment of a settlement file is payload
+content travelling somewhere nobody decided it should go. The offending value is already durably
+stored in `raw_payload`; the reason names the code, the line and the column, and an operator reads
+the retained file for the rest.
+
+**Scope of the exception.** Ingestion only. Pydantic remains the rule for API request and response
+bodies, for configuration and for the model response schema, where the input is not a financial
+artifact and the error is not persisted. The rendered reason is checked against a character allowlist
+and a hard cap, both asserted by test, so the property is enforced rather than trusted.
+
+---
+
+## ADR-039 — Normalisation preserves references exactly; canonicalisation belongs to matching
+
+**Status:** Accepted (M2.1)
+
+A settlement file's references arrive imperfect — different casing, stray spacing, inconsistent
+punctuation. Something has to decide how close two of them must be before they denote one movement.
+
+**Decision.** Not here. The normaliser stores what the file said, character for character.
+
+The only reading it applies is **empty and whitespace-only mean absent** — a required reference that
+is blank is a defect, and a nullable one that is blank becomes `NULL`. No character inside a supplied
+value is altered: no case folding, no punctuation stripping, no whitespace collapsing, no trimming.
+
+Canonicalisation looks like a tidy-up and is actually a matching rule. Doing it at ingestion would
+bake one particular rule into the persisted record, where M2.2 could not vary it, no test could
+measure its effect, and the original would be gone — a reference is evidence, and a matcher that
+turns out to need the difference between `ORD-1 ` and `ORD-1` could not recover it. Increment 2.2
+owns tolerance and identity, and it can canonicalise on the way into a comparison, where the decision
+is visible and reversible.
+
+**Accepted cost.** A reference with stray whitespace persists with it, and M2.2 will have to handle
+that. That is the correct place for it to be handled.
+
+---
+
+## ADR-040 — Quarantine is batch-level: one bad row condemns the file
+
+**Status:** Accepted (M2.1)
+
+FR-2 says "reject structurally invalid **batches** into quarantine with a reason", and the schema
+agrees — `settlement_batch.status` carries `quarantined` with a required reason, and there is no
+line-level equivalent. What the specification does not spell out is whether a single unreadable row
+condemns an otherwise readable file.
+
+**Decision.** It does. A batch is accepted whole or not at all, and a rejected batch persists no
+lines.
+
+The alternative is superficially attractive: keep the rows that parsed, quarantine the rest, lose
+less. It is wrong for this system specifically. Accepting a subset manufactures a **trusted partial
+settlement file**, and reconciliation over a partial file does not produce fewer results — it
+produces *wrong* ones. Every movement that was in the file and not in the accepted subset becomes an
+unexplained residual: an exception raised against a ledger entry whose counterpart was silently
+dropped at ingestion. The system would then invite an analyst to resolve a discrepancy that does not
+exist, and the audit trail would say the file was processed.
+
+A quarantined batch is a visible, actionable stop. A partially accepted one is a quiet corruption of
+the input to everything downstream.
+
+**Proven, not asserted.** A three-row payload with one bad middle row is ingested against real
+PostgreSQL and the two valid rows are shown to be absent from `settlement_line`.
+
+**What this does not decide.** Whether a *later* increment may reprocess a corrected file is a
+separate question; today a corrected file is a different payload with a different content hash, so it
+ingests as the new batch it is.
+
+---
+
+## ADR-041 — Receipt and outcome are separate transactions, and the batch is claimed under a lock
+
+**Status:** Accepted (M2.1)
+
+FR-1 requires the raw payload to be persisted with its content hash **before parsing**. Taken
+literally that forbids one transaction, because a parse failure inside it would roll the receipt back
+and the system would have nothing to show for a file it rejected.
+
+**Decision.** Two transactions.
+
+1. **The receipt.** The original bytes, their hash, and status `received`. Committed before anything
+   reads the contents. `INSERT ... ON CONFLICT DO NOTHING` on the unique `content_hash` index —
+   never a lookup followed by an insert, which has a window in which two deliveries both find
+   nothing, both insert, and the constraint ends up doing the work anyway while the lookup provided
+   false reassurance.
+2. **The outcome.** Either the lines plus status `parsed`, or status `quarantined` with a reason. One
+   transaction, so a batch can never hold a partially trusted subset: the lines and the status that
+   vouches for them commit together or not at all.
+
+A crash between the two leaves the batch at `received` with no lines — recoverable and honest.
+Re-delivering the same payload **completes** it rather than starting again, which is not duplicate
+work but the work that was interrupted.
+
+**The lock is not decoration.** The second transaction claims the batch with `SELECT … FOR UPDATE`
+before deciding anything. Without it, two concurrent deliveries of one payload both observe status
+`received` and both proceed to interpret: the unique constraint on
+`(settlement_batch_id, line_number)` catches the second write — the guard working exactly as
+intended — but the loser gets an integrity error where FR-1 says a re-delivery should be a no-op.
+**Found by running two ingests concurrently**, not by reading the code; the single-threaded tests all
+passed. The lock makes the second caller wait and then observe a finished batch.
+
+The database remains the final guard. The lock turns a correct-but-ugly constraint violation into an
+orderly no-op; it does not replace the constraint, and a test still shows a hand-written duplicate
+being refused by the index.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.

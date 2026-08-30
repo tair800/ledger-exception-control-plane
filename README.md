@@ -4,23 +4,23 @@ PSP settlement files against the general ledger. Deterministic matching clears t
 proposes a treatment from a closed enum whose type has no numeric field. A chaos suite proves no
 double-post against a RED baseline that does.
 
-> ## Status: milestone M1.3 of 31
+> ## Status: milestone M2.1 of 31
 >
 > **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
 > liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
 > correlation-id propagation, the tooling baseline, a green CI gate, the **complete database
-> schema** with Alembic migrations, and — as of M1.3 — a **deterministic synthetic fixture
-> corpus** that loads into that schema.
+> schema** with Alembic migrations, a **deterministic synthetic fixture corpus**, and — as of
+> M2.1 — **settlement ingestion**: a settlement file is received, hashed, persisted immutably,
+> parsed, normalised, and either accepted as typed settlement lines or quarantined with a reason.
 >
-> **What does not exist:** everything the rest of this document describes as behaviour. There are
-> tables and there is data to put in them; **no code processes that data.** There is no settlement
-> parsing, no normalisation, no matching, no tolerance arithmetic, no exception creation, no
-> treatment proposal, no LLM integration, no ledger adapter, no idempotency execution, no
-> dispatcher, no retry, no DLQ replay, no recovery workflow, no audit emission and no chaos suite.
-> An `outbox` table is not a transactional outbox; a `posting_attempt` table is not a write-ahead
-> protocol; **a fixture labelled `fee_split` is a constructed input, not evidence that anything can
-> classify a fee split.** The architecture below is a *specification of intended behaviour*, not a
-> description of working software.
+> **What does not exist: reconciliation.** Nothing matches a settlement line to a ledger entry,
+> evaluates a tolerance, detects a residual, classifies an exception, assembles evidence, proposes
+> a treatment, computes an adjustment, obtains an approval or posts anything. There is no LLM
+> integration, no ledger adapter, no dispatcher, no retry, no DLQ replay, no recovery workflow, no
+> audit emission and no chaos suite. An `outbox` table is not a transactional outbox; a
+> `posting_attempt` table is not a write-ahead protocol; **a fixture labelled `fee_split` is a
+> constructed input, not evidence that anything can classify a fee split.** Everything below that
+> is not listed as existing is a *specification of intended behaviour*.
 >
 > No measurement here is a result — the `Measured` table is an obligation the build must produce
 > from a committed script, and it will not appear until it does.
@@ -309,6 +309,54 @@ Values with up to 4 decimal places are stored exactly; anything more precise, or
 Binary floating point is absent from the schema, asserted across all metadata rather than just the
 known money columns. Every amount is paired with an explicit currency column under a
 both-present-or-both-absent check.
+
+### Settlement ingestion
+
+The boundary that makes an untrusted file safe to build on. Raw bytes in; either typed settlement
+lines or a quarantined batch out, and nothing in between.
+
+```
+raw bytes  ->  receipt (hash + immutable payload, committed)  ->  parse  ->  normalise
+                                                                     |
+                                            lines + status `parsed`  |  status `quarantined` + reason
+```
+
+**The receipt commits before anything reads the file** (FR-1). A malformed payload therefore leaves
+behind exactly the bytes it was rejected for — the alternative is a quarantine record referring to a
+file nobody kept. The content hash is taken from the original bytes, before decoding and before a
+byte-order mark is stripped, so two different artifacts can never share one.
+
+**Quarantine is batch-level.** One unreadable row condemns the file. Accepting the rows that happened
+to parse would manufacture a trusted *partial* settlement file, and reconciliation over a partial file
+does not produce fewer results — it produces wrong ones, because every dropped movement becomes an
+unexplained residual. The reason is a code from a closed set of 15, plus a line and a column: bounded,
+deterministic, and carrying neither the offending value nor an exception message. The payload is
+already retained for the rest.
+
+**Money comes from text and never touches a float.** `Decimal` straight from the string, after a
+regex that admits only a plain signed decimal — `NaN`, `Infinity` and `1E+3` all construct perfectly
+well as `Decimal` and are refused here. Over-precision is rejected, never quantised, using the same
+value-based rule as the column: `120.450000` is accepted because four decimal places hold it exactly,
+`1.23456` is not. `float` appears nowhere in the package and an AST guard enforces that.
+
+**References are preserved exactly** — no case folding, no punctuation stripping, no whitespace
+collapsing. How close two references must be before they denote one movement is a matching decision,
+and M2.2 owns it; deciding it here would bake it into the persisted record where no later test could
+vary it.
+
+**Re-delivery is a no-op the database arbitrates.** `INSERT … ON CONFLICT DO NOTHING` on the unique
+content hash rather than a lookup followed by an insert, with the batch claimed under
+`SELECT … FOR UPDATE` before its outcome is decided. Two concurrent deliveries of one payload produce
+exactly one batch and one set of lines, proven under real concurrency.
+
+**Still absent, deliberately:** matching, tolerance, residual detection and classification. The
+ingestion package imports nothing that would let it reach a ledger entry, and a test walks its AST to
+keep it that way.
+
+```bash
+make db-up
+make ingest-verify   # ingestion and quarantine against real PostgreSQL
+```
 
 ### Deterministic fixture corpus
 

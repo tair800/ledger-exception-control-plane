@@ -120,6 +120,13 @@ jobs:
       - name: Verify the fixture corpus loads
         run: uv run pytest tests/test_fixtures_postgres.py -m integration --no-cov
 
+      # Ingestion is the first path that writes rows the rest of the system will trust, and its
+      # properties are all about persisted state: the receipt surviving a parse failure, a
+      # rejected batch leaving nothing behind, re-delivery being arbitrated by the unique index.
+      # None of that is observable without a real database, so it reuses this job's.
+      - name: Verify settlement ingestion against real PostgreSQL
+        run: uv run pytest tests/test_ingest_postgres.py -m integration --no-cov
+
   container:
     name: Build container image
     runs-on: ubuntu-latest
