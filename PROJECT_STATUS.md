@@ -3,10 +3,11 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M2.1 complete. **Next:** M2.2 — matching engine with tolerance bands.
-**Reconciliation does not exist.** A settlement file can now be ingested, normalised and either
-accepted or quarantined. Nothing matches a line to a ledger entry, evaluates a tolerance, classifies
-a residual or creates an exception.
+**Current milestone:** M2.2 complete. **Next:** M2.3 — exception creation and classification.
+**Residual work is identified but not yet described.** A settlement file is ingested, normalised and
+either accepted or quarantined; its lines are then matched deterministically against ledger entries,
+with tolerance. What does *not* exist: any classification of the lines that fail to match. Nothing
+creates an exception, assigns a taxonomy class, assembles evidence or computes an adjustment.
 
 ---
 
@@ -20,7 +21,8 @@ a residual or creates an exception.
 | **1.2 Exception, resolution and reliability schema** | **DONE** | 11 tables, append-only audit trigger, least-privilege role script |
 | **1.3 Seeded fixture generator** | **DONE** | 12 scenarios, byte-identical regeneration, loads into real PostgreSQL |
 | **2.1 Normalisation and quarantine** | **DONE** | Parser, normaliser, batch-level quarantine with closed reason codes |
-| 2.2 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **2.2 Matching engine with tolerance bands** | **DONE** | Two rules, per-currency bands, mutual-uniqueness ambiguity refusal |
+| 2.3 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -544,6 +546,142 @@ The quarantine reason has a length cap and a character allowlist. The truncation
 raised instead of being stored, leaving the batch stuck at `received`. Unreachable with today's codes,
 and found by a test that exercised the branch rather than reasoning about it.
 
+## What M2.2 delivered
+
+- **A deterministic matcher** in `src/ledger_exception_control_plane/matching/`: the policy, a pure
+  decision function, and the persistence that writes a match and the line state together.
+- **OPEN-2 resolved** (ADR-042). Absolute per-currency bands, one minor unit each, inclusive; a
+  one-day value-date window as a hard eligibility filter; no tolerance ever across currencies; a
+  currency with no declared band gets exact matching only.
+- **Two rules, explicit precedence** — `exact_amount` then `amount_within_tolerance`, recorded in
+  `match_result.rule_id`, with the absorbed difference in `tolerance_applied`.
+- **Ambiguity refused, not resolved** (ADR-043). A pair is accepted only when it is the unique choice
+  from *both* sides, which is what makes the result independent of the order rows arrive in.
+- **Concurrency arbitrated by the constraints** — `ON CONFLICT DO NOTHING` against the two unique
+  indexes; a worker that loses a race writes nothing and leaves the line cleanly retryable.
+- **Tests** — 48 unit (Docker-free) plus 23 matching tests against real PostgreSQL.
+
+**No schema change and no new index.** `match_result` already carries the rule, the absorbed
+tolerance and its currency. The access path is `settlement_line` filtered by `match_state` (served by
+`ix_settlement_line_batch_match_state` when a batch is given) and `ledger_entry` filtered by currency
+with a `NOT EXISTS` against `match_result`; at this corpus's scale no index is justified by evidence,
+and adding one on a guess is the kind of premature optimisation this project has avoided elsewhere.
+Recorded here so a later increment with real volume knows where to start. **No dependency added.**
+
+### Measured clearance
+
+| Corpus | Lines | Matched | By tolerance | Ambiguous | Cleared |
+|---|---|---|---|---|---|
+| `bulk` @ 200 instances | 215 | 176 | 7 | 0 | **81.9%** |
+| `canonical` | 17 | 4 | 0 | 0 | 23.5% |
+
+The exit criterion is measured on the **bulk** profile. The canonical corpus holds exactly one
+instance of every condition — three of its twelve scenarios are matched-intent — so its rate reports
+the shape of the catalogue, not the matcher's reach. Every one of those matches is deterministic,
+with no model call anywhere in the path.
+
+## M2.2 verification
+
+| Check | Result |
+|---|---|
+| `ruff format --check` / `ruff check` / `mypy` strict | PASS — 44 source files |
+| Unit suite + coverage | PASS — 409 passed, 92.19% (gate 90%) |
+| Exact rule, tolerance rule, and their precedence | PASS |
+| Band boundary: strictly inside, exactly on, one step past | PASS — all five declared currencies |
+| Boundary table self-check (the differences are what they claim) | PASS |
+| Currency mismatch never matches, however close | PASS |
+| Date window: inside, on the edge, outside; window configurable | PASS |
+| Signed amounts match only their own sign; zero not special-cased | PASS |
+| Unknown currency gets no tolerance (fail-closed) | PASS |
+| Two exact candidates → unmatched, not guessed | PASS |
+| Two tolerance candidates → unmatched | PASS |
+| Two lines competing for one entry → neither matches | PASS |
+| Ambiguity is never rescued by falling to a lower-priority rule | PASS |
+| Result independent of input order | PASS — every permutation of an adversarial set |
+| Result independent of row insertion order | PASS — against real PostgreSQL |
+| Result independent of the database's `TimeZone` setting | PASS — verified under `Europe/Berlin` |
+| Match result and line state persist atomically | PASS |
+| Consumed ledger entry unavailable; matched line not reconsidered | PASS |
+| Repeated runs write nothing further and rewrite no `matched_at` | PASS |
+| Two workers cannot double-match one line | PASS — real concurrency, separate engines |
+| Two workers cannot double-consume one ledger entry | PASS |
+| A lost race leaves the line unmatched and retryable | PASS |
+| Direct SQL cannot duplicate a match or reuse an entry | PASS |
+| No row written to any later increment's table | PASS |
+| No `float` anywhere in the matching package | PASS — AST guard |
+| Fixture ground truth unreachable from production matching code | PASS — AST guard |
+| Existing ingestion, fixture and schema suites | PASS — 21 + 8 + 76 |
+| All four PostgreSQL suites in one session | PASS — 128 passed in 10:32 |
+| `alembic check` | PASS — no schema change |
+| `git diff --check`, secret scan, attribution scan | PASS |
+
+## Known issues and findings
+
+### M2.2 — adversarial review: a hard filter that depended on a server setting (2026-08-30)
+
+Five lenses, each finding verified by a separate skeptic. **29 findings raised; 7 survived**, covering
+three distinct defects.
+
+1. **The date filter depended on the database's `TimeZone`.** `booked_at` is `TIMESTAMPTZ`, and a
+   plain `::date` cast is resolved by PostgreSQL in the *session's* zone — which nothing in this
+   project pins. The same rows would therefore reconcile differently on two servers, and the Python
+   side computed the UTC date while production computed whatever the server was set to. Because a
+   consumed ledger entry can never be released (ADR-024), a divergence would be permanent and
+   unrecoverable. The cast is now pinned to UTC explicitly, and a test runs the matcher against a
+   database set to `Europe/Berlin` with a candidate at 23:30 UTC — the instant that falls on the next
+   day there — and asserts the outcome is unchanged.
+2. **The "below the band" test leg was a zero difference.** All five rows of the boundary
+   parametrisation put the base amount in the "below" column, so that leg exercised the *exact* rule
+   while claiming to test the band. No test anywhere exercised a non-zero difference strictly inside
+   a band. The table now uses the four-decimal storage headroom to produce a real sub-unit
+   difference, asserts the match came from the tolerance rule, and a second test checks the table's
+   own arithmetic — a test table is code, and this one was wrong.
+3. **A docstring claimed an idempotence the code does not have.** `run_matching` said a second run
+   "considers no lines and returns a run of zeroes". It is idempotent in what it *writes*, but
+   residual lines stay unmatched by design and are reconsidered every run: on the canonical corpus a
+   second pass returns `considered=13, matched=0`. Repeated matching is safe, not free.
+
+A fourth finding was addressed by narrowing a claim rather than changing code: the double-consume
+concurrency test asserted only that one row survived, which would hold even if the two workers
+serialised. It now also asserts that exactly one worker claimed the entry, and states explicitly that
+it does not require the interleaving to occur — the deterministic loser-side behaviour is proven by a
+separate sequential test rather than by hoping for a race.
+
+### M2.2 — a flaky integration suite that was the harness, not the product
+
+Running all four PostgreSQL suites in one pytest session began failing intermittently: a different
+test each time, always an `asyncio` timeout rather than an assertion, with wall time inflated from
+about five minutes to as much as ninety-four. Each suite passed alone, and CI runs them as four
+separate processes, so nothing was ever wrong with the product.
+
+The cause was connection churn in the test harness. The matching module's engine fixture is
+function-scoped, and a pooled engine leaves up to five idle sockets behind per test; across four
+modules those accumulated until asyncpg's sixty-second *connection establishment* timeout began
+firing. Diagnosed by elimination rather than guessed at — PostgreSQL was idle at 0.02% CPU with 46 MB
+resident, no catalog bloat (`pg_attribute` under 1 MB, dead tuples in single figures) and a database
+of 9.5 MB, so the database was never the constraint. The fixture now uses `NullPool`, which holds no
+idle connections. All four suites together: **128 passed in 10:32**, repeatably.
+
+### M2.2 — and one the fix for the review introduced
+
+The timezone-independence test was written using `ALTER DATABASE lecp_test SET TimeZone`. That is
+persistent, applies to every other connection, and left the rest of the suite waiting on a lock — one
+test timed out and the run took fourteen minutes instead of four. A test that reconfigures the server
+to make its point is a worse problem than the one it is demonstrating. The zone is now set through
+`connect_args={"server_settings": {"timezone": ...}}` on that test's own engine, and the test asserts
+the shifted zone is actually in effect before drawing any conclusion from it.
+
+### M2.2 — two defects the tests caught before the review
+
+`MatchRun` exposed a `cleared_fraction: float` for reporting, and the package's own no-float guard
+refused it. The guard was right: a ratio on a business result invites something downstream to branch
+on it, so the property was removed rather than the guard weakened.
+
+The read and the write also collided — SQLAlchemy's autobegin opened a transaction on the first
+`SELECT`, and the explicit write transaction then failed with "a transaction is already begun". Every
+path that actually persisted a match failed; the ones that matched nothing passed. Now the read holds
+its own explicit transaction and the decision is computed with none held.
+
 ## Deployment state
 
 Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources exist.
@@ -551,20 +689,21 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-364 passed, 110 deselected         coverage 93%+ (required 90%)
+409 passed, 131 deselected         coverage 92.19% (required 90%)
 ruff format: all files formatted
 ruff check:  All checks passed!
-mypy:        Success: no issues found in 38 source files
+mypy:        Success: no issues found in 44 source files
 schema:      76 passed against real PostgreSQL (migrations, drift, constraints, grants)
 fixtures:     8 passed against real PostgreSQL (corpus loads with constraints enforced)
 ingest:      21 passed against real PostgreSQL (receipt, quarantine, re-delivery, concurrency)
+matching:    23 passed against real PostgreSQL (persistence, ambiguity, races, timezone)
 ```
 
 Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-08-29.
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 43 ADRs and 11 OPEN items. None blocks M2.2. **OPEN-2** (tolerance band configuration) is now the next one due — M2.1 deliberately declined to decide it, and the corpus carries the near-miss cases needed to settle it. Still relevant:
+`DECISIONS.md` holds 45 ADRs and 10 OPEN items. OPEN-2 was resolved at M2.2 (ADR-042). None blocks M2.3; **OPEN-3** (the final form of the exception taxonomy) is the next one due. Still relevant:
 
 - **LICENSE copyright holder** is `tair800` (the configured Git identity). Replace with a legal name
   if that matters for a public repository.

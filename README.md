@@ -4,20 +4,22 @@ PSP settlement files against the general ledger. Deterministic matching clears t
 proposes a treatment from a closed enum whose type has no numeric field. A chaos suite proves no
 double-post against a RED baseline that does.
 
-> ## Status: milestone M2.1 of 31
+> ## Status: milestone M2.2 of 31
 >
 > **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
 > liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
 > correlation-id propagation, the tooling baseline, a green CI gate, the **complete database
 > schema** with Alembic migrations, a **deterministic synthetic fixture corpus**, and — as of
 > M2.1 — **settlement ingestion**: a settlement file is received, hashed, persisted immutably,
-> parsed, normalised, and either accepted as typed settlement lines or quarantined with a reason.
+> parsed, normalised, and either accepted as typed settlement lines or quarantined with a reason;
+> and as of M2.2 — **deterministic matching**: those lines are reconciled against ledger entries by
+> exact amount and by a per-currency tolerance band, with ambiguity refused rather than guessed.
 >
-> **What does not exist: reconciliation.** Nothing matches a settlement line to a ledger entry,
-> evaluates a tolerance, detects a residual, classifies an exception, assembles evidence, proposes
-> a treatment, computes an adjustment, obtains an approval or posts anything. There is no LLM
-> integration, no ledger adapter, no dispatcher, no retry, no DLQ replay, no recovery workflow, no
-> audit emission and no chaos suite. An `outbox` table is not a transactional outbox; a
+> **What does not exist: everything after the match.** A line that fails to match is left unmatched
+> and nothing describes *why*. Nothing detects a residual as a business event, classifies an
+> exception, assembles evidence, proposes a treatment, computes an adjustment, obtains an approval
+> or posts anything. There is no LLM integration, no ledger adapter, no dispatcher, no retry, no
+> DLQ replay, no recovery workflow, no audit emission and no chaos suite. An `outbox` table is not a transactional outbox; a
 > `posting_attempt` table is not a write-ahead protocol; **a fixture labelled `fee_split` is a
 > constructed input, not evidence that anything can classify a fee split.** Everything below that
 > is not listed as existing is a *specification of intended behaviour*.
@@ -357,6 +359,45 @@ keep it that way.
 make db-up
 make ingest-verify   # ingestion and quarantine against real PostgreSQL
 ```
+
+### Deterministic matching
+
+Settlement lines against ledger entries, by rule, with no model anywhere in the path.
+
+| Rule | When it applies | Recorded |
+|---|---|---|
+| `exact_amount` | Same currency, inside the date window, identical amount | `rule_id`, no tolerance |
+| `amount_within_tolerance` | Same currency, inside the date window, difference within the band | `rule_id`, the absorbed difference and its currency |
+
+Exact outranks tolerance, and an accepted pair leaves the pool before the next rule runs.
+
+**The tolerance band is one minor unit of the currency, inclusive** — 0.01 EUR/USD/GBP, 1 JPY,
+0.001 BHD — with a one-day value-date window as a hard eligibility filter. Narrow on purpose: in this
+system a tolerance match *drops* the difference, so an over-wide band leaves the ledger permanently
+wrong by that amount with nobody ever shown it, whereas an over-tight one costs an analyst a glance.
+Currency equality is absolute and no conversion happens anywhere; a currency with no declared band
+gets exact matching only. The numbers are a declared project decision, not a measurement — see
+ADR-042, which records that and what would have to change to improve on it.
+
+**Ambiguity is refused, not resolved.** A pair is accepted only when it is the unique choice from
+*both* sides: a line with two candidates matches nothing, and two lines competing for one entry match
+nothing. That is what makes the result independent of the order rows arrive in — a greedy matcher
+would let the query plan decide which line takes a shared candidate, and consuming the wrong entry is
+not recoverable, because `match_result` is unique on the ledger entry.
+
+**Measured on the `bulk` fixture profile at 200 scenario instances: 81.9% of lines cleared
+deterministically**, 169 exactly and 7 by tolerance, with no ambiguity and no model call. The
+canonical corpus clears 4 of 17 — it holds one instance of every condition, so its rate describes the
+catalogue rather than the matcher.
+
+```bash
+make db-up
+make match-verify   # matching, tolerance, ambiguity and races against real PostgreSQL
+```
+
+**Still absent, deliberately:** anything that says *why* a line did not match. Residual detection,
+the exception taxonomy and evidence assembly are M2.3, and the matching package imports nothing that
+would let it reach an exception table — a test walks its AST to keep it that way.
 
 ### Deterministic fixture corpus
 

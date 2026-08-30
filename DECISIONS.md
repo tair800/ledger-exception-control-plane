@@ -1102,20 +1102,133 @@ being refused by the index.
 
 ---
 
+## ADR-042 — Tolerance bands: absolute, per-currency, one minor unit (resolves OPEN-2)
+
+**Status:** Accepted (M2.2). **Resolves OPEN-2**, which the plan required to be settled for this
+increment.
+
+OPEN-2 asked which dimensions carry tolerance, what the defaults are, and whether they are
+per-currency. `IMPLEMENTATION_PLAN.md` §2.2 requires the bands to be **configurable**; neither it nor
+`PROJECT_SPEC.md` states a number, and nobody on this project has measured a real settlement feed.
+The values below are therefore a **declared project decision, not an empirical finding**, and they
+are labelled as such in the code that carries them.
+
+### The dimensions
+
+| Dimension | Decision |
+|---|---|
+| **Amount** | Absolute, per currency. **Not** a percentage |
+| **Date** | A hard eligibility window in whole days, not a band |
+| **Reference** | No tolerance, because there is no reference rule at all |
+| **Currency** | Never. Equality is absolute |
+
+**Absolute, not relative.** A percentage band absorbs more money the larger the movement, which is
+exactly backwards for a control: the differences that matter least are the small ones, and a
+proportional band is most permissive precisely where the stakes are highest. A rounding artefact is
+an absolute quantity — it does not scale with the amount that produced it.
+
+**Per currency, because "one minor unit" is three different numbers.** 0.01 in EUR, USD and GBP; 1 in
+JPY, which has no minor unit; 0.001 in BHD. A single figure would be three different policies wearing
+one value.
+
+### The defaults
+
+`EUR/USD/GBP 0.01 · JPY 1 · BHD 0.001 · value_date_window_days 1`
+
+**One minor unit, not two.** In this system a tolerance match means the difference is *dropped*:
+there is no compensating posting, the line is marked matched, and the few cents never reach the
+ledger. A residual, by contrast, is eventually booked — that is the path the rest of the project
+builds. The two errors are therefore not symmetric. A band that is too tight costs an analyst a
+glance; a band that is too loose leaves the ledger permanently wrong by that amount with nobody ever
+shown it. One minor unit is one rounding at the precision the source itself uses. Two independent
+roundings can compound to two units, and a band of two would absorb them — but it would equally
+absorb a genuine two-cent shortfall, and there is no evidence here to prefer that.
+
+**A currency with no declared band gets no tolerance at all** — not a zero band, no band. An
+undeclared currency means nobody has decided what is immaterial in it, and the safe reading of
+"undecided" is exact-match-only. Fail-closed.
+
+### The exact semantics
+
+1. **Inclusive.** `difference <= band`. The policy states the largest difference that may be
+   absorbed, so that value is admissible; an exclusive reading would make the documented number the
+   first one *refused*, which is not what "largest permitted" means. Tested below, at and above the
+   band for every declared currency.
+2. **The date window is applied first, and to every rule.** It is a hard filter, not a band: a
+   candidate outside it is not considered by the exact rule either. Amount tolerance is evaluated
+   only among candidates that already passed currency equality and the date window.
+3. **Signs are compared, not stripped.** The comparison is `abs(line.amount - entry.amount)`, so a
+   debit never matches a credit: −326.92 against +326.92 is a difference of 653.84, not zero.
+4. **Zero is not special-cased.** The absolute-difference rule handles it like any other value, so
+   0.00 matches 0.00 exactly and 0.01 within tolerance.
+5. **Tolerance never crosses currencies.** Currency equality is a hard filter ahead of every rule.
+   §3 lists a conversion policy engine as a non-goal and §13 records that rates arrive as inputs, so
+   two amounts in different currencies are not near each other — they are incomparable. The
+   presentment and FX columns the settlement file carries are not read by the matcher at all.
+6. **Ambiguity is refused, never resolved by a wider band.** Two candidates inside the band leave the
+   line unmatched (ADR-043). A tolerance band decides *whether* a difference is immaterial; it never
+   decides *which* of two entries a line belongs to.
+
+### Why this is narrow and reversible
+
+The policy is one frozen, typed value passed as an argument — not ambient configuration, not
+constants scattered through comparisons. Changing a band is a visible edit to one object, and the
+absorbed difference is recorded on every tolerance match in `match_result.tolerance_applied`, so a
+historical decision can be re-judged against a different policy without re-deriving it.
+
+**Recorded limitation.** These numbers rest on reasoning about rounding, not on measurement. If this
+project ever acquires a real settlement feed, the bands are the first thing that should be re-derived
+from it, and this ADR should be amended rather than quietly reinterpreted.
+
+**Measured consequence.** On the `bulk` profile at 200 instances, **81.9% of lines clear
+deterministically with no model call** — 169 exactly and 7 by tolerance, with no ambiguity. The
+canonical corpus clears 4 of 17, which reports the shape of a one-of-each catalogue rather than the
+matcher's reach; both of its near misses differ by two minor units and therefore stay residual.
+
+---
+
+## ADR-043 — A match must be unique from both sides, or it is not a match
+
+**Status:** Accepted (M2.2)
+
+The obvious matcher walks the settlement lines and lets each take the first ledger entry it likes.
+That is greedy, and greedy is order-dependent: two lines of 10.00 against one entry of 10.00 produce
+a different winner depending on which line is considered first — and "first" then means whatever
+order the rows came back in.
+
+**Decision.** A pair is accepted only when the line has exactly one eligible candidate **and** that
+candidate is claimed by exactly one line. Everything else is ambiguous and stays unmatched.
+
+A financial match decided by query order is a defect even when both answers look reasonable, because
+nothing in the business says the first row wins. Worse, consuming the wrong entry does not merely
+mislabel one line: `match_result` is unique on `ledger_entry_id` (ADR-024), so the entry is gone, and
+the line that genuinely owned it can never be reconciled. The mistake is not visible and not
+recoverable by re-running.
+
+**Ambiguity is information, not an obstacle.** Two lines competing for one entry match nothing, and
+that is the honest answer: the system cannot tell which movement the entry represents. Both lines
+remain unmatched and become residual work for M2.3, where a human sees them — which is precisely what
+the residual path exists for.
+
+**Precedence does not launder a guess.** Rules are applied exact-first, and a rule's accepted pairs
+leave the pool before the next rule runs. A line that was ambiguous under the exact rule is still
+ambiguous under the tolerance rule, because its exact candidates are a subset of its tolerance
+candidates. There is no fallback tie-break, and none should be added without a business rule that
+says which candidate wins and why.
+
+**Proven, not asserted.** Every permutation of a small adversarial candidate set produces the same
+pairing, and the same world built in two different insertion orders reconciles identically against
+real PostgreSQL. A greedy implementation passes every other test in the suite and fails those two.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.
 
-**OPEN-1 (settlement file format and the simulated PSP feed) was resolved at M1.3** and is recorded as
-ADR-031. It is removed from this list rather than left with a "resolved" marker, because an open-decisions
-list that accumulates closed items stops being read.
-
-## OPEN-2 — Tolerance band configuration and defaults
-
-**Must decide:** which dimensions carry tolerance (absolute, relative, date window), their defaults,
-and whether they are per-currency.
-**Impact:** directly determines the size of the residual, and therefore how much work the model sees.
-**Needed before:** increment 2.2.
+**OPEN-1** (settlement file format) was resolved at M1.3 as ADR-031, and **OPEN-2** (tolerance band
+configuration and defaults) at M2.2 as ADR-042. Both are removed from this list rather than left with
+a "resolved" marker, because an open-decisions list that accumulates closed items stops being read.
 
 ## OPEN-3 — Exception classification taxonomy, final form
 

@@ -127,6 +127,13 @@ jobs:
       - name: Verify settlement ingestion against real PostgreSQL
         run: uv run pytest tests/test_ingest_postgres.py -m integration --no-cov
 
+      # Matching's persistence and concurrency guarantees are only observable against a real
+      # database: that a match and the line state land together, that a consumed ledger entry is
+      # unavailable, and that two workers racing for one entry cannot both consume it. Reuses the
+      # PostgreSQL service already running for the schema tests.
+      - name: Verify deterministic matching against real PostgreSQL
+        run: uv run pytest tests/test_matching_postgres.py -m integration --no-cov
+
   container:
     name: Build container image
     runs-on: ubuntu-latest

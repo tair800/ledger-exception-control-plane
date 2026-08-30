@@ -1,6 +1,6 @@
 # Developer commands. `make help` lists them.
 .DEFAULT_GOAL := help
-.PHONY: help install fmt fmt-check lint types test gate up down down-volumes logs ps smoke build \n        db-up migrate migrate-down schema-verify \n        fixtures fixtures-check fixtures-load fixtures-verify ingest-verify
+.PHONY: help install fmt fmt-check lint types test gate up down down-volumes logs ps smoke build \n        db-up migrate migrate-down schema-verify \n        fixtures fixtures-check fixtures-load fixtures-verify ingest-verify match-verify
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -78,3 +78,8 @@ fixtures-verify: ## Prove the corpus loads against real PostgreSQL with constrai
 
 ingest-verify: ## Prove ingestion and quarantine against real PostgreSQL (needs db-up)
 	uv run pytest tests/test_ingest_postgres.py -m integration -p no:cacheprovider --no-cov
+
+# --- deterministic matching (M2.2) ---
+
+match-verify: ## Prove matching, tolerance and concurrency against real PostgreSQL (needs db-up)
+	uv run pytest tests/test_matching_postgres.py -m integration -p no:cacheprovider --no-cov
