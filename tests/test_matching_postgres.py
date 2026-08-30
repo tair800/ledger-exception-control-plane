@@ -729,3 +729,178 @@ async def test_a_wider_policy_clears_the_corpus_near_misses(engine: AsyncEngine)
     absorbed = [row for row in rows if row["tolerance_applied"] is not None]
     assert absorbed, "and they must be recorded as tolerance matches, not exact ones"
     assert all(row["tolerance_applied"] == decimal.Decimal("0.02") for row in absorbed)
+
+
+# --------------------------------------------------------------------------------------
+# Precedence, through the database
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exact_ambiguity_is_not_resolved_by_a_tolerance_candidate(
+    engine: AsyncEngine,
+) -> None:
+    """Two exact candidates plus one near one: nothing is written, and nothing is consumed.
+
+    A matcher that dropped the unresolved exact contest before moving on would find the near
+    candidate unique within its own tier and write it — a weaker rule settling an ambiguity that a
+    stronger rule had refused, and irreversibly, because ``match_result`` is unique on the ledger
+    entry.
+    """
+    _, line_ids, entry_ids = await _seed(
+        lines=[("100.00", "EUR", DAY)],
+        entries=[
+            ("a", "100.00", "EUR", DAY),
+            ("b", "100.00", "EUR", DAY),
+            ("c", "100.01", "EUR", DAY),
+        ],
+        marker="tierblock",
+    )
+    run = await run_matching(engine, matched_at=MATCHED_AT)
+
+    assert (run.matched, run.ambiguous) == (0, 1)
+    assert await _match_rows() == []
+    assert (await _states())[line_ids[0]] == "unmatched"
+
+    connection = await asyncpg.connect(DSN)
+    try:
+        consumed = await connection.fetchval(
+            "SELECT count(*) FROM match_result WHERE ledger_entry_id = ANY($1::uuid[])", entry_ids
+        )
+        assert consumed == 0, "no candidate may be consumed while the contest is unresolved"
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_a_contested_entry_is_not_taken_by_a_lower_tier(engine: AsyncEngine) -> None:
+    """Two lines contest one entry exactly; a third would take it under tolerance. It must not."""
+    _, line_ids, _ = await _seed(
+        lines=[("100.00", "EUR", DAY), ("100.00", "EUR", DAY), ("100.01", "EUR", DAY)],
+        entries=[("a", "100.00", "EUR", DAY)],
+        marker="steal",
+    )
+    run = await run_matching(engine, matched_at=MATCHED_AT)
+
+    assert run.matched == 0
+    assert await _match_rows() == []
+    states = await _states()
+    assert all(states[line_id] == "unmatched" for line_id in line_ids)
+
+
+@pytest.mark.asyncio
+async def test_exact_ambiguity_holds_under_reversed_insertion_order(engine: AsyncEngine) -> None:
+    """The contest must be refused whichever order the rows physically arrived in."""
+
+    async def reconcile(reverse: bool) -> int:
+        await _wipe()
+        entries = [
+            ("a", "100.00", "EUR", DAY),
+            ("b", "100.00", "EUR", DAY),
+            ("c", "100.01", "EUR", DAY),
+        ]
+        await _seed(
+            lines=[("100.00", "EUR", DAY)],
+            entries=list(reversed(entries)) if reverse else entries,
+            marker="tierorder",
+        )
+        return (await run_matching(engine, matched_at=MATCHED_AT)).matched
+
+    assert await reconcile(reverse=False) == 0
+    assert await reconcile(reverse=True) == 0
+
+
+# --------------------------------------------------------------------------------------
+# Persisted precision against fixture construction intent
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_every_persisted_match_pairs_rows_from_the_same_constructed_scenario(
+    engine: AsyncEngine,
+) -> None:
+    """The invariant that matters, asserted against what is actually in the database.
+
+    The unit measurement grades the pure matcher; this grades ``match_result`` after ingestion,
+    matching and persistence have all run. A pair whose two sides come from different constructed
+    scenarios is a false financial match — and because the ledger entry can never be released, it
+    is permanent.
+
+    Construction metadata is read here, by the test, to judge production output. The matcher was
+    handed none of it.
+    """
+    records = json.loads((CORPUS / "records.json").read_text(encoding="utf-8"))
+    scenario_of_entry = {
+        uuid.UUID(row["id"]): row["scenario_id"] for row in records["ledger_entries"]
+    }
+    # Joined on ``psp_reference``, not on the corpus's row id. These lines reach the database
+    # through *ingestion*, which mints its own identifiers — the corpus ids belong to the fixture
+    # loader and never appear here. The PSP reference is what survives the CSV, which is the whole
+    # point of it. SC-012 repeats one reference across two of its own lines, so the mapping is
+    # still a function; asserted rather than assumed.
+    scenario_by_reference: dict[str, str] = {}
+    for batch in records["batches"]:
+        for row in batch["lines"]:
+            existing = scenario_by_reference.setdefault(row["psp_reference"], row["scenario_id"])
+            assert existing == row["scenario_id"], (
+                f"{row['psp_reference']} spans two scenarios; it cannot identify one"
+            )
+
+    connection = await asyncpg.connect(DSN)
+    try:
+        for row in records["ledger_entries"]:
+            await connection.execute(
+                "INSERT INTO ledger_entry (id, external_ref, account_code, amount, currency,"
+                " booked_at) VALUES ($1, $2, $3, $4, $5, $6)",
+                uuid.UUID(row["id"]),
+                row["external_ref"],
+                row["account_code"],
+                decimal.Decimal(row["amount"]),
+                row["currency"],
+                dt.datetime.fromisoformat(row["booked_at"]),
+            )
+    finally:
+        await connection.close()
+
+    for name in ("psp-settlement-2026-06.csv", "psp-settlement-2026-07.csv"):
+        outcome = await ingest(
+            engine,
+            (CORPUS / "settlement" / name).read_bytes(),
+            source="file-drop",
+            received_at=RECEIVED_AT,
+        )
+        assert outcome.accepted, outcome.quarantine_reason
+
+    run = await run_matching(engine, matched_at=MATCHED_AT)
+    rows = await _match_rows()
+
+    assert run.matched == len(rows) == 4
+
+    connection = await asyncpg.connect(DSN)
+    try:
+        reference_of = {
+            record["id"]: record["psp_reference"]
+            for record in await connection.fetch("SELECT id, psp_reference FROM settlement_line")
+        }
+    finally:
+        await connection.close()
+
+    def scenario_of(match_row: asyncpg.Record) -> str:
+        return scenario_by_reference[reference_of[match_row["settlement_line_id"]]]
+
+    false_matches = [
+        (scenario_of(row), scenario_of_entry[row["ledger_entry_id"]])
+        for row in rows
+        if scenario_of(row) != scenario_of_entry[row["ledger_entry_id"]]
+    ]
+    assert false_matches == [], f"persisted false match(es): {false_matches}"
+
+    matched_scenarios = sorted(scenario_of(row) for row in rows)
+    assert matched_scenarios == [
+        "SC-001-exact-match",
+        "SC-002-reference-mismatch",
+        "SC-006-chargeback-reversal",
+        "SC-008-cross-period-refund",
+    ]
+    # SC-006 and SC-008 each keep a residual line: only part of each corresponds to the ledger.
+    assert all(row["rule_id"] == MatchRule.EXACT_AMOUNT.value for row in rows)

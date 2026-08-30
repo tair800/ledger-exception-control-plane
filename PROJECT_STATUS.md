@@ -568,6 +568,31 @@ with a `NOT EXISTS` against `match_result`; at this corpus's scale no index is j
 and adding one on a guess is the kind of premature optimisation this project has avoided elsewhere.
 Recorded here so a later increment with real volume knows where to start. **No dependency added.**
 
+### Measured precision
+
+Clearance says how much work was removed; it says nothing about whether the pairs chosen were the
+right ones, and a matcher pairing lines with whatever entry shared an amount would score well on the
+first while being wrong. Every pair is therefore graded against the scenario each row was
+*constructed* for — same scenario is correct, cross-scenario is a false match by coincidence.
+
+| Corpus | Eligible | Matched | Correct | **False** | Ambiguous | Unmatched | Exact | Tolerance |
+|---|---|---|---|---|---|---|---|---|
+| `canonical` | 17 | 4 | 4 | **0** | 0 | 13 | 4 | 0 |
+| `bulk` @ 200 | 215 | 176 | 176 | **0** | 0 | 39 | 169 | 7 |
+| `bulk` @ 1000 | 1,075 | 868 | 868 | **0** | 2 | 205 | 843 | 25 |
+| `bulk` @ 4000 | 4,300 | 3,467 | 3,467 | **0** | 20 | 813 | 3,360 | 107 |
+
+**No false positive financial match at any scale.** Ambiguity rises with volume while false matches
+stay at zero: as coincidences become more likely the matcher refuses more, rather than pairing more.
+That is the trade the mutual-uniqueness rule exists to make, and it is the safe direction — a
+consumed ledger entry can never be released (ADR-024), so a wrong pairing is permanent.
+
+Every scenario constructed to be matchable clears completely (147/147 exact, 16/16 reference
+mismatch). Two `residual` scenarios do produce a match — SC-006 builds a chargeback and its later
+reversal against a single ledger debit, and the chargeback line genuinely *is* that debit — but both
+keep a residual line, and both pair within their own scenario. Asserting that no residual-intent line
+ever matches would have been asserting something false.
+
 ### Measured clearance
 
 | Corpus | Lines | Matched | By tolerance | Ambiguous | Cleared |
@@ -610,6 +635,9 @@ with no model call anywhere in the path.
 | No row written to any later increment's table | PASS |
 | No `float` anywhere in the matching package | PASS — AST guard |
 | Fixture ground truth unreachable from production matching code | PASS — AST guard |
+| Exact-tier ambiguity never resolved by tolerance | PASS — direct, symmetric, permuted, repeated |
+| A contested entry is never taken by a lower tier | PASS — unit and PostgreSQL |
+| Every persisted pair comes from one constructed scenario | PASS — zero false matches |
 | Existing ingestion, fixture and schema suites | PASS — 21 + 8 + 76 |
 | All four PostgreSQL suites in one session | PASS — 128 passed in 10:32 |
 | `alembic check` | PASS — no schema change |
@@ -646,6 +674,31 @@ concurrency test asserted only that one row survived, which would hold even if t
 serialised. It now also asserts that exactly one worker claimed the entry, and states explicitly that
 it does not require the interleaving to occur — the deterministic loser-side behaviour is proven by a
 separate sequential test rather than by hoping for a race.
+
+### M2.2 correction — precedence made explicit, precision measured (2026-08-30)
+
+Two correctness gaps were investigated before starting M2.3. **Neither was a defect**; both were
+missing evidence, and one produced a narrow hardening change.
+
+**Exact-tier ambiguity does not fall through to tolerance — verified, not assumed.** The adversarial
+case is a line with two equally valid exact candidates and one separate tolerance-only candidate: a
+matcher that dropped the unresolved exact contest would find the tolerance candidate unique within
+its own tier and match it, resolving an ambiguity by weakening the rule that detected it. It does
+not. The line is reported ambiguous and nothing is written, in that case and in the symmetric one
+(one entry contested by two exact lines plus a tolerance line), under every input permutation and
+across repeated runs.
+
+The safety was, however, **emergent rather than enforced**: it held only because exact candidates are
+a subset of tolerance candidates, and nothing in the code said so. It is now explicit — an ambiguous
+line and every entry it was contesting are withdrawn from all lower tiers. The second half is the
+part that would have been a defect if written carelessly: withdrawing only the line would release the
+entries it was claiming and let a *tolerance* match take one an *exact* claim was still arguing over.
+Behaviour is unchanged, and the corpus produces identical counts before and after.
+
+**Precision measured against construction intent, not only clearance.** Every persisted pair is now
+graded against the scenario each row was built for, at four corpus sizes up to 4,300 lines and again
+end-to-end through ingestion and persistence against real PostgreSQL. **Zero false matches
+everywhere.** The full table is above.
 
 ### M2.2 — a flaky integration suite that was the harness, not the product
 

@@ -130,8 +130,12 @@ def _accept_mutually_unique(
     entries: Sequence[CandidateEntry],
     rule: MatchRule,
     policy: TolerancePolicy,
-) -> tuple[list[ProposedMatch], set[uuid.UUID]]:
-    """Accept every pair that is the unique choice from both sides. Returns matches and ambiguities.
+) -> tuple[list[ProposedMatch], set[uuid.UUID], set[uuid.UUID]]:
+    """Accept every pair that is the unique choice from both sides.
+
+    Returns the accepted matches, the lines left ambiguous, and the **entries those ambiguous
+    lines were contesting** — the third value is what lets :func:`match` keep an unresolved
+    higher-tier contest out of the tiers below it.
 
     Set-based rather than iterative: the candidate graph is built in full before anything is
     accepted, so no line's outcome depends on whether another line was considered first.
@@ -148,18 +152,21 @@ def _accept_mutually_unique(
 
     matches: list[ProposedMatch] = []
     ambiguous: set[uuid.UUID] = set()
+    contested: set[uuid.UUID] = set()
 
     for line in lines:
         options = candidates.get(line.id, [])
         if len(options) != 1:
             if options:
                 ambiguous.add(line.id)
+                contested.update(entry.id for entry, _ in options)
             continue
         entry, absorbed = options[0]
         if len(claimants[entry.id]) != 1:
             # The line has one candidate, but that candidate is wanted by another line too. Neither
             # can be accepted without guessing which movement the entry represents.
             ambiguous.add(line.id)
+            contested.add(entry.id)
             continue
         matches.append(
             ProposedMatch(
@@ -171,7 +178,7 @@ def _accept_mutually_unique(
             )
         )
 
-    return matches, ambiguous
+    return matches, ambiguous, contested
 
 
 def match(
@@ -186,8 +193,19 @@ def match(
     and never reaches the tolerance rule, and an entry consumed exactly is no longer available to
     absorb a near miss.
 
-    A line that is ambiguous under the exact rule stays ambiguous under the tolerance rule too — its
-    exact candidates are a subset of its tolerance candidates — so precedence never rescues a guess.
+    **An unresolved contest is withdrawn from every tier below it.** A line left ambiguous by a rule
+    is removed from the pool, and so is every entry it was contesting. Without the second half the
+    first would be actively harmful: blocking only the line would release the entries it was
+    claiming, and a *tolerance* match could then take an entry that an *exact* claim was still
+    contesting — precedence inverted by the very step meant to protect it.
+
+    Today this changes nothing. Exact candidates are a subset of tolerance candidates, so an
+    exact-ambiguous line would still see two candidates at the tolerance tier and remain ambiguous
+    on its own; the tests below pass identically with and without this block. It is made explicit
+    because that safety is an *accident of these two rules* — it holds only while every lower tier
+    is a superset of every higher one, and nothing in the code said so. A future rule that selected
+    a different candidate set would silently start resolving higher-tier ambiguity at a lower tier,
+    which is exactly the failure this increment must not allow.
     """
     # A total ordering on the inputs. The acceptance rule is set-based and so does not depend on
     # this, but the *output* order does, and a deterministic output makes the persisted sequence and
@@ -200,23 +218,23 @@ def match(
     ambiguous: set[uuid.UUID] = set()
 
     for rule in RULE_PRECEDENCE:
-        accepted, rule_ambiguous = _accept_mutually_unique(
+        accepted, rule_ambiguous, contested = _accept_mutually_unique(
             remaining_lines, remaining_entries, rule, policy
         )
         matches.extend(accepted)
         ambiguous |= rule_ambiguous
 
-        matched_lines = {match.line_id for match in accepted}
-        consumed_entries = {match.entry_id for match in accepted}
-        remaining_lines = [line for line in remaining_lines if line.id not in matched_lines]
+        settled_lines = {match.line_id for match in accepted} | rule_ambiguous
+        settled_entries = {match.entry_id for match in accepted} | contested
+        remaining_lines = [line for line in remaining_lines if line.id not in settled_lines]
         remaining_entries = [
-            entry for entry in remaining_entries if entry.id not in consumed_entries
+            entry for entry in remaining_entries if entry.id not in settled_entries
         ]
 
     settled = {match.line_id for match in matches}
-    # A line ambiguous under one rule may have been matched under a later one only if its earlier
-    # ambiguity vanished, which cannot happen — but the subtraction states the invariant rather
-    # than relying on it.
+    # Ambiguous lines are withdrawn from the pool above, so no later rule can match one. The
+    # subtraction is a belt-and-braces assertion of that, kept because the two sets are maintained
+    # separately and a future edit could let them disagree.
     ambiguous -= settled
     return MatchOutcome(
         matches=tuple(matches),

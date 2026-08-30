@@ -622,3 +622,113 @@ def test_the_matcher_sees_no_free_text_field() -> None:
     forbidden = {"memo", "description", "psp_reference", "merchant_reference", "rationale"}
     for candidate in (CandidateLine, CandidateEntry):
         assert not (set(candidate.__dataclass_fields__) & forbidden), candidate.__name__
+
+
+# ======================================================================================
+# Regression: an unresolved higher-tier contest must not be settled by a lower tier
+#
+# The failure this guards against is subtle and would look like an improvement: a line that
+# cannot be matched exactly gets matched "at least approximately". That is precedence
+# inverted — the system would resolve an ambiguity by *weakening* the rule that detected it,
+# and would consume a ledger entry that a stronger claim was still contesting. Because
+# match_result is unique on the ledger entry (ADR-024), that consumption is permanent.
+# ======================================================================================
+
+
+def test_a_line_ambiguous_at_the_exact_tier_is_not_rescued_by_a_tolerance_candidate() -> None:
+    """Two exact candidates plus one tolerance-only candidate: the line matches nothing.
+
+    The tolerance candidate is unique *within its tier*, and a matcher that dropped the exact
+    tier's unresolved contest before moving on would seize on that uniqueness and match it.
+    """
+    settlement = line("100.00")
+    exact_a = entry("100.00", ref="GL-EXACT-A")
+    exact_b = entry("100.00", ref="GL-EXACT-B")
+    near = entry("100.01", ref="GL-NEAR")
+
+    outcome = match([settlement], [exact_a, exact_b, near], DEFAULT_POLICY)
+
+    assert outcome.matches == (), "an exact-tier ambiguity must not be resolved by tolerance"
+    assert settlement.id in outcome.ambiguous_line_ids
+
+
+def test_an_entry_contested_at_the_exact_tier_is_not_taken_by_a_lower_tier() -> None:
+    """The other half of the rule, and the half that would be a real defect if omitted.
+
+    Two lines contest one entry exactly. A third line would match that entry uniquely under
+    tolerance. Withdrawing only the ambiguous *lines* would release the entry and let the
+    tolerance match take it — a weaker rule consuming what a stronger one was still arguing
+    over, and irreversibly, because the entry can never be released again.
+    """
+    first, second = line("100.00", number=1), line("100.00", number=2)
+    tolerance_only = line("100.01", number=3)
+    contested = entry("100.00", ref="GL-CONTESTED")
+
+    outcome = match([first, second, tolerance_only], [contested], DEFAULT_POLICY)
+
+    assert outcome.matches == ()
+    assert outcome.ambiguous_line_ids == frozenset({first.id, second.id})
+    # The third line is not itself ambiguous — it has no available candidate at all, because the
+    # only one it could have used is locked in someone else's unresolved contest.
+    assert tolerance_only.id in outcome.unmatched_line_ids
+
+
+def test_the_symmetric_case_one_entry_two_exact_lines_plus_a_tolerance_line() -> None:
+    """Ambiguity on the ledger side blocks the tier as surely as ambiguity on the settlement
+    side does."""
+    exact_one, exact_two = line("250.00", number=1), line("250.00", number=2)
+    near = line("250.01", number=3)
+    only = entry("250.00", ref="GL-ONLY")
+
+    outcome = match([exact_one, exact_two, near], [only], DEFAULT_POLICY)
+    assert outcome.matches == ()
+    assert not any(m.entry_id == only.id for m in outcome.matches)
+
+
+def test_exact_tier_ambiguity_survives_every_input_order() -> None:
+    """The block must not be an artefact of the order the contest happened to be discovered in."""
+    settlement = line("100.00")
+    candidates = [
+        entry("100.00", ref="GL-A"),
+        entry("100.00", ref="GL-B"),
+        entry("100.01", ref="GL-C"),
+    ]
+    for permuted in itertools.permutations(candidates):
+        outcome = match([settlement], list(permuted), DEFAULT_POLICY)
+        assert outcome.matches == ()
+        assert settlement.id in outcome.ambiguous_line_ids
+
+
+def test_exact_tier_ambiguity_is_stable_across_repeated_execution() -> None:
+    settlement = line("100.00")
+    candidates = [
+        entry("100.00", ref="GL-A"),
+        entry("100.00", ref="GL-B"),
+        entry("100.01", ref="GL-C"),
+    ]
+    first = match([settlement], candidates, DEFAULT_POLICY)
+    for _ in range(5):
+        assert match([settlement], candidates, DEFAULT_POLICY) == first
+
+
+def test_an_unambiguous_line_still_reaches_the_tolerance_tier() -> None:
+    """The complement. Blocking must remove only what is genuinely contested.
+
+    A matcher that withdrew too much would pass every test above and quietly stop matching.
+    """
+    contested = line("100.00", number=1)
+    clean = line("500.00", number=2)
+    outcome = match(
+        [contested, clean],
+        [
+            entry("100.00", ref="GL-A"),
+            entry("100.00", ref="GL-B"),
+            entry("500.01", ref="GL-CLEAN"),
+        ],
+        DEFAULT_POLICY,
+    )
+
+    assert len(outcome.matches) == 1
+    assert outcome.matches[0].line_id == clean.id
+    assert outcome.matches[0].rule is MatchRule.AMOUNT_WITHIN_TOLERANCE
+    assert contested.id in outcome.ambiguous_line_ids

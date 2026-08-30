@@ -1211,14 +1211,35 @@ remain unmatched and become residual work for M2.3, where a human sees them — 
 the residual path exists for.
 
 **Precedence does not launder a guess.** Rules are applied exact-first, and a rule's accepted pairs
-leave the pool before the next rule runs. A line that was ambiguous under the exact rule is still
-ambiguous under the tolerance rule, because its exact candidates are a subset of its tolerance
-candidates. There is no fallback tie-break, and none should be added without a business rule that
-says which candidate wins and why.
+leave the pool before the next rule runs. There is no fallback tie-break, and none should be added
+without a business rule that says which candidate wins and why.
+
+**An unresolved contest is withdrawn from every tier below it** — the ambiguous line *and* every
+entry it was contesting. Both halves matter, and the second is the one that would be a defect if
+omitted: blocking only the line would release the entries it was claiming, and a *tolerance* match
+could then take an entry that an *exact* claim was still arguing over. Precedence would be inverted
+by the very step meant to protect it.
+
+This was originally left implicit, on the reasoning that a line ambiguous at the exact tier is
+necessarily ambiguous at the tolerance tier too — its exact candidates are a subset of its tolerance
+candidates. That reasoning is correct, and it was verified rather than assumed: the adversarial case
+(a line with two exact candidates and one tolerance-only candidate) matches nothing, both before and
+after the rule was made explicit. But the safety was an **accident of these two rules**, holding only
+while every lower tier is a superset of every higher one, and nothing in the code said so. A future
+rule selecting a different candidate set would have silently begun resolving higher-tier ambiguity at
+a lower tier. The block is now enforced rather than emergent; behaviour is unchanged, and the tests
+pass identically either way.
 
 **Proven, not asserted.** Every permutation of a small adversarial candidate set produces the same
 pairing, and the same world built in two different insertion orders reconciles identically against
 real PostgreSQL. A greedy implementation passes every other test in the suite and fails those two.
+
+**And measured for precision, not only for clearance.** Every pair the matcher produces is graded
+against the scenario each row was *constructed* for: a pair is correct when both sides come from the
+same constructed scenario, and any cross-scenario pair is a false match produced by coincidence.
+Across the canonical corpus and bulk corpora of 215, 1,075 and 4,300 lines: **zero false matches**.
+Ambiguity rises with volume (0, 0, 2, 20) while false matches stay at zero — coincidences are
+refused, not resolved, which is the whole point of the rule.
 
 ---
 

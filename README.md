@@ -385,10 +385,20 @@ nothing. That is what makes the result independent of the order rows arrive in �
 would let the query plan decide which line takes a shared candidate, and consuming the wrong entry is
 not recoverable, because `match_result` is unique on the ledger entry.
 
+An unresolved contest is withdrawn from every tier below it — the ambiguous line *and* the entries it
+was contesting — so a tolerance match can never take an entry that an exact claim was still arguing
+over.
+
 **Measured on the `bulk` fixture profile at 200 scenario instances: 81.9% of lines cleared
 deterministically**, 169 exactly and 7 by tolerance, with no ambiguity and no model call. The
 canonical corpus clears 4 of 17 — it holds one instance of every condition, so its rate describes the
 catalogue rather than the matcher.
+
+**Clearance is not the interesting number; precision is.** Every pair is graded against the scenario
+each row was constructed for, so a pair is correct only when both sides come from the same one.
+Across corpora of 17, 215, 1,075 and 4,300 lines: **zero false matches**. Ambiguity rises with volume
+while false matches stay at zero — as coincidences become more likely the matcher refuses more rather
+than pairing more, which is the safe direction, because a consumed ledger entry is never released.
 
 ```bash
 make db-up
