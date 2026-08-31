@@ -121,6 +121,34 @@ class Money(TypeDecorator[decimal.Decimal]):
         return value.quantize(MONEY_QUANTUM)
 
 
+def within_money_scale(value: decimal.Decimal) -> bool:
+    """Whether four decimal places hold this value exactly — the Python side of the check below.
+
+    The same value-based rule as :func:`money_scale_constraint`, stated once so the boundaries that
+    must agree with the column cannot drift from it. ``120.450000`` passes because it *equals*
+    ``120.45``; ``1.23456`` does not.
+
+    **Read off the digits rather than computed.** Both callers previously scaled by ``10**4`` and
+    asked whether the result was integral — the right question through the wrong instrument, because
+    ``scaleb`` is a context operation that rounds to the context's precision. At the default 28
+    significant digits an amount with 29 decimal places scaled to something integral and was
+    *accepted*: the ingestion boundary let a value through that the column then refused, which
+    strands a batch that can never reach ``parsed`` or ``quarantined`` (see the ingest service),
+    and the calculator priced a financial instruction the column would reject.
+
+    ``as_tuple`` is exact and reads nothing from the ambient context, so the answer cannot depend on
+    what some unrelated caller set ``decimal.getcontext().prec`` to.
+
+    ``NaN`` and infinity are **not** handled here — they have no meaningful scale, and each caller
+    rejects them explicitly rather than having one silently fold into the other.
+    """
+    _sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):  # NaN or infinity; the caller owns that decision
+        return False
+    excess = -exponent - MONEY_MAX_SCALE
+    return excess <= 0 or all(digit == 0 for digit in digits[-excess:])
+
+
 def money_column(**kwargs: Any) -> Mapped[Any]:
     """A monetary amount: exact, unconstrained ``NUMERIC``, never floating point.
 

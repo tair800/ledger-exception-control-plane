@@ -4,7 +4,7 @@ PSP settlement files against the general ledger. Deterministic matching clears t
 proposes a treatment from a closed enum whose type has no numeric field. A chaos suite proves no
 double-post against a RED baseline that does.
 
-> ## Status: milestone M2.3 of 31
+> ## Status: milestone M2.4 of 31
 >
 > **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
 > liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
@@ -16,15 +16,17 @@ double-post against a RED baseline that does.
 > exact amount and by a per-currency tolerance band, with ambiguity refused rather than guessed; and
 > as of M2.3 — **residual classification**: every line that fails to match becomes exactly one
 > `exception`, carrying a class from the closed taxonomy, the rule that assigned it and the version
-> of the rule set, or `unclassified` where the evidence cannot support a class.
+> of the rule set, or `unclassified` where the evidence cannot support a class; and as of M2.4 —
+> **the deterministic money path**: given an approved treatment code, an exception is priced into a
+> financial instruction — amount, currency, account, period — or refused with a closed reason.
 >
-> **What does not exist: everything with a monetary consequence.** Nothing computes an adjustment
-> amount, selects an account, assigns a posting period, assembles evidence for a model, proposes a
-> treatment, obtains an approval or posts anything. There is no LLM integration, no ledger adapter,
-> no dispatcher, no retry, no DLQ replay, no recovery workflow, no audit emission and no chaos
-> suite. An `outbox` table is not a transactional outbox and a `posting_attempt` table is not a
-> write-ahead protocol. Everything below that is not listed as existing is a *specification of
-> intended behaviour*.
+> **What does not exist: anything that decides, approves or posts.** Nothing chooses a treatment,
+> assembles evidence for a model, obtains an approval or writes an `adjustment` row — the calculator
+> is a pure function and persists nothing. There is no LLM integration, no ledger adapter, no
+> dispatcher, no retry, no DLQ replay, no recovery workflow, no audit emission and no chaos suite. An
+> `outbox` table is not a transactional outbox and a `posting_attempt` table is not a write-ahead
+> protocol. Everything below that is not listed as existing is a *specification of intended
+> behaviour*.
 >
 > No measurement here is a result — the `Measured` table is an obligation the build must produce
 > from a committed script, and it will not appear until it does.
@@ -493,10 +495,46 @@ make db-up
 make classify-verify   # taxonomy, provenance, integrity and races against real PostgreSQL
 ```
 
-**Still absent, deliberately:** any monetary consequence. Nothing prices a residual, selects an
-account or assigns a posting period — that is M2.4 — and the classification package imports nothing
-that would let it reach the adjustment, approval or treatment tables. A test walks its AST to keep it
-that way, and each guard is proven to fail against a deliberately injected violation.
+### The deterministic money path
+
+Given an exception and an **approved** treatment code, the calculator produces the instruction the
+two imply — one signed amount, one currency, one account, one period — or refuses with a closed
+reason. It is a pure function: no database, no clock, no randomness, and it persists nothing.
+
+**The amount is the settlement movement's own, unchanged, sign included.** That is the only formula
+in the increment, and it is the whole containment argument. A model will one day influence the
+treatment code; a treatment selects the *account and the period*, never the number. There is no
+arithmetic for a hallucinated amount to enter, and this package was written before any model existed
+in the codebase (ADR-003) so it could not have grown a dependency on one.
+
+```
+compute_adjustment(exception_facts, treatment_code, ledger_context) -> instruction | reason
+```
+
+Three arguments, all closed structured types. No `rationale`, no `confidence`, no dict, no prose —
+seven AST guards assert the package contains no float, no clock, no randomness, no ORM, no I/O, no
+posting machinery and no model reference, and **each is proven to fail against its own injected
+violation**.
+
+Account mapping and period assignment are a closed table keyed by classification and treatment —
+configuration, not code (ADR-047) — so *what can be priced* is configuration too. Rounding is
+declared (`0.0001`, `ROUND_HALF_UP`) and never applied: every amount is already within the money
+contract, and one that is not is **refused rather than rounded**.
+
+**Zero wrong financial instructions** across corpora of 13, 39, 207 and 833 residuals, under two
+treatments, grading amount, account and period together. Coverage is 4.8% at scale, and the honest
+reason is that most residuals are unpriceable by design — plus the corpus's chargeback reversals
+settle in USD while the demo books are EUR, so they refuse rather than convert. That case is the most
+instructive one: everything lines up except an exchange rate nobody approved, and a calculator that
+used the settlement number anyway would have produced a plausible instruction wrong by a rate.
+
+```bash
+make money-verify   # the calculator, its firewall and the corpus evaluation (no Docker needed)
+```
+
+**Still absent, deliberately:** anything that decides or acts. Nothing chooses a treatment, obtains
+an approval, derives an operation identifier or posts — those are M3, M5 and M4 — and the money
+package imports nothing that would let it reach them.
 
 ### Deterministic fixture corpus
 

@@ -3,12 +3,14 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M2.3 complete. **Next:** M2.4 — the deterministic adjustment calculator.
-**Residual work is now described, but not priced.** A settlement file is ingested, normalised and
-either accepted or quarantined; its lines are matched deterministically against ledger entries with
-tolerance; and every line that fails to match becomes exactly one classified exception. What does
-*not* exist: any monetary consequence. Nothing computes an adjustment amount, selects an account,
-assigns a posting period, assembles evidence for a model, or proposes a treatment.
+**Current milestone:** M2 complete. **Next:** M3.1 — the treatment-enum closure kill-test.
+**The whole deterministic core exists.** A settlement file is ingested, normalised and either
+accepted or quarantined; its lines are matched deterministically against ledger entries with
+tolerance; every line that fails to match becomes exactly one classified exception; and an approved
+treatment for that exception can be priced into a financial instruction, or refused with a reason.
+What does *not* exist: anything that decides a treatment, approves one, or posts. There is no model,
+no approval workflow, no ledger adapter and no `adjustment` row — the calculator is a pure function
+and persists nothing.
 
 ---
 
@@ -24,7 +26,8 @@ assigns a posting period, assembles evidence for a model, or proposes a treatmen
 | **2.1 Normalisation and quarantine** | **DONE** | Parser, normaliser, batch-level quarantine with closed reason codes |
 | **2.2 Matching engine with tolerance bands** | **DONE** | Two rules, per-currency bands, mutual-uniqueness ambiguity refusal |
 | **2.3 Exception creation and classification** | **DONE** | Three reachable classes plus a fallback; zero wrong classifications measured at four scales |
-| 2.4 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **2.4 Deterministic amount calculator** | **DONE** | Pure `compute_adjustment`; OPEN-4 resolved; zero wrong financial instructions at four scales |
+| 3.1 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -607,6 +610,165 @@ instance of every condition — three of its twelve scenarios are matched-intent
 the shape of the catalogue, not the matcher's reach. Every one of those matches is deterministic,
 with no model call anywhere in the path.
 
+## What M2.4 delivered
+
+- **A pure deterministic calculator** in `src/ledger_exception_control_plane/money/`: the policy and
+  one function. Exception facts, an approved treatment code and an explicit ledger context in; the
+  financial instruction they imply out, or a closed reason none can be produced.
+- **OPEN-4 resolved** (ADR-047). Account mapping and period assignment are a closed typed table
+  keyed by classification and treatment — configuration, not code, exactly as the decision required.
+- **One formula, deliberately.** The amount is the settlement movement's own, unchanged, sign
+  included. The treatment chooses the account and the period; it never changes the number.
+- **Refuses more than it prices**, with seven closed reasons and no free text among them.
+- **Persists nothing.** The plan's deliverable is a pure function, and no `adjustment` row can exist
+  before an approval authorises one (M5). **No schema change, no migration, no dependency.**
+- **Tests** — 95 unit and 19 evaluation tests, all Docker-free.
+
+### The AI/money firewall, built before there is a model to contain
+
+ADR-003 put this increment before the model layer on purpose, and the reason shows here: the
+containment argument is not "the calculator does not read model output" but that **there was no model
+output to read when it was written**. The guards lock that in before M3 can arrive.
+
+`compute_adjustment` takes the three arguments §6.2 fixes, and every one is a closed structured type:
+an exception's facts, a member of a four-value enum, and system-owned configuration. There is no
+`rationale`, no `confidence`, no dict and no JSON blob. The one value a model will ever influence is
+the treatment code — and a treatment selects an **account and a period, never a number**.
+
+So a hallucinated amount is not unlikely here; there is no arithmetic for it to enter. Seven AST
+guards assert the package contains no float, no clock, no randomness, no ORM, no I/O, no posting
+machinery, no model reference and no reach into the fixture corpus — and **each is proven to fail
+against its own injected violation**, with a clean-tree control so a guard that raised
+unconditionally cannot pass for one that works.
+
+### Rounding: declared, never applied
+
+Every priced amount is a settlement line's own, which ingestion already constrained to four decimal
+places (ADR-020), so no supported formula can produce a value needing rounding. The quantum
+(`0.0001`) and the mode (`ROUND_HALF_UP`) are recorded on every result because §7 requires them
+alongside it, and so a future formula inherits one declared rule rather than choosing its own. A test
+asserts no supported calculation ever needs them, at unit level and across the corpus.
+
+**An amount outside the money contract is refused, not rounded** — five decimal places, an over-large
+magnitude, `NaN` and infinity all decline. Inventing a rounding rule so a number satisfies the schema
+is the defect ADR-020 exists to prevent.
+
+### Measured: zero wrong financial instructions
+
+Priced across the whole deterministic path — match, classify, price — and graded against what each
+line was *constructed* for. A wrong amount, a wrong account and a wrong period are counted together:
+an adjustment posted to the right account in the wrong month is as much a misstatement as one for the
+wrong number.
+
+| Corpus | Residuals | Priced | **Wrong** | Refused: no account | Refused: currency |
+|---|---|---|---|---|---|
+| `canonical` | 13 | 1 | **0** | 11 | 1 |
+| `bulk` @ 200 | 39 | 2 | **0** | 33 | 4 |
+| `bulk` @ 1000 | 207 | 10 | **0** | 177 | 20 |
+| `bulk` @ 4000 | 833 | 40 | **0** | 713 | 80 |
+
+Identical under both `REBOOK` and `ACCRUE`.
+
+**Coverage is 4.8% at scale, and that is the honest number rather than a disappointing one.** Most
+residuals are `unclassified` or `fee_split` and neither is priceable. Of the classes that are, the
+corpus's chargeback reversals settle in USD while the demo books are EUR — so they refuse rather than
+convert.
+
+That last case is the most instructive in the corpus and it is a refusal: classified, mapped, open
+period, every field lining up, and still declined because the one thing missing was an exchange rate
+nobody has approved. A calculator that quietly used the settlement number would have produced a
+perfectly plausible instruction that was wrong by a rate.
+
+### What is not priced, and why each absence is deliberate
+
+| | |
+|---|---|
+| `fee_split` | One movement reported across rows whose *net* the ledger already booked. Pricing one row would post part of a movement whose whole the calculator cannot see. The correct treatment is a two-legged reclassification, which one signed amount against one account cannot express. |
+| `unclassified` | The system could not say what the residual is, so it cannot say which account restates it. |
+| `partial_capture`, `fx_rounding` | No exception can carry them (ADR-045). Configuring an account would assert a capability that does not exist. |
+| `escalate` | `adjustment` forbids a row for one outright (§6.2). Refused before the policy is consulted, and it cannot be configured at all. |
+
+### What adversarial review found, and it found real defects
+
+Three lenses — financial, accounting policy, architecture/test — produced 19 candidate findings.
+Each went to a verifier told to **refute it by default** and to prove its claim against running code.
+Fourteen were refuted. Five survived, collapsing to **two distinct defects**, both reproduced and
+both fixed.
+
+**1. An unvalidated accrual period (critical).** `originating_period` is the one field a caller
+*derives* rather than reads, and it flowed straight through to `AdjustmentInstruction.period`
+unchecked. `"2026-13"` produced an instruction carrying a month that does not exist. Worse,
+`is_open` compares periods lexicographically — correct for well-formed `YYYY-MM`, and only for
+those — so `"2026-1"` compared as *later* than `"2026-06"` and a January accrual was priced against
+a June-opened ledger, bypassing the closed-period refusal ADR-047 says must fire. Fixed by checking
+the shape of the period whichever branch produced it, with a closed `period_malformed` reason;
+refused rather than raised, because the calculator must stay total.
+
+**2. The money-contract check read the ambient decimal context (high).** It scaled by `10**4` and
+asked whether the result was integral — the right question through the wrong instrument. `scaleb` is
+a *context* operation and rounds to the context's precision, 28 significant digits by default, so an
+amount with 29 decimal places scaled to something integral and was **priced**. The guard rounded the
+evidence away before inspecting it, which is the same class of mistake as letting the database round
+a value on the way in. Fixed by reading the digits with `as_tuple`, which is exact and context-free,
+and pinned by a test that re-runs every calculation under a deliberately tiny precision.
+
+**The second defect was also in M2.1, where it was worse.** `ingest.normalise` used the identical
+`scaleb` pattern, so a settlement file carrying a 29-decimal amount was *accepted* by the boundary
+and then refused by the column. The receipt is committed before the payload is read, so that INSERT
+strands a batch which can never reach `parsed` or `quarantined` and which every re-delivery
+reproduces — the permanent jam M2.1's own docstring exists to prevent, reached through the money
+check rather than through a stray byte. The rule now lives once, in `db.base` beside the constraint
+it mirrors, and both boundaries use it. Found by reviewing M2.4 and fixed here rather than left.
+
+Neither defect is reachable from the committed corpus, so the measured table above was never wrong —
+which is exactly why they needed adversarial cases rather than a measurement.
+
+### One thing the evidence changed
+
+The refusal order was originally escalate → currency → amount → account. Run against the corpus it
+reported `currency_not_functional` for a GBP residual nobody could classify: true, and the wrong
+thing to hand an operator, who would chase an exchange rate when the real blocker is that the system
+cannot say what the movement is. Checking whether the *combination* is priceable before checking its
+*values* is strictly more informative and never lies in the other direction — a mapped combination
+falls through and reports whichever value check actually stopped it.
+
+## M2.4 verification
+
+Every row was run.
+
+| Check | Result |
+|---|---|
+| Clean `uv sync --frozen` / `uv lock --check` | PASS |
+| `ruff format --check` / `ruff check` | PASS |
+| `mypy` strict | PASS |
+| **Coverage gate, whole suite against real PostgreSQL** | **PASS — see below** |
+| Calculator unit tests | PASS — 95 |
+| Calculator fixture evaluation | PASS — 19 |
+| **Wrong financial instructions, four corpus sizes, two treatments** | **PASS — 0** |
+| Supported matrix prices exactly | PASS — 6 combinations |
+| Every combination outside the matrix fails closed | PASS — 18 swept |
+| `unclassified` never priced | PASS |
+| Missing account mapping fails closed | PASS |
+| Ambiguous mapping refused at configuration | PASS |
+| Period boundaries: month end, year end, leap day | PASS |
+| Closed period refuses, no next-open-period invention | PASS |
+| No wall clock, no randomness | PASS — AST guard |
+| No float anywhere in the money path | PASS — AST guard |
+| No implicit FX; foreign currency refuses | PASS — unit and corpus |
+| Amount outside the money contract refused, not rounded | PASS — 12 cases |
+| Result independent of the ambient decimal context | PASS — 4 precisions |
+| Malformed accrual period refused, not carried | PASS — 8 cases |
+| No supported calculation needs rounding | PASS — unit and corpus |
+| Calculator cannot be handed free text | PASS — signature and field guards |
+| No model, provider or proposal reference | PASS — AST guard |
+| No posting, outbox, retry or operation-id machinery | PASS — AST guard |
+| No I/O, ORM or session reachable | PASS — import allowlist |
+| **Every guard fails against its own injected violation** | **PASS — 7 mutations + clean-tree control** |
+| No adjustment row written | PASS — the package cannot reach a session |
+| `alembic check` | PASS — no schema change |
+| `git diff --check` | PASS |
+| Secret and attribution scan | PASS — 0 findings |
+
 ## What M2.3 delivered
 
 - **A deterministic classifier** in `src/ledger_exception_control_plane/classification/`: the rule
@@ -1039,9 +1201,9 @@ Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 48 ADRs and 9 OPEN items. OPEN-2 was resolved at M2.2 (ADR-042) and OPEN-3 at
-M2.3 (ADR-045). None blocks M2.4; **OPEN-4** (account mapping and period-assignment rules) is the next
-one due, and M2.4 cannot start without it. Still relevant:
+`DECISIONS.md` holds 49 ADRs and 8 OPEN items. OPEN-2 was resolved at M2.2 (ADR-042), OPEN-3 at M2.3
+(ADR-045) and OPEN-4 at M2.4 (ADR-047). **OPEN-5** (which two model providers) is the next one due and
+blocks M3.2. Still relevant:
 
 - **LICENSE copyright holder** is `tair800` (the configured Git identity). Replace with a legal name
   if that matters for a public repository.

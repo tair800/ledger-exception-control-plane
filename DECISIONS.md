@@ -1641,6 +1641,157 @@ column.
 
 ---
 
+## ADR-047 — Account mapping, period assignment, and what the calculator refuses (resolves OPEN-4)
+
+**Status:** Accepted (M2.4). **Resolves OPEN-4**, which the plan required to be settled before this
+increment.
+
+OPEN-4 asked how a treatment maps to a ledger account and how a period is assigned for cross-period
+cases, under one constraint: **configuration, not code**, and deterministic.
+
+### The shape, and why it decides more than it looks like it does
+
+`AccountPolicy` is a closed table keyed by the two structured values a decision is made from — the
+exception's classification and the approved treatment. The calculator consults it and does not
+contain it; no account code appears in a formula anywhere.
+
+The consequence is the part worth stating: **what can be priced is configuration too.** A combination
+with no configured account is not calculable, so the set of priceable cases is a table rather than a
+set of branches, and widening it later is a change to data. There is no default account and no
+fallback, so the failure mode is absence rather than a wrong posting.
+
+The policy is built from a *sequence* of rules rather than a mapping literal, because a `dict`
+resolves a duplicate key by keeping whichever came last — a silent choice between two ledger
+accounts. Configuring a pair twice raises where it is written.
+
+### The mapping
+
+Account codes are **synthetic demo configuration**. Four are the fictional chart the M1.3 corpus was
+built around — it was created with "enough to make account selection a real decision for M2.4" — and
+`6900` is declared for the same fictional organisation because writing a residual off has to land
+somewhere. A real deployment replaces the table and nothing else, which is what makes this narrow and
+reversible.
+
+| Classification | Treatment | Account | Period |
+|---|---|---|---|
+| `chargeback_reversal` | `rebook` | `4900` chargebacks | settlement period |
+| `chargeback_reversal` | `accrue` | `4900` chargebacks | originating period |
+| `chargeback_reversal` | `write_off` | `6900` write-offs | settlement period |
+| `cross_period_refund` | `rebook` | `4100` revenue | settlement period |
+| `cross_period_refund` | `accrue` | `4100` revenue | originating period |
+| `cross_period_refund` | `write_off` | `6900` write-offs | settlement period |
+
+`ACCRUE` and `REBOOK` share an account within a class and differ only in period. That is what the two
+treatments *are* here: the same restatement, recognised either when it settled or in the period it
+economically belongs to.
+
+### The amount, the sign, and the currency — one rule for all three
+
+**The amount is the settlement movement's own, unchanged, sign included.** An exception *is* a
+movement the ledger does not carry, so restating it is restating that amount. The treatment chooses
+where it lands and in which period; it never changes the number.
+
+That is deliberately the only formula in the increment, and it is what makes the containment argument
+structural rather than procedural. A model will one day influence the treatment code. If a treatment
+could move an amount, that influence would reach money — it cannot, because there is no arithmetic
+for it to reach.
+
+Direction is the sign, because `adjustment` holds one signed amount against one account. There is no
+debit/credit pair to reverse, and a case needing a two-legged posting is refused rather than
+approximated.
+
+Currency is the movement's own, and there is no conversion. A movement in a currency the books are
+not kept in is refused: §3 lists a conversion policy engine as a non-goal and no deterministic rate
+source is approved. The presentment and FX columns the settlement format carries are **not** consulted
+— a rate the PSP recorded for its own conversion is not this ledger's rate, and treating it as one
+would be inventing an FX policy at the moment of posting.
+
+### Periods
+
+`YYYY-MM`, the format `adjustment.period` already commits to, read from **business dates only**. No
+clock is consulted anywhere; a guard asserts the package never reaches for one.
+
+* `REBOOK` and `WRITE_OFF` recognise the movement when it settled — the period of the settlement
+  line's value date.
+* `ACCRUE` recognises it in the period it economically belongs to: the period of the movement it
+  reverses, supplied as a fact because the calculator performs no I/O. **Without one it refuses**,
+  rather than falling back to the settlement date — that fallback would make `ACCRUE` produce the
+  same instruction as `REBOOK` while claiming to be a different treatment.
+
+A period before `earliest_open_period` is **closed and refuses**. No approved policy says where a
+movement belonging to a closed period should go instead, and "the next open period" is a decision
+nobody has taken; refusing keeps it with the people entitled to take it.
+
+### What is not priced, and why each absence is deliberate
+
+`fee_split` is absent for every treatment. A fee split is one movement the PSP reported across
+several rows and the ledger booked its *net*: pricing one row would post part of a movement whose
+whole the calculator cannot see, and would double-count what is already booked. The correct treatment
+is a two-legged reclassification, which one signed amount against one account cannot express.
+
+`unclassified` is absent. The system could not say what the residual is, so it cannot say which
+account restates it. An account here would be a guess wearing configuration's clothes.
+
+`partial_capture` and `fx_rounding` are absent because no exception can carry them (ADR-045).
+Configuring an account for a class nothing produces would assert a capability that does not exist.
+
+`escalate` is refused before the policy is consulted, and cannot be configured at all: `adjustment`
+forbids a row for one outright (§6.2), so an account mapped to it could never be used and its
+presence would imply otherwise.
+
+### Rounding: declared, and never applied
+
+Every priced amount is a settlement line's own, which ingestion already constrained to four decimal
+places (ADR-020), so no supported formula can produce a value needing to be rounded. The quantum and
+the mode are still recorded on every result — §7 requires them alongside it, and a future formula
+that does need rounding should inherit one declared rule rather than choose its own. `ROUND_HALF_UP`
+rather than banker's rounding: an adjustment is a single restatement a human approved, not a long
+series where bias accumulates.
+
+An amount outside the money contract is **refused, not rounded**. Inventing a rounding rule so a
+number satisfies the schema is the defect ADR-020 exists to prevent, and it would be the same defect
+here.
+
+### Refusal order, chosen from evidence
+
+Escalate, then whether the combination is priceable at all, then the values, then the period. The
+account check comes before the currency check because the first ordering reported
+`currency_not_functional` for a GBP residual nobody could classify — true, and the wrong thing to
+hand an operator, who would chase an exchange rate when the real blocker is that the system cannot
+say what the movement is. A combination that *is* mapped falls through and reports whichever value
+check actually stopped it, so the earlier check never masks a real blocker.
+
+### Measured
+
+Priced across the whole deterministic path — match, classify, price — and graded against what each
+line was constructed for. **Zero wrong financial instructions** at every corpus size, under both
+`REBOOK` and `ACCRUE`:
+
+| Corpus | Residuals | Priced | **Wrong** | Refused: no account | Refused: currency |
+|---|---|---|---|---|---|
+| `canonical` | 13 | 1 | **0** | 11 | 1 |
+| `bulk` @ 200 | 39 | 2 | **0** | 33 | 4 |
+| `bulk` @ 1000 | 207 | 10 | **0** | 177 | 20 |
+| `bulk` @ 4000 | 833 | 40 | **0** | 713 | 80 |
+
+Coverage is 4.8% at scale and that is the honest number, not a disappointing one. Most residuals are
+`unclassified` or `fee_split` and neither is priceable; of the classes that are, the corpus's
+chargeback reversals settle in USD while the demo books are EUR, so they refuse rather than convert.
+That last case is the most instructive in the corpus: classified, mapped, open period, everything
+lining up — and still refused, because the one thing missing was a rate nobody has approved. A
+calculator that quietly used the settlement number would have produced a plausible instruction that
+was wrong by an exchange rate.
+
+### Scope
+
+M2.4 **persists nothing**. The plan's deliverable is a pure function, and no `adjustment` row can
+exist before an approval authorises one (M5). No schema change, no migration, no dependency. Nothing
+here derives an operation identifier, writes an attempt record or dispatches anything — the presence
+of those columns in the M1.2 schema is not a reason to reach for them, and a guard asserts the
+package cannot.
+
+---
+
 ---
 
 # Open decisions
@@ -1648,16 +1799,10 @@ column.
 Not yet decided. Each names what must be settled and by when.
 
 **OPEN-1** (settlement file format) was resolved at M1.3 as ADR-031, **OPEN-2** (tolerance band
-configuration and defaults) at M2.2 as ADR-042, and **OPEN-3** (the exception taxonomy) at M2.3 as
-ADR-045. All three are removed from this list rather than left with a "resolved" marker, because an
-open-decisions list that accumulates closed items stops being read.
-
-## OPEN-4 — Account mapping and period-assignment rules
-
-**Must decide:** how a treatment code maps to ledger accounts, and how period is assigned for
-cross-period cases.
-**Constraint:** must be configuration, not code, and must be deterministic.
-**Needed before:** increment 2.4.
+configuration and defaults) at M2.2 as ADR-042, **OPEN-3** (the exception taxonomy) at M2.3 as
+ADR-045, and **OPEN-4** (account mapping and period assignment) at M2.4 as ADR-047. All four are
+removed from this list rather than left with a "resolved" marker, because an open-decisions list that
+accumulates closed items stops being read.
 
 ## OPEN-5 — Which two model providers
 

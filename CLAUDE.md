@@ -17,11 +17,12 @@ adjustments, **dispatched at most once per operation identifier**, with an effec
 Deterministic matching clears the bulk. The model proposes a *treatment* for the residual — never an
 amount.
 
-**Status: implementation in progress.** M0 (scaffold, stack), M1 (schema, fixture corpus) and M2.1
-through M2.3 (ingestion, deterministic matching, residual classification and exception creation) are
-complete. **M2.4 — the deterministic adjustment calculator — is next**, and OPEN-4 must be settled
-first. Nothing beyond that is implemented: no amount calculation, no model layer, no ledger adapter,
-no dispatcher, no console. `PROJECT_STATUS.md` is the authority on exactly what exists.
+**Status: implementation in progress.** M0 (scaffold, stack), M1 (schema, fixture corpus) and all
+of M2 (ingestion, deterministic matching, residual classification, and the deterministic adjustment
+calculator) are complete. **M3 — the model layer behind a port — is next**, beginning with the 3.1
+treatment-enum closure kill-test. Nothing beyond that is implemented: no model layer, no approval
+workflow, no ledger adapter, no dispatcher, no console, and no `adjustment` is ever persisted yet.
+`PROJECT_STATUS.md` is the authority on exactly what exists.
 
 ---
 

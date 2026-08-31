@@ -206,6 +206,44 @@ def test_an_over_precise_amount_is_rejected_and_never_rounded(text: str) -> None
     assert only_defect(payload(row(amount=text))).code is QuarantineCode.AMOUNT_PRECISION_EXCEEDED
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1.00000000000000000000000000001",
+        "-1.00000000000000000000000000001",
+        "1.000000000000000000000000000000005",
+        "0.12345678901234567890123456789",
+    ],
+)
+def test_an_amount_longer_than_the_decimal_context_is_still_rejected(text: str) -> None:
+    """The poison pill this boundary exists to stop, found while reviewing M2.4's calculator.
+
+    The precision rule used to scale by ``10**4`` and ask whether the result was integral. That is
+    the right question through the wrong instrument: ``scaleb`` is a *context* operation and rounds
+    to the context's precision, 28 significant digits by default. An amount with 29 decimal places
+    therefore scaled to something integral and was **accepted** — and then refused by the column's
+    ``trunc(amount, 4) = amount``.
+
+    That is the permanent jam this module's docstring is about. The receipt is committed before the
+    payload is read, so the failing INSERT leaves a batch that can never reach ``parsed`` or
+    ``quarantined``, and every re-delivery reproduces it. Reached through the money check rather
+    than through a stray byte, but the same dead end.
+    """
+    assert only_defect(payload(row(amount=text))).code is QuarantineCode.AMOUNT_PRECISION_EXCEEDED
+
+
+def test_the_precision_rule_does_not_depend_on_the_ambient_decimal_context() -> None:
+    """An unrelated caller setting ``getcontext().prec`` must not change what ingestion accepts."""
+    for precision in (1, 5, 28, 60):
+        with decimal.localcontext() as ctx:
+            ctx.prec = precision
+            assert only_defect(payload(row(amount="1.23456"))).code is (
+                QuarantineCode.AMOUNT_PRECISION_EXCEEDED
+            )
+            outcome = interpret(payload(row(amount="120.450000")))
+            assert outcome[0][0].amount == decimal.Decimal("120.45")
+
+
 @pytest.mark.parametrize("text", ["1.230000", "120.450000", "1.000000", "0.0000000", "1.00000"])
 def test_trailing_zeros_beyond_four_places_are_accepted_not_quarantined(text: str) -> None:
     """The rule is value-based, and ADR-020 chose that deliberately.

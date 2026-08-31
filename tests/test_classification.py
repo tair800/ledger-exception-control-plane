@@ -743,15 +743,23 @@ def test_the_classification_package_computes_no_adjustment_and_touches_no_money_
                 assert node.value not in forbidden, f"{name} contains the literal {node.value!r}"
 
 
-def test_no_adjustment_calculator_exists_anywhere_in_the_source_tree() -> None:
-    """M2.4 has not been started. Asserted across the whole package rather than only this one,
-    because the scope boundary that matters is the repository's, not a directory's."""
+def test_the_calculator_lives_outside_classification_and_is_not_reachable_from_it() -> None:
+    """The M2.4 boundary, from this side.
+
+    This assertion used to be "no calculator exists anywhere", which was right while M2.4 was
+    unstarted and became wrong the moment it landed. What it was really protecting is the
+    *direction*: classification answers what condition can be proved, the calculator answers what a
+    treatment instructs, and the first must never reach the second. A residual's class cannot depend
+    on what it would cost to fix.
+    """
     root = CLASSIFICATION_ROOT.parent
-    for path in sorted(root.rglob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        assert "compute_adjustment" not in source, f"{path.name} defines the M2.4 calculator"
-    assert not (root / "money").exists()
-    assert not (root / "adjustment").exists()
+    assert (root / "money" / "calculator.py").exists(), "M2.4 exists and lives in its own package"
+
+    for _name, tree in _classification_sources():
+        for referenced in _referenced_names(tree):
+            assert referenced not in {"compute_adjustment", "AdjustmentInstruction"}, referenced
+        dumped = ast.dump(tree)
+        assert "money" not in dumped, "classification must not reach the money path"
 
 
 def test_the_classifier_sees_no_free_text_and_no_ledger_field() -> None:

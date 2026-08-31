@@ -32,7 +32,7 @@ from typing import Final
 
 from ledger_exception_control_plane.db.base import (
     MONEY_MAGNITUDE_EXCLUSIVE_BOUND,
-    MONEY_MAX_SCALE,
+    within_money_scale,
 )
 from ledger_exception_control_plane.ingest.errors import Defect, QuarantineCode
 from ledger_exception_control_plane.ingest.parser import ParsedRow
@@ -139,14 +139,18 @@ def _money(text: str, line: int, column: str) -> tuple[decimal.Decimal | None, D
     # even hold internally, because leading zeros were being canonicalised silently on the same
     # path while trailing ones condemned the file.
     #
-    # This mirrors the column's ``trunc(amount, 4) = amount``: scale by 10^4 and require the
-    # result to be a whole number, so a value is refused exactly when four decimal places cannot
-    # hold it. ``1.230000`` passes; ``1.23456`` does not.
-    scaled = value.scaleb(MONEY_MAX_SCALE)
-    if scaled != scaled.to_integral_value(rounding=decimal.ROUND_DOWN):
+    # This mirrors the column's ``trunc(amount, 4) = amount``, and the rule now lives in one place
+    # beside that constraint. It used to be written here as "scale by 10^4 and require a whole
+    # number", which is the right question asked through the wrong instrument: ``scaleb`` is a
+    # *context* operation and rounds to the context's precision. At the default 28 significant
+    # digits an amount with 29 decimal places scaled to something integral and was **accepted** —
+    # then refused by the column, stranding a batch whose receipt is already committed and which no
+    # re-delivery can finish. That is the permanent-jam failure this module's docstring exists to
+    # prevent, reached through the money check rather than through a stray byte.
+    if not within_money_scale(value):
         # Rejected, never rounded to fit.
         return None, Defect(line, column, QuarantineCode.AMOUNT_PRECISION_EXCEEDED)
-    if abs(value) >= MONEY_MAGNITUDE_EXCLUSIVE_BOUND:
+    if value.copy_abs() >= MONEY_MAGNITUDE_EXCLUSIVE_BOUND:
         return None, Defect(line, column, QuarantineCode.AMOUNT_OUT_OF_RANGE)
     return value, None
 
