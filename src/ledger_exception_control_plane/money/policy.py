@@ -27,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import re
+import types
 from collections.abc import Mapping, Sequence
 from typing import Final
 
@@ -88,6 +89,14 @@ class AccountPolicy:
                 raise ValueError("escalate is never posted and cannot be mapped to an account")
             if not _ACCOUNT_CODE.fullmatch(account):
                 raise ValueError(f"not a valid account code: {account!r}")
+        # Frozen the dataclass may be, but the mapping it was handed is not, and a reviewer walked
+        # straight through the gap: assigning into ``DEMO_ACCOUNT_POLICY.rules`` after construction
+        # produced an instruction posting to ``NOT-AN-ACCOUNT``. Every check above is an *entry*
+        # check, so a live mapping makes them advisory. Taking a private snapshot behind a read-only
+        # view makes them invariants — which matters more here than usual, because this is the only
+        # place account-code shape is enforced at all (``adjustment.account_code`` has no database
+        # constraint behind it).
+        object.__setattr__(self, "rules", types.MappingProxyType(dict(self.rules)))
 
     def account_for(
         self, classification: ExceptionClassification, treatment: TreatmentCode

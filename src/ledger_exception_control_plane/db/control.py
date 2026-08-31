@@ -103,7 +103,53 @@ class EvidenceKind(enum.StrEnum):
 
 
 class TreatmentCode(enum.StrEnum):
-    """The closed treatment set (§6.1). The *only* channel from model to money path."""
+    """The closed treatment set (§6.1). The *only* channel from model to money path.
+
+    **This is the canonical declaration.** Every other place a treatment appears — the three columns
+    below, the account policy, the calculator — refers to it rather than repeating its values, with
+    exactly one exception: the two check constraints below spell ``'escalate'`` in SQL, because a
+    check constraint cannot import Python. A test asserts both strings against ``ESCALATE.value``,
+    so that repetition cannot drift, and another fails if a second treatment vocabulary is ever
+    declared anywhere in the package. One declaration is what makes "closed" checkable rather than
+    merely intended.
+
+    A treatment is a **categorical instruction and nothing else**. It selects *what to do*, never
+    *how much*: the amount, the account and the period all come from deterministic context, and a
+    treatment carrying a number — ``write_off_125_50``, ``adjust_by_0_7_percent`` — would be the
+    numeric escape hatch the whole containment argument exists to prevent. A guard test asserts no
+    member's name or value contains a digit.
+
+    Being a *valid* treatment and being *deterministically priceable* are different contracts, and
+    conflating them is how a vocabulary grows. Every member below is always valid; whether M2.4 can
+    price it depends on the exception it is applied to, and where it cannot the outcome is
+    ``ESCALATE`` rather than a guess (§7) or a new member.
+
+    ``REBOOK``
+        Post the movement the ledger is missing, in the period it settled. Priceable wherever the
+        exception's class has a configured account (ADR-047).
+
+    ``ACCRUE``
+        Recognise the same movement in the period it economically belongs to — the period of the
+        movement it reverses. Priceable on the same classes as ``REBOOK``, and only when that
+        originating period is known; without one there is nothing to accrue into and it refuses.
+
+    ``WRITE_OFF``
+        Recognise the residual as a loss rather than as the movement it appeared to be. Priceable
+        wherever an account is configured for it.
+
+    ``ESCALATE``
+        Refer the case to a human because it cannot be resolved deterministically. **This is the
+        member that closes the set.** Without it, every condition the system cannot price would
+        need its own treatment and the vocabulary would grow with the taxonomy; with it, the set of
+        *actions* stays at four while the set of *conditions* can grow freely. It is never priced
+        and never posted — ``adjustment`` refuses a row for it outright, and the account policy
+        refuses to map one.
+
+    Abstention is **not** a fifth member. ``treatment_proposal`` carries a separate ``abstained``
+    flag, and a check constraint requires an abstaining proposal to carry ``ESCALATE``: a model that
+    declines to answer has still not chosen an action, and giving that its own code would let a
+    refusal to decide masquerade as a decision.
+    """
 
     REBOOK = "rebook"
     ACCRUE = "accrue"

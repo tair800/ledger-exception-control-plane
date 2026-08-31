@@ -69,6 +69,7 @@ class NonCalculable(enum.StrEnum):
     any of those, and a sentence is also somewhere free text could start to accumulate.
     """
 
+    TREATMENT_NOT_RECOGNISED = "treatment_not_recognised"
     TREATMENT_IS_ESCALATE = "treatment_is_escalate"
     NO_ACCOUNT_MAPPED = "no_account_mapped"
     NO_ORIGINATING_PERIOD = "no_originating_period"
@@ -152,8 +153,9 @@ def compute_adjustment(
     Pure and total: same inputs, same result; no I/O, no clock, no randomness; every input path ends
     in a value rather than an exception. The checks below run in a fixed order so that a case which
     fails two of them always reports the same reason — a refusal that varied with evaluation order
-    would be a poor thing to route an operator by. The order itself is: escalate, then whether the
-    combination is priceable at all, then the values, then the period.
+    would be a poor thing to route an operator by. The order itself is: a value outside the closed
+    vocabulary, then escalate, then whether the combination is priceable at all, then the values,
+    then the period.
 
     **The amount is the settlement line's own amount, unchanged, including its sign.** That is the
     single formula, and it is deliberately the only one. An exception *is* a settlement movement the
@@ -162,6 +164,29 @@ def compute_adjustment(
     intermediate to round, and no way for a treatment to change a number — which is the property
     that makes the containment claim structural rather than procedural.
     """
+    # The treatment must be one of the four, and this is checked at runtime even though the
+    # signature already says so.
+    #
+    # ``TreatmentCode`` is a ``StrEnum``, so a member compares and hashes equal to its own value —
+    # which means a bare ``"rebook"`` string found its way through a dict keyed by members and
+    # **obtained a priced instruction**. Worse, ``"escalate"`` slipped past the identity check
+    # below, so the one treatment that must never be priced stopped being recognised as itself.
+    # mypy rejects both, and mypy is not in the room when M3.2 parses a model's JSON response: at
+    # that boundary a treatment arrives as text, and text is exactly what this refuses.
+    #
+    # Identity against the members rather than ``isinstance``, because the weaker check was the
+    # first version of this guard and a reviewer broke it too: ``str.__new__(TreatmentCode,
+    # "accrue")`` is an instance of the class without being any member of it, and it was priced —
+    # into the *rebook* period, because the branches below compare by identity while the account
+    # table resolves by equality, so the two halves disagreed about what they had been handed.
+    # Identity is the only test they agree on, and every honest way of obtaining a treatment
+    # (the member, ``TreatmentCode(value)``, ``TreatmentCode[name]``, copy, pickle) returns the
+    # singleton, which is what makes it safe.
+    #
+    # A refusal rather than a raised error, because the calculator is total (§2.4).
+    if not any(treatment is member for member in TreatmentCode):
+        return NonCalculable.TREATMENT_NOT_RECOGNISED
+
     # Escalate is not a pricing failure, it is the outcome that says pricing was never appropriate,
     # and `adjustment` refuses a row for one outright. Checked first because no later question about
     # accounts or periods is meaningful for it.

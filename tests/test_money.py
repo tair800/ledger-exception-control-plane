@@ -804,6 +804,11 @@ def test_the_money_package_performs_no_io() -> None:
         "uuid",
         "typing",
         "collections",
+        # Added at M3.1 for ``MappingProxyType`` alone, which is what makes the account table a
+        # snapshot rather than a live dictionary. The guard fired on it, correctly — every addition
+        # to this set widens the money boundary and has to earn it. ``types`` is pure introspection
+        # and carries no I/O of any kind.
+        "types",
     }
     permitted_internal = {
         "ledger_exception_control_plane.money",

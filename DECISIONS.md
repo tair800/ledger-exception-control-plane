@@ -1792,6 +1792,169 @@ package cannot.
 
 ---
 
+## ADR-048 — The treatment set closes into four values (M3.1 kill-test gate)
+
+**Status:** Accepted (M3.1). **This is a gate**, not an ordinary increment: the plan states that if
+real cases require the model to propose an amount, the type-level containment claim is false and must
+be **dropped, not softened**. It is not.
+
+### The question
+
+The whole design rests on one sentence: a model may choose a *treatment*, and nothing else. That is
+only true if the set of treatments is genuinely finite — if some real case needed an action outside
+it, or a number inside it, the model would need a channel the architecture does not have, and the
+containment claim would be marketing rather than a property.
+
+So this increment asks the question before anything is built on the answer, and while there is still
+no model in the codebase to make the answer convenient (ADR-003).
+
+### The vocabulary
+
+`REBOOK · ACCRUE · WRITE_OFF · ESCALATE`, exactly as `PROJECT_SPEC.md` §6.1 and
+`IMPLEMENTATION_PLAN.md` §3.1 name them. Declared once, in `db.control.TreatmentCode`, and referred
+to everywhere else.
+
+| Code | Meaning | Priceable by M2.4? |
+|---|---|---|
+| `rebook` | Post the movement the ledger is missing, in the period it settled | Where the class has a configured account (ADR-047) |
+| `accrue` | Recognise the same movement in the period it economically belongs to | Same classes, and only with a known originating period |
+| `write_off` | Recognise the residual as a loss rather than as the movement it appeared to be | Where an account is configured for it |
+| `escalate` | Refer to a human because it cannot be resolved deterministically | **Never.** `adjustment` refuses a row for it and the account policy refuses to map one |
+
+**Valid and priceable are different contracts**, and conflating them is how a vocabulary grows. Every
+member above is always a legitimate instruction; whether the calculator can price one depends on the
+exception it is applied to. A treatment it cannot price is not an invalid treatment — it is a case
+that escalates.
+
+**Abstention is not a fifth member.** `treatment_proposal` carries a separate `abstained` flag, and a
+check constraint requires an abstaining proposal to carry `escalate`. A model declining to answer has
+still not chosen an action; giving that its own code would let a refusal to decide look like a
+decision.
+
+### Why four is enough — the argument
+
+`ESCALATE` is what closes the set, and it is worth being precise about why.
+
+Every other member names something the system *does*. `ESCALATE` names the absence of that: the case
+leaves the deterministic path. Without it, every condition the system cannot price would want its own
+treatment, and the action vocabulary would grow with the exception taxonomy — one for unpriceable fee
+splits, one for unidentifiable partial captures, one for each new condition anybody discovers. With
+it, the set of **actions** stays at four while the set of **conditions** grows freely. Those are
+different axes, and keeping them separate is the whole trick.
+
+The second half of the argument is that no case needs a *number* from the chooser. Every priced
+amount is the settlement movement's own, unchanged: the treatment selects an account and a period,
+never a quantity (ADR-047). A treatment like `write_off_125_50` or `adjust_by_0_7_percent` would be an
+amount smuggled through the one channel a model is allowed to use, so a guard asserts no member's
+name or value contains a digit.
+
+### Measured over the corpus
+
+Every exception the pipeline produces, at three sizes, under all four treatments:
+
+| Corpus | Exceptions | Priced by some treatment | Escalate is the answer | Instructions produced | Amounts contributed by a treatment |
+|---|---|---|---|---|---|
+| `canonical` | 13 | 1 | 12 | 3 | **0** |
+| `bulk` @ 200 | 39 | 2 | 37 | 6 | **0** |
+| `bulk` @ 1000 | 207 | 10 | 197 | 30 | **0** |
+
+**No case fell outside the four, and no priced amount differed from the settlement movement's own.**
+Every refusal came from the enumerated set — `no_account_mapped` (531 of the 591 refusals at the
+largest size) and `currency_not_functional` (60) — so no case was refused for a reason the
+calculator has no name for, which is the shape a missing treatment would take.
+
+Two corrections to how this was first written, both from adversarial review, both worth recording
+because they are the difference between evidence and decoration:
+
+*The original table had a column "Resolved inside the vocabulary: 13 / 39 / 207."* Given the
+definition of resolved — priced, or refused by all four so escalate answers — that column is an
+identity. It equals the exception count for any corpus, any calculator, any taxonomy. It was
+presented under "Measured" as though it were an observation. The number that carries the argument is
+the one it displaced: **10 of 207 exceptions can be priced at all.**
+
+*That rate is a property of the demo account policy, not of the vocabulary.* `unclassified` and
+`fee_split` are mapped to no account on purpose (ADR-047) — an exception the system cannot name must
+not receive an automatic one — and every `chargeback_reversal` in this corpus is in a non-functional
+currency. The 197 that escalate are resolved, and none of them needs a *model* to supply a number;
+they need a human, which is what escalation means. What would have failed this gate is a case
+wanting a fifth action or a number inside a treatment, and there is none.
+
+The evidence for "no amount is contributed" therefore rests on 39 instructions from one
+classification, `cross_period_refund`. That is narrower than the table's shape suggests, and it is
+stated here rather than left for a reader to derive.
+
+`escalate` is never priced, at any scale. Asserted separately and labelled a constant: the
+calculator answers `escalate` before reading a fact, so no corpus can falsify it. The first version
+of the exit-criterion test hid behind exactly that — `assert priced or escalate_refused` is
+`assert priced or True` — and passed against a corpus of five fabricated exceptions. The assertion
+now pins the measured counts, and both attacks that beat it were re-run and now fail.
+
+### A hole the gate found, and closed
+
+`TreatmentCode` is a `StrEnum`, so a member compares and hashes equal to its own value. A bare
+`"rebook"` string therefore walked through a mapping keyed by members and **obtained a priced
+financial instruction**. `"escalate"` was worse: it slipped past the identity check that exists to
+stop escalation ever being priced, so the one treatment that must never produce an instruction
+stopped being recognised as itself.
+
+mypy rejects both, and that was the whole defence. mypy will not be in the room when M3.2
+deserialises a provider's JSON response — at that boundary a treatment arrives as *text*, which is
+exactly the shape that got through. The calculator now refuses anything that is not a genuine member,
+with a closed `treatment_not_recognised` reason, checked before every other question. A refusal
+rather than a raised error, because the calculator is total.
+
+**The first fix was itself too weak, and adversarial review broke it.** It tested `isinstance`, and
+`str.__new__(TreatmentCode, "accrue")` is an instance of the class without being any member of it.
+It was priced — into the **rebook** period, because the escalate and period branches compare by
+identity while the account table resolves by equality, so the two halves of the calculator disagreed
+about what they had been handed. An instruction labelled `accrue` posting where `rebook` posts is a
+worse outcome than a refusal. Membership is now `any(treatment is member for member in
+TreatmentCode)`, the only test both halves agree on, and a test confirms every legitimate
+construction route — the member, `TreatmentCode(value)`, `TreatmentCode[name]`, copy, deepcopy,
+pickle — returns the singleton, since identity is only safe if they do.
+
+The same review found a second one. `AccountPolicy` is a frozen dataclass holding a plain `dict`, so
+assigning into `DEMO_ACCOUNT_POLICY.rules` after construction produced an instruction posting to
+`NOT-AN-ACCOUNT`: every validation in `__post_init__` was an *entry* check rather than an invariant.
+The table is a read-only snapshot now. That matters more than ordinary immutability hygiene, because
+`adjustment.account_code` carries no database constraint — the policy is where account-code shape is
+enforced at all. Giving the column its own constraint is a schema change and belongs to a later
+increment; it is recorded in `PROJECT_STATUS.md`.
+
+Finding these here rather than in M3.2 is the argument for building the gate before the model, in one
+sentence.
+
+### What makes the closure checkable rather than intended
+
+* one declaration, found **structurally** — any class whose string members overlap the vocabulary in
+  more than one place is a treatment vocabulary, whatever it is called, and a second one fails;
+* no module in the money path may contain a treatment literal in code, and the two that branch on a
+  treatment must reference the canonical type;
+* the two hand-written SQL check constraints that spell `'escalate'` are asserted to agree with the
+  enum, since they are the only place the vocabulary is repeated outside it;
+* arbitrary strings — case variants, whitespace, numeric shapes — are refused by the enum and again
+  at the money boundary;
+* **every one of these guards is shown failing.** Each is re-run against a deliberately mutated copy
+  — a rogue enum with a fifth member, one with a numeric member, a second vocabulary, a hardcoded
+  string in the calculator, the same drift one directory outside the money path, a module that stops
+  naming the type, a guard handed nothing to inspect, and the runtime check removed — and must
+  reject it, then must accept the clean copy. Mutations are made to in-memory copies so a crashed
+  test cannot leave one behind, and a further test asserts none reached disk.
+
+The literal scan started out inspecting `money/` only, and a reviewer walked the drift one directory
+over: `demo/snapshot.py` picks the treatment it prices with, so a literal there is the identical
+defect somewhere the guard was not looking. Naming the modules that may hold a treatment was the
+mistake. The scan is package-wide now, with `db/control.py` the single exemption, and it needs no
+list to maintain.
+
+### Scope
+
+No model, no provider, no prompt, no proposal generation, no evidence assembly, no schema change and
+no dependency. OPEN-5 remains open: which providers to implement is M3.2's decision and nothing here
+anticipates it.
+
+---
+
 ---
 
 # Open decisions

@@ -4,7 +4,7 @@ PSP settlement files against the general ledger. Deterministic matching clears t
 proposes a treatment from a closed enum whose type has no numeric field. A chaos suite proves no
 double-post against a RED baseline that does.
 
-> ## Status: milestone M2.4 of 31
+> ## Status: milestone M3.1 of 31
 >
 > **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
 > liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
@@ -18,7 +18,10 @@ double-post against a RED baseline that does.
 > `exception`, carrying a class from the closed taxonomy, the rule that assigned it and the version
 > of the rule set, or `unclassified` where the evidence cannot support a class; and as of M2.4 —
 > **the deterministic money path**: given an approved treatment code, an exception is priced into a
-> financial instruction — amount, currency, account, period — or refused with a closed reason.
+> financial instruction — amount, currency, account, period — or refused with a closed reason,
+> including a refusal for any value that is not a genuine member of the treatment vocabulary.
+> Increment 3.1 was a **gate rather than a feature**: it exists to try to break the containment
+> claim before a model is built on it, and the claim survived.
 >
 > **What does not exist: anything that decides, approves or posts.** Nothing chooses a treatment,
 > assembles evidence for a model, obtains an approval or writes an `adjustment` row — the calculator
@@ -135,6 +138,38 @@ reads that evidence and proposes one of a fixed set of treatments, or abstains.
 reviews it — because its output type has no numeric field anywhere in the schema tree, and because
 the amount calculator's signature accepts a treatment code and ledger data, with no parameter through
 which model text could reach it. A hallucinated amount is not unlikely; it is unrepresentable.
+
+**That claim has been through its kill test.** Increment 3.1 exists to try to break it before a model
+is built on it. The treatment set closes into `REBOOK · ACCRUE · WRITE_OFF · ESCALATE`, and across
+corpora of 13, 39 and 207 exceptions every one is answered inside those four — priced by some
+treatment, or refused by all of them for an enumerated reason, which makes `escalate` the answer.
+**No treatment ever contributed an amount:** all 39 instructions produced carried the settlement
+movement's own figure, unchanged. `ESCALATE` is what makes the set finite — it names the case
+leaving the deterministic path, so the set of *actions* stays at four while the set of *conditions*
+can grow.
+
+Being *priced* is not the standard, and the honest numbers say why: 10 of those 207 exceptions can
+be priced at all. That is the demo account policy's coverage, not a property of the vocabulary —
+`unclassified` is deliberately mapped to no account, because an exception the system cannot even
+name must not receive an automatic one. The remaining 197 escalate to a human, which is a
+resolution, not a gap. A reviewer caught the first version of this section reporting "207 / 207
+resolved" as though it were a measurement when the definition made it an identity.
+
+The gate found real holes while it was at it. `TreatmentCode` is a `StrEnum`, so a member compares
+and hashes equal to its own value — and a bare `"rebook"` string obtained a priced instruction. mypy
+rejected it, and mypy will not be in the room when a provider's JSON is deserialised. A first fix
+tested `isinstance`, and adversarial review broke that too: `str.__new__(TreatmentCode, "accrue")`
+is an instance of the class without being any member of it, and it was priced into the **wrong
+period**, because the calculator compares by identity while the account table resolves by equality.
+Membership is now identity against the four. The same review found the account table's frozen
+wrapper holding a live dictionary, so its validation was an entry check rather than an invariant;
+it is a read-only snapshot now.
+
+Eight mutations are injected and each shown to make the relevant guard fail — a fifth treatment, a
+treatment carrying an amount, a second vocabulary, a hardcoded string in the money path, the same
+drift one directory outside it, a module that stops naming the type, a guard handed nothing to
+inspect, and the runtime check removed. Every mutation is applied to an in-memory copy, and a
+further test asserts none reached disk.
 
 This repository also carries the portfolio's written **"why we did NOT use an agent here"**: the same
 labelled exception set run through the deterministic matcher, an LLM-as-matcher baseline, and the

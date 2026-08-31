@@ -3,7 +3,8 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M2 complete. **Next:** M3.1 — the treatment-enum closure kill-test.
+**Current milestone:** M3.1 complete — the treatment-enum closure gate passed. **Next:** M3.2 — the
+provider port and closed response schema, which OPEN-5 blocks.
 **The whole deterministic core exists.** A settlement file is ingested, normalised and either
 accepted or quarantined; its lines are matched deterministically against ledger entries with
 tolerance; every line that fails to match becomes exactly one classified exception; and an approved
@@ -27,7 +28,8 @@ and persists nothing.
 | **2.2 Matching engine with tolerance bands** | **DONE** | Two rules, per-currency bands, mutual-uniqueness ambiguity refusal |
 | **2.3 Exception creation and classification** | **DONE** | Three reachable classes plus a fallback; zero wrong classifications measured at four scales |
 | **2.4 Deterministic amount calculator** | **DONE** | Pure `compute_adjustment`; OPEN-4 resolved; zero wrong financial instructions at four scales |
-| 3.1 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **3.1 KILL-TEST GATE — treatment enum closure** | **PASSED** | The set closes into four; every corpus exception resolves inside it with no amount proposed |
+| 3.2 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -610,6 +612,140 @@ instance of every condition — three of its twelve scenarios are matched-intent
 the shape of the catalogue, not the matcher's reach. Every one of those matches is deterministic,
 with no model call anywhere in the path.
 
+## What M3.1 delivered — the gate passed
+
+**This was a gate, not an increment.** The plan is explicit: if real cases require the model to
+propose an amount, the type-level containment claim is false and must be **dropped, not softened**.
+It is not. The set closes.
+
+- **The vocabulary is `REBOOK · ACCRUE · WRITE_OFF · ESCALATE`**, declared once in
+  `db.control.TreatmentCode` and referred to everywhere else. Recorded in ADR-048.
+- **`ESCALATE` is what closes it.** Every other member names something the system *does*; escalate
+  names the case leaving the deterministic path. Without it, every unpriceable condition would want
+  its own treatment and the action vocabulary would grow with the exception taxonomy. With it, the
+  set of **actions** stays at four while the set of **conditions** grows freely.
+- **Valid and priceable are different contracts.** Every member is always a legitimate instruction;
+  whether M2.4 can price one depends on the exception. A treatment it cannot price is not invalid —
+  it is a case that escalates.
+- **Abstention is not a fifth member.** It is a separate flag that must coincide with `escalate`.
+- **No schema change, no dependency, no CI change, and no model of any kind.**
+
+### Measured: every exception is answered, no amount proposed
+
+| Corpus | Exceptions | Priced by some treatment | Escalate is the answer | Instructions produced | Amounts contributed by a treatment |
+|---|---|---|---|---|---|
+| `canonical` | 13 | 1 | 12 | 3 | **0** |
+| `bulk` @ 200 | 39 | 2 | 37 | 6 | **0** |
+| `bulk` @ 1000 | 207 | 10 | 197 | 30 | **0** |
+
+Every priced amount is the settlement movement's own, unchanged — the treatment chose an account and
+a period and nothing else. Every refusal came from the enumerated set (`no_account_mapped`,
+`currency_not_functional`), so no case was refused for a reason the calculator has no name for.
+There is no case in the corpus where a *model* would have had to supply a number.
+
+**The low pricing rate is the demo account policy's coverage, not a property of the vocabulary.**
+`unclassified` and `fee_split` are deliberately mapped to no account, and every `chargeback_reversal`
+in this corpus is in a non-functional currency. The 197 that escalate are resolved — by a human,
+which is what escalation means. An earlier draft of this table reported "207 / 207 resolved", which
+given the definition of resolved is an identity rather than a measurement; adversarial review caught
+it, along with the test that was asserting it tautologically.
+
+### The holes the gate found
+
+`TreatmentCode` is a `StrEnum`, so a member compares and hashes equal to its own value. A bare
+`"rebook"` string therefore walked through a mapping keyed by members and **obtained a priced
+financial instruction**. `"escalate"` was worse: it slipped past the identity check that stops
+escalation ever being priced, so the one treatment that must never produce an instruction stopped
+being recognised as itself.
+
+mypy rejects both, and that was the entire defence — and mypy will not be in the room when M3.2
+deserialises a provider's JSON, where a treatment arrives as *text*. The calculator now refuses
+anything that is not a genuine member, with a closed `treatment_not_recognised` reason checked before
+every other question.
+
+Adversarial review then broke the fix. It tested `isinstance`, and `str.__new__(TreatmentCode,
+"accrue")` is an instance of the class without being any member of it — priced into the **rebook**
+period, because the calculator's branches compare by identity while the account table resolves by
+equality. Membership is identity against the four now. The same review found `AccountPolicy` frozen
+around a live dictionary, so assigning into `DEMO_ACCOUNT_POLICY.rules` produced an instruction
+posting to `NOT-AN-ACCOUNT`; the table is a read-only snapshot now.
+
+Finding these here rather than in M3.2 is the argument for building the gate before the model.
+
+### Five kill tests, each shown failing
+
+Every structural guard is re-run against a deliberately mutated copy and must reject it, then must
+accept the clean copy:
+
+| Mutation | Guard that fired |
+|---|---|
+| A fifth member `auto_post` in the vocabulary | closure |
+| A member `write_off_125_50` carrying an amount | numeric escape hatch |
+| A second treatment enum declared in the money path | one canonical declaration |
+| The calculator hardcoding `treatment == "escalate"` | no module repeats a treatment value |
+| The same drift in `demo/snapshot.py`, outside `money/` | no module repeats a treatment value |
+| The calculator renamed off `TreatmentCode` entirely | money path uses the canonical type |
+| A guard handed an empty or filtered source list | both guards' own coverage assertions |
+| The runtime type check removed | free-form treatment path |
+
+Mutations are applied to in-memory copies — a parsed AST, a throwaway enum — so a crashed test cannot
+leave one in the money path, and a further test asserts none reached disk. A previous increment had a
+reviewer leave a mutation behind; this one is built so it cannot.
+
+## M3.1 verification
+
+Every row was run.
+
+| Check | Result |
+|---|---|
+| Treatment vocabulary: `PROJECT_SPEC.md` §6.1 vs `IMPLEMENTATION_PLAN.md` §3.1 vs the enum | PASS — all three name the same four; no contradiction, no STOP warranted |
+| Clean `uv sync --frozen` / `uv lock --check` | PASS |
+| `ruff format --check` / `ruff check` | PASS |
+| `mypy` strict | PASS — 64 files |
+| **Coverage gate, whole suite against real PostgreSQL** | **PASS — 896 tests, 97.99% ≥ 90%** |
+| Treatment closure suite | PASS — 79 |
+| **Every corpus exception answered inside the vocabulary** | **PASS — 13 / 39 / 207, three sizes** |
+| **Amounts contributed by a treatment** | **PASS — 0 across 39 instructions** |
+| Every refusal is an enumerated reason | PASS — no unnamed refusal at any size |
+| `escalate` never priced | PASS — labelled a constant, asserted anyway |
+| No member carries a digit in name or value | PASS |
+| No generic catch-all member | PASS |
+| A treatment takes no parameters | PASS — AST guard |
+| Vocabulary declared exactly once in the package | PASS — structural, not by name |
+| No module repeats a treatment value in code | PASS — package-wide, `db/control.py` exempt |
+| The two SQL check literals agree with the enum | PASS |
+| Abstention is a separate flag, not a fifth member | PASS — ORM and migration agree |
+| Arbitrary strings, case variants, numeric shapes refused | PASS — 20 cases |
+| A lookalike `StrEnum` member refused | PASS |
+| **An instance of the class that is not a member refused** | **PASS — the reviewer's `str.__new__` impostor** |
+| Every legitimate construction route yields the singleton | PASS — 6 routes × 4 members |
+| The account table cannot be edited after construction | PASS — read-only snapshot |
+| **Every guard fails against its own injected mutation** | **PASS — 8 mutations + clean-tree control** |
+| **The exit criterion itself can fail** | **PASS — fabricated corpus and empty policy both rejected** |
+| No mutation reached disk | PASS — AST check plus `git status` |
+| No provider, model, prompt or proposal code exists | PASS — AST guard, 40 modules |
+| No new dependency, CI or migration change | PASS — `pyproject.toml`, `uv.lock`, `.github/`, `migrations/` untouched |
+| `alembic check` | PASS — no schema change |
+| Fixture corpus reproducibility | PASS — 141 |
+| M2 demo snapshot drift | PASS — byte for byte |
+| `git diff --check` | PASS |
+| Secret and attribution scan | PASS — 0 findings |
+
+### Recorded for a later increment
+
+**Nothing in the repository creates the disposable `lecp_test` database.** Every integration module
+targets it, `README.md` and the `Makefile` both refer to it, and no target or init script brings it
+into existence — it survived only as local state on one machine. Rebuilding the container volume
+during this increment destroyed it and produced 162 setup errors that looked like a code regression
+for as long as it took to read the first traceback. A `db-test-create` target is a two-line fix and
+belongs in an increment that is allowed to touch the developer tooling.
+
+`adjustment.account_code` is `String(64)` with **no check constraint**, unlike `period` and
+`approved_treatment`, which both have one. `AccountPolicy` is therefore the only place account-code
+shape is enforced anywhere in the system — which is why making its table immutable mattered enough to
+fix here. Giving the column its own constraint is a schema change and a migration, so it belongs to
+an increment that is allowed to make one. Found by adversarial review at M3.1.
+
 ## What M2.4 delivered
 
 - **A pure deterministic calculator** in `src/ledger_exception_control_plane/money/`: the policy and
@@ -1185,14 +1321,15 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-whole suite:  663 passed against a real database
-coverage:     98.27% (gate 90%)
-ruff format:  59 files already formatted
+whole suite:  896 passed against a real database (0 failed, 31m14s)
+coverage:     97.99% (gate 90%)
+ruff format:  70 files already formatted
 ruff check:   All checks passed!
-mypy:         Success: no issues found in 53 source files
+mypy:         Success: no issues found in 64 source files
 alembic:      No new upgrade operations detected
 corpus:       matches the generator byte for byte
-classification evidence: 4 passed (declared movement type required for a class)
+demo snapshot: artifacts/m2-demo.html matches the pipeline byte for byte
+treatment closure: 79 passed (8 mutations shown failing, then restored)
 ```
 
 Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-08-30.
@@ -1201,9 +1338,9 @@ Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 49 ADRs and 8 OPEN items. OPEN-2 was resolved at M2.2 (ADR-042), OPEN-3 at M2.3
-(ADR-045) and OPEN-4 at M2.4 (ADR-047). **OPEN-5** (which two model providers) is the next one due and
-blocks M3.2. Still relevant:
+`DECISIONS.md` holds 50 ADRs and 8 OPEN items. OPEN-2 was resolved at M2.2 (ADR-042), OPEN-3 at M2.3
+(ADR-045) and OPEN-4 at M2.4 (ADR-047); M3.1 recorded ADR-048 without opening or closing any.
+**OPEN-5** (which two model providers) is the next one due and blocks M3.2. Still relevant:
 
 - **LICENSE copyright holder** is `tair800` (the configured Git identity). Replace with a legal name
   if that matters for a public repository.
