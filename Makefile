@@ -1,6 +1,6 @@
 # Developer commands. `make help` lists them.
 .DEFAULT_GOAL := help
-.PHONY: help install fmt fmt-check lint types test gate coverage-gate up down down-volumes logs ps smoke build \n        db-up migrate migrate-down schema-verify \n        fixtures fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify money-verify
+.PHONY: help install fmt fmt-check lint types test gate coverage-gate up down down-volumes logs ps smoke build \n        db-up migrate migrate-down schema-verify \n        fixtures fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify money-verify m2-demo m2-demo-check
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -96,3 +96,11 @@ classify-verify: ## Prove the taxonomy, provenance, integrity and races against 
 
 money-verify: ## Prove the calculator, its AI/money firewall and the corpus evaluation (no Docker needed)
 	uv run pytest tests/test_money.py tests/test_money_evaluation.py -p no:cacheprovider --no-cov
+
+# --- M2 visual snapshot (demo artifact, outside the milestone ladder) ---
+
+m2-demo: ## Render artifacts/m2-demo.html from real M2 pipeline output (no Docker needed)
+	uv run python -m ledger_exception_control_plane.demo render
+
+m2-demo-check: ## Fail if the committed snapshot has drifted from the pipeline
+	uv run python -m ledger_exception_control_plane.demo verify

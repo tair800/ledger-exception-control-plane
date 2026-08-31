@@ -56,3 +56,8 @@ Thumbs.db
 *.tmp
 *.log
 logs/
+
+# Generated demo artifacts. The committed M2 snapshot is the one exception: it is small,
+# deterministic, and useful to a reader who will not clone and run anything.
+artifacts/*
+!artifacts/m2-demo.html

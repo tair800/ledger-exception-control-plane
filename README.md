@@ -536,6 +536,36 @@ make money-verify   # the calculator, its firewall and the corpus evaluation (no
 an approval, derives an operation identifier or posts — those are M3, M5 and M4 — and the money
 package imports nothing that would let it reach them.
 
+### M2 visual snapshot
+
+One standalone HTML page showing what the completed deterministic pipeline actually does, for a
+reader who will not clone the repository and run anything.
+
+```bash
+make m2-demo          # render artifacts/m2-demo.html — no Docker, no database
+make m2-demo-check    # fail if the committed page has drifted from the pipeline
+```
+
+Open it directly: `artifacts/m2-demo.html` in any browser. No server, no build step, no JavaScript,
+no dependencies — one file with embedded CSS.
+
+**It is generated from real pipeline output.** The page runs the actual boundaries in order —
+ingestion's `interpret`, the matcher, the classifier, the calculator — over a corpus generated from
+the committed seed, and counts what they answered. It contains no parser, no matching rule, no
+taxonomy and no formula; a test walks its AST to keep it that way. If a number on the page is wrong,
+the pipeline is wrong, which is the only thing that makes such a page worth showing.
+
+It keeps two things apart, on the page as in the data: **what the pipeline did**, which is everything
+a running system would know about itself, and **fixture evaluation**, which compares those answers
+with what each synthetic case was *constructed* to be — knowledge only a generated corpus has.
+
+Rendering is deterministic. The same profile and seed produce byte-identical HTML, no timestamp or
+path is embedded, and a test fails if the committed copy drifts from what the code renders.
+
+**This is a static developer and portfolio snapshot, not the operations console.** The console is a
+later milestone with a real UI, filters, an exception queue and an approval flow. Nothing here is
+interactive, nothing is served, and no AI is involved anywhere in the pipeline it depicts.
+
 ### Deterministic fixture corpus
 
 Later milestones need realistic input that is identical on every machine and every run. The generator

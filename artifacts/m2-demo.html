@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M2 Pipeline Snapshot — ledger-exception-control-plane</title>
+<style>
+:root {
+  --bg: #0f1115; --panel: #171a21; --panel-2: #1d212a; --line: #2a2f3a;
+  --ink: #e6e9ef; --muted: #98a1b3; --accent: #6ea8fe;
+  --good: #4ec9a5;
+  --warn: #e0a458; --stop: #d1707a; --truth: #b892e8;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 40px 24px 64px; background: var(--bg); color: var(--ink);
+  font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.wrap { max-width: 1080px; margin: 0 auto; }
+h1 { font-size: 28px; margin: 0 0 4px; letter-spacing: -0.02em; }
+h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em;
+     color: var(--muted); margin: 40px 0 14px; font-weight: 600; }
+h3 { font-size: 14px; margin: 0 0 10px; color: var(--ink); font-weight: 600; }
+p  { margin: 0 0 12px; color: var(--muted); }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+.sub { color: var(--muted); font-size: 14px; margin-bottom: 18px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 8px; }
+.chip { background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px;
+        padding: 4px 12px; font-size: 12.5px; color: var(--muted); }
+.chip b { color: var(--ink); font-weight: 600; }
+.flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 8px 0 4px; }
+.step { flex: 1 1 150px; background: var(--panel); border: 1px solid var(--line);
+        border-radius: 10px; padding: 12px 14px; position: relative; }
+.step .n { font-size: 11px; color: var(--accent); font-weight: 700; letter-spacing: 0.06em; }
+.step .t { font-weight: 600; margin-top: 2px; }
+.step .d { font-size: 12.5px; color: var(--muted); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+        padding: 16px 18px; }
+.card.truth { border-color: #3b2f52; background: #191526; }
+.stat { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+        padding: 5px 0; border-bottom: 1px dashed var(--line); }
+.stat:last-child { border-bottom: 0; }
+.stat .k { color: var(--muted); font-size: 13.5px; }
+.stat .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+.big { font-size: 30px; font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; }
+.big.good { color: var(--good); } .big.warn { color: var(--warn); }
+.big.stop { color: var(--stop); }
+.cap { font-size: 12.5px; color: var(--muted); }
+.bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden;
+       background: var(--panel-2); margin: 10px 0 6px; }
+.bar span { display: block; height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12.5px; color: var(--muted); }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line);
+         vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase;
+     letter-spacing: 0.05em; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px;
+       border: 1px solid var(--line); color: var(--muted); }
+.tag.ok { color: var(--good); border-color: #2c4d43; }
+.tag.no { color: var(--warn); border-color: #4d3f2c; }
+.controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
+.ctl { display: flex; gap: 10px; align-items: flex-start; background: var(--panel);
+       border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; }
+.ctl .m { color: var(--good); font-weight: 700; line-height: 1.5; }
+.ctl .x { font-size: 13.5px; }
+.ctl .x small { display: block; color: var(--muted); font-size: 12.5px; }
+.note { border-left: 3px solid var(--line); padding: 2px 0 2px 14px; color: var(--muted);
+        font-size: 13.5px; margin: 14px 0; }
+.note.truth { border-left-color: var(--truth); }
+footer { margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--line);
+         color: var(--muted); font-size: 12.5px; }
+</style></head><body><div class="wrap">
+
+<h1>Ledger Exception Control Plane</h1>
+<div class="sub">M2 pipeline snapshot — the deterministic core, end to end,
+with no model call.</div>
+<div class="meta">
+  <span class="chip">profile <b>bulk</b></span>
+  <span class="chip">seed <b>20260829</b></span>
+  <span class="chip">instances <b>200</b></span>
+  <span class="chip">settlement lines <b>215</b></span>
+  <span class="chip">books <b>EUR</b></span>
+  <span class="chip">ledger config <b>demo-2026-06</b></span>
+</div>
+<p>Every number below is produced by running the real M2 boundaries over a synthetic corpus
+generated from that seed. Regenerate with <code>make m2-demo</code>.</p>
+
+<h2>Pipeline</h2>
+<div class="flow"><div class="step"><div class="n">1</div><div class="t">Settlement</div><div class="d">a PSP file arrives</div></div><div class="step"><div class="n">2</div><div class="t">Normalise</div><div class="d">typed, or quarantined</div></div><div class="step"><div class="n">3</div><div class="t">Match</div><div class="d">exact, then tolerance</div></div><div class="step"><div class="n">4</div><div class="t">Residual</div><div class="d">what did not match</div></div><div class="step"><div class="n">5</div><div class="t">Classify</div><div class="d">what can be proved</div></div><div class="step"><div class="n">6</div><div class="t">Price</div><div class="d">or safely refuse</div></div></div>
+
+<h2>What the pipeline did</h2>
+
+<div class="grid">
+  <div class="card">
+    <h3>Ingestion</h3>
+    <div class="stat"><span class="k">Settlement files</span><span class="v">2</span></div>
+    <div class="stat"><span class="k">Rows offered</span><span class="v">215</span></div>
+    <div class="stat"><span class="k">Rows normalised</span><span class="v">215</span></div>
+    <div class="stat"><span class="k">Invalid files quarantined</span><span class="v">4</span></div>
+    <p class="cap" style="margin-top:10px">One bad row condemns a whole file, so a quarantine is
+    counted per file. Persistence is not exercised here — this runs without a database.</p>
+  </div>
+  <div class="card">
+    <h3>Quarantine reasons</h3>
+    <table><thead><tr><th>Outcome</th><th class='num'>Count</th><th class='num'>Share</th></tr></thead><tbody><tr><td><code>amount_precision_exceeded</code></td><td class='num'>1</td><td class='num'>25.0%</td></tr><tr><td><code>header_mismatch</code></td><td class='num'>1</td><td class='num'>25.0%</td></tr><tr><td><code>invalid_amount</code></td><td class='num'>1</td><td class='num'>25.0%</td></tr><tr><td><code>invalid_currency</code></td><td class='num'>1</td><td class='num'>25.0%</td></tr></tbody></table>
+    <p class="cap" style="margin-top:10px">From the deliberately invalid artifacts committed beside
+    the corpus. A quarantine path never exercised is a claim, not a behaviour.</p>
+  </div>
+</div>
+
+<div class="grid" style="margin-top:12px">
+  <div class="card">
+    <h3>Matching</h3>
+    <div class="bar"><span style="width:78.6047%;background:#4ec9a5"></span><span style="width:3.2558%;background:#6ea8fe"></span><span style="width:18.1395%;background:#d1707a"></span></div><div class="legend"><span><i style="background:#4ec9a5"></i>exact 169</span><span><i style="background:#6ea8fe"></i>tolerance 7</span><span><i style="background:#e0a458"></i>ambiguous 0</span><span><i style="background:#d1707a"></i>residual 39</span></div>
+    <div class="stat"><span class="k">Lines considered</span><span class="v">215</span></div>
+    <div class="stat"><span class="k">Matched exactly</span><span class="v">169</span></div>
+    <div class="stat"><span class="k">Matched within tolerance</span><span class="v">7</span></div>
+    <div class="stat"><span class="k">Ambiguous — refused</span><span class="v">0</span></div>
+    <div class="stat"><span class="k">Residual</span><span class="v">39</span></div>
+    <div class="stat"><span class="k">Ledger entries consumed</span><span class="v">176 of 197</span></div>
+  </div>
+  <div class="card">
+    <h3>Classification</h3>
+    <div class="bar"><span style="width:30.7692%;background:#4ec9a5"></span><span style="width:10.2564%;background:#6ea8fe"></span><span style="width:5.1282%;background:#b892e8"></span><span style="width:53.8462%;background:#59606e"></span></div><div class="legend"><span><i style="background:#4ec9a5"></i>fee_split 12</span><span><i style="background:#6ea8fe"></i>chargeback_reversal 4</span><span><i style="background:#b892e8"></i>cross_period_refund 2</span><span><i style="background:#59606e"></i>unclassified 21</span></div>
+    <div class="stat"><span class="k">Residuals</span><span class="v">39</span></div>
+    <div class="stat"><span class="k">Given a class</span><span class="v">18</span></div>
+    <div class="stat"><span class="k">Unclassified — safe fallback</span><span class="v">21</span></div>
+    <div class="stat"><span class="k">Coverage</span><span class="v">46.2%</span></div>
+    <p class="cap" style="margin-top:10px">Coverage is the secondary number. A wrong class is the
+    first step of a wrong posting; an unclassified residual is a decision a human makes.</p>
+  </div>
+</div>
+
+<div class="grid" style="margin-top:12px">
+  <div class="card">
+    <h3>Calculator</h3>
+    <div class="bar"><span style="width:5.1282%;background:#4ec9a5"></span><span style="width:94.8718%;background:#59606e"></span></div><div class="legend"><span><i style="background:#4ec9a5"></i>priced 2</span><span><i style="background:#59606e"></i>refused 37</span></div>
+    <div class="stat"><span class="k">Exceptions considered</span><span class="v">39</span></div>
+    <div class="stat"><span class="k">Priced</span><span class="v">2</span></div>
+    <div class="stat"><span class="k">Refused</span><span class="v">37</span></div>
+    <p class="cap" style="margin-top:10px">Priced under treatment
+    <code>rebook</code>, supplied by this demo. Nothing in the system chooses a treatment
+    yet — that is a later milestone — and no adjustment is written anywhere.</p>
+  </div>
+  <div class="card">
+    <h3>Why the rest were refused</h3>
+    <table><thead><tr><th>Outcome</th><th class='num'>Count</th><th class='num'>Share</th></tr></thead><tbody><tr><td><code>currency_not_functional</code></td><td class='num'>4</td><td class='num'>10.3%</td></tr><tr><td><code>no_account_mapped</code></td><td class='num'>33</td><td class='num'>84.6%</td></tr></tbody></table>
+    <p class="cap" style="margin-top:10px">Closed reason codes. Refusing is the designed outcome
+    when the evidence cannot support an instruction.</p>
+  </div>
+</div>
+
+<h2>Controls</h2>
+<div class="controls"><div class="ctl"><div class="m">✓</div><div class="x">Money is <code>Decimal</code>, never <code>float</code><small>asserted across every money path</small></div></div><div class="ctl"><div class="m">✓</div><div class="x">Over-precise input is rejected, not rounded<small>at ingestion and again in the calculator</small></div></div><div class="ctl"><div class="m">✓</div><div class="x">Ambiguity is refused, never guessed<small>a contested match settles nothing</small></div></div><div class="ctl"><div class="m">✓</div><div class="x">A class needs evidence that distinguishes it<small>direction alone is not evidence</small></div></div><div class="ctl"><div class="m">✓</div><div class="x">Unsupported currency is refused<small>no conversion exists anywhere</small></div></div><div class="ctl"><div class="m">✓</div><div class="x">No AI is involved<small>there is no model in this codebase yet</small></div></div><div class="ctl"><div class="m">✓</div><div class="x">Nothing is posted to a ledger<small>and no adjustment row is written</small></div></div></div>
+
+<h2>Representative cases</h2>
+<div class="card">
+<table><thead><tr><th>Stage</th><th>PSP reference</th><th>Movement</th><th>Outcome</th></tr></thead>
+<tbody><tr><td><span class='tag'>Matching</span></td><td><code>psp_1ad45b1b918a-0000</code></td><td>1949.59 EUR</td><td>Matched exactly — no difference</td></tr><tr><td><span class='tag'>Matching</span></td><td><code>psp_4e4751b35ec6-0000</code></td><td>1240.97 GBP</td><td>Matched within tolerance — absorbed 0.01 GBP</td></tr><tr><td><span class='tag'>Classification</span></td><td><code>psp_cc03bb0d27a7-0002</code></td><td>99.81 GBP · declared capture</td><td>unclassified — rule no_rule_matched</td></tr><tr><td><span class='tag'>Classification</span></td><td><code>psp_cdbd0fed06e1-0000</code></td><td>3982.09 EUR · declared capture</td><td>fee_split — rule fees_deducted_from_a_capture</td></tr><tr><td><span class='tag'>Classification</span></td><td><code>psp_9fe0d2a5e21a-0000-rev</code></td><td>110.26 USD · declared chargeback_reversal</td><td>chargeback_reversal — rule reversal_of_booked_chargeback</td></tr><tr><td><span class='tag'>Classification</span></td><td><code>psp_8d01c4a0fe20-0000-rfnd</code></td><td>-170.66 EUR · declared refund</td><td>cross_period_refund — rule refund_of_booked_capture_across_periods</td></tr><tr><td><span class='tag'>Calculator</span></td><td><code>psp_8d01c4a0fe20-0000-rfnd</code></td><td>-170.66 EUR</td><td>priced to account 4100, period 2026-07</td></tr><tr><td><span class='tag'>Calculator</span></td><td><code>psp_9fe0d2a5e21a-0000-rev</code></td><td>110.26 USD</td><td>refused — currency_not_functional</td></tr><tr><td><span class='tag'>Calculator</span></td><td><code>psp_cc03bb0d27a7-0002</code></td><td>99.81 GBP</td><td>refused — no_account_mapped</td></tr></tbody></table>
+<p class="cap" style="margin-top:10px">Chosen by outcome — the first of each the pipeline produced —
+rather than hand-picked. All references and amounts are synthetic.</p>
+</div>
+
+<h2>Fixture evaluation — ground truth</h2>
+<div class="note truth">This section is <b>not</b> something a running system can know. Every
+case in the corpus records what it was <i>constructed</i> to be, so the pipeline's answers can be
+graded against it. The production code is handed types with no field for any of it.</div>
+<div class="grid">
+  <div class="card truth">
+    <div class="big good">0</div>
+    <div class="cap">false financial matches — a line paired with another case's ledger entry</div>
+  </div>
+  <div class="card truth">
+    <div class="big good">0</div>
+    <div class="cap">wrong classifications — a class other than the one constructed</div>
+  </div>
+  <div class="card truth">
+    <div class="big good">0</div>
+    <div class="cap">wrong financial instructions — wrong amount, account or period</div>
+  </div>
+</div>
+<div class="grid" style="margin-top:12px">
+  <div class="card truth">
+    <h3>Classification, graded</h3>
+    <div class="stat"><span class="k">Correct</span><span class="v">23</span></div>
+    <div class="stat"><span class="k">Under-classified — fell back safely</span><span class="v">9</span></div>
+    <div class="stat"><span class="k">Wrong</span><span class="v">0</span></div>
+    <div class="stat"><span class="k">No declared intent in the corpus</span><span class="v">7</span></div>
+    <p class="cap" style="margin-top:10px">Under-classified means the corpus intended a class
+    and the pipeline said <code>unclassified</code>: safe, and why coverage is not higher.</p>
+  </div>
+  <div class="card truth">
+    <h3>Priced instructions, by account</h3>
+    <table><thead><tr><th>Outcome</th><th class='num'>Count</th><th class='num'>Share</th></tr></thead><tbody><tr><td><code>4100</code></td><td class='num'>2</td><td class='num'>100.0%</td></tr></tbody></table>
+    <p class="cap" style="margin-top:10px">Accounts are synthetic demo configuration for a fictional
+    organisation, not a real chart of accounts.</p>
+  </div>
+</div>
+
+<footer>
+Static snapshot for developers and portfolio readers — <b>not</b> the operations console, which is a
+later milestone. Generated from profile <code>bulk</code> at seed
+<code>20260829</code> with <code>make m2-demo</code>; the same seed renders the same
+page. No AI is involved anywhere in this pipeline and nothing here is posted to a ledger.
+</footer>
+
+</div></body></html>
