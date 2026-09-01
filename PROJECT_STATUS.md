@@ -692,6 +692,108 @@ Mutations are applied to in-memory copies — a parsed AST, a throwaway enum —
 leave one in the money path, and a further test asserts none reached disk. A previous increment had a
 reviewer leave a mutation behind; this one is built so it cannot.
 
+## M3.1 correction — the integration database was not reproducible
+
+**Every integration module targets `lecp_test`, and nothing in the repository created it.** The
+`Makefile` and `README.md` both referred to it, CI got it free from the service container's
+`POSTGRES_DB`, and locally it survived only as state on one machine. A clean checkout against an
+empty volume could not run the documented integration suite without an undocumented `createdb`.
+
+It surfaced the expensive way: rebuilding the volume during M3.1 destroyed the database and produced
+162 setup errors that read like a code regression until the first traceback said
+`InvalidCatalogNameError: database "lecp_test" does not exist`.
+
+**`make test-db-init`** closes it. Create-if-absent, safe to repeat, and it refuses any name the
+fixture loader would refuse to load into (`lecp_test`, `lecp_demo`, `lecp_fixtures`) — so the target
+cannot be pointed at a real database by editing one variable. Every target that needs the database
+now depends on it: `coverage-gate`, `smoke`, `schema-verify`, `fixtures-load`, `fixtures-verify`,
+`ingest-verify`, `match-verify`, `classify-verify`. Nothing destructive hides inside any of them;
+the reset path is still the separate, explicitly labelled `make down-volumes`.
+
+Two things came with it. Every Docker invocation now goes through a `COMPOSE` variable, which is how
+the clean-environment proof below runs the real target against a throwaway Compose project instead of
+anyone's volume. And the `.PHONY` line contained literal `\n` characters rather than continuations,
+so make had been reading a target named `\n`; it was the line the new target had to join. It now
+declares all 31 targets and nothing else.
+
+### What adversarial review changed
+
+The first version created the database and then let the suite talk to a different one. Three defects,
+all reproduced before being fixed:
+
+- **A knob that only turned half the machine.** `test-db-init` honoured `LECP_TEST_DB`, and nothing
+  else did — the integration modules default to `lecp_test` internally. So
+  `make LECP_TEST_DB=lecp_demo schema-verify` printed `created lecp_demo`, exited 0, and then failed
+  on `lecp_test`: the exact "database does not exist" class this target exists to remove, now with a
+  success line in front of it.
+- **The same split, sharper, in `fixtures-load`.** It resolved the *name* through the variable but
+  the *instance* through a hardcoded `localhost:15432`, while the bootstrap resolved the instance
+  through `COMPOSE`. Pointing `COMPOSE` at the throwaway project — the workflow documented directly
+  below — would have created a database there and then reset the corpus in the developer's real one.
+- **A quoting hole with a misleading diagnostic.** The name was interpolated by make into the
+  recipe's double-quoted messages, so a backtick in the value ran a command *while the guard was
+  composing its refusal* — and the refusal then named a permitted database, because the substitution
+  had already consumed the payload. The name is captured once into a single-quoted shell variable
+  now and read back as `"$db"` everywhere after. Verified under GNU make: the payload is printed
+  literally, refused, and nothing executes.
+
+Every recipe that needs the database now derives its DSN from one definition built out of
+`LECP_TEST_DB` and `LECP_DB_PORT`, so the name and the instance cannot drift apart again.
+
+Three of the guard tests were themselves too weak, and the same review broke them: the name check
+read only the first `case` line, so a second one underneath widened the guard while the suite stayed
+green; the destruction check matched the literal `down -v`, so the synonym `down --volumes` walked
+past it; and one loop could not fail at all, because an earlier assertion in the same test already
+implied it. All three are fixed, and the mutation list below is what proves it.
+
+### Proved on a genuinely empty environment
+
+An isolated Compose project (`lecp-bootstrap-proof`, its own volume, host port 15433, this project's
+own service definition) was brought up from nothing and taken through the documented path:
+
+| Step | Result |
+|---|---|
+| Fresh PostgreSQL service, new volume | only `lecp` present — `lecp_test` absent, the clean-checkout condition |
+| `test-db-init` against the throwaway project | `created lecp_test`, exit 0 |
+| The same command twice more | `lecp_test already exists`, exit 0 both times |
+| `alembic upgrade head` | 5 migrations applied from base; `alembic check` clean |
+| `test_fixtures_postgres.py` + `test_ingest_postgres.py` | **29 passed** against the bootstrapped database |
+| Guard: `LECP_TEST_DB=lecp_prod` against the live instance | refused, exit 1, no `createdb` issued |
+
+The recipe's own logic was exercised separately against a stubbed Docker, because behaviour that only
+shows up on a machine with a daemon is behaviour nobody re-checks: absent → creates once; present →
+creates nothing; `lecp`, `postgres`, `production`, `lecp_prod`, a trailing space, a glob, a
+semicolon, a backtick payload and the empty string → all refused, exit non-zero, before a single
+Docker call is made; `lecp_test`, `lecp_demo`, `lecp_fixtures` → all accepted. A real failure is
+never swallowed: whichever of the probe or the `createdb` fails, the target exits non-zero.
+
+`tests/test_tooling_bootstrap.py` (23 tests) keeps it true. It reads the `Makefile` and asserts that
+every database-backed target depends on the bootstrap **and** exports the shared DSN, that the
+bootstrap starts the service and checks before creating, that it captures the name before using it,
+that its guard names exactly what the fixture loader would accept, and that exactly one recipe line
+in the file deletes a volume and announces itself as destructive.
+
+**Fourteen mutations, each shown to make it fail**, then the clean tree shown to pass: a dropped
+prerequisite; a deleted target; a bootstrap that stops starting the service; an unconditional
+`createdb`; the guard widened in place; the guard widened on a *second* `case` line; a volume
+deletion hidden in `db-up` as `-v` and again as `--volumes`; a removed DESTRUCTIVE label; a target
+that stops exporting the DSN; a target that hardcodes the port again; a DSN that stops following the
+name; the name interpolated again after capture; and the capture removed entirely.
+
+It parses text rather than invoking `make`, deliberately: `make` is not a dependency of this project
+and is absent on some machines, this one included. The Makefile was separately parsed and dry-run
+under **GNU Make 4.4.1** in a throwaway container to confirm the recipe expands exactly as tested and
+that all eight targets chain through the bootstrap.
+
+Only the throwaway project's own resources were removed afterwards. The developer PostgreSQL on host
+port 5432 was never addressed, and no unrelated container, image or volume was touched.
+
+### Normal versus destructive cleanup
+
+`docker compose down` (`make down`) is the normal stop: containers go, the volume stays.
+`docker compose down -v` (`make down-volumes`) **deletes the data volume**, `lecp_test` included, and
+is only for deliberately resetting database state. Recovery is `make test-db-init && make migrate`.
+
 ## M3.1 verification
 
 Every row was run.
@@ -702,7 +804,7 @@ Every row was run.
 | Clean `uv sync --frozen` / `uv lock --check` | PASS |
 | `ruff format --check` / `ruff check` | PASS |
 | `mypy` strict | PASS — 64 files |
-| **Coverage gate, whole suite against real PostgreSQL** | **PASS — 896 tests, 97.99% ≥ 90%** |
+| **Coverage gate, whole suite against real PostgreSQL** | **PASS — 919 tests, 97.99% ≥ 90%** |
 | Treatment closure suite | PASS — 79 |
 | **Every corpus exception answered inside the vocabulary** | **PASS — 13 / 39 / 207, three sizes** |
 | **Amounts contributed by a treatment** | **PASS — 0 across 39 instructions** |
@@ -727,18 +829,13 @@ Every row was run.
 | No new dependency, CI or migration change | PASS — `pyproject.toml`, `uv.lock`, `.github/`, `migrations/` untouched |
 | `alembic check` | PASS — no schema change |
 | Fixture corpus reproducibility | PASS — 141 |
+| Integration database bootstraps on an empty environment | PASS — throwaway Compose project, 29 integration tests |
+| Makefile tooling contract | PASS — 23, with 14 mutations shown failing |
 | M2 demo snapshot drift | PASS — byte for byte |
 | `git diff --check` | PASS |
 | Secret and attribution scan | PASS — 0 findings |
 
 ### Recorded for a later increment
-
-**Nothing in the repository creates the disposable `lecp_test` database.** Every integration module
-targets it, `README.md` and the `Makefile` both refer to it, and no target or init script brings it
-into existence — it survived only as local state on one machine. Rebuilding the container volume
-during this increment destroyed it and produced 162 setup errors that looked like a code regression
-for as long as it took to read the first traceback. A `db-test-create` target is a two-line fix and
-belongs in an increment that is allowed to touch the developer tooling.
 
 `adjustment.account_code` is `String(64)` with **no check constraint**, unlike `period` and
 `approved_treatment`, which both have one. `AccountPolicy` is therefore the only place account-code
@@ -1321,15 +1418,16 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-whole suite:  896 passed against a real database (0 failed, 31m14s)
+whole suite:  919 passed against a real database (0 failed, 33m52s)
 coverage:     97.99% (gate 90%)
-ruff format:  70 files already formatted
+ruff format:  71 files already formatted
 ruff check:   All checks passed!
-mypy:         Success: no issues found in 64 source files
+mypy:         Success: no issues found in 65 source files
 alembic:      No new upgrade operations detected
 corpus:       matches the generator byte for byte
 demo snapshot: artifacts/m2-demo.html matches the pipeline byte for byte
 treatment closure: 79 passed (8 mutations shown failing, then restored)
+tooling bootstrap: 23 passed (14 mutations shown failing, then restored)
 ```
 
 Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-08-30.

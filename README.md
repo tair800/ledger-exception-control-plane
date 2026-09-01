@@ -250,10 +250,23 @@ uv sync --frozen && uv run ruff format --check . && uv run ruff check . && uv ru
 make up            # build + start postgres, redis and the app; waits for health
 make ps            # status
 make logs          # tail structured application logs
+make test-db-init  # create the disposable lecp_test database if it is absent
 make smoke         # integration tests against the running stack
 make down          # stop and remove this project's containers
-make down-volumes  # also delete its data volume
+make down-volumes  # DESTRUCTIVE: also delete its data volume
 ```
+
+**`make down` is the normal way to stop.** It keeps the volume, so the databases survive.
+**`make down-volumes` runs `docker compose down -v` and deletes the data volume** — `lecp`,
+`lecp_test` and everything in them. Use it deliberately, to reset database state, and never as
+routine cleanup. Recovery is `make test-db-init && make migrate`, plus `make fixtures-load` if the
+corpus is wanted back.
+
+Every integration test targets the disposable **`lecp_test`** database, and every target that needs
+it depends on `test-db-init`, which creates it if it is absent and says so if it is not. The name is
+checked before anything is created: `test-db-init` refuses to create any database the fixture loader
+would refuse to load into. So a clean checkout against an empty volume runs `make schema-verify`
+with no manual `createdb` in between.
 
 The stack binds to localhost only, on **non-default host ports** (`15432` for PostgreSQL, `16379`
 for Redis, `8000` for the app) so it does not collide with a locally installed PostgreSQL or Redis.

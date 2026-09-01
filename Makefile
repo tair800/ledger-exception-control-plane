@@ -1,6 +1,29 @@
 # Developer commands. `make help` lists them.
 .DEFAULT_GOAL := help
-.PHONY: help install fmt fmt-check lint types test gate coverage-gate up down down-volumes logs ps smoke build \n        db-up migrate migrate-down schema-verify \n        fixtures fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify money-verify m2-demo m2-demo-check
+.PHONY: help install fmt fmt-check lint types test gate coverage-gate up down down-volumes \
+        logs ps smoke build db-up test-db-init migrate migrate-down schema-verify \
+        fixtures fixtures-check fixtures-load fixtures-verify ingest-verify match-verify \
+        classify-verify money-verify m2-demo m2-demo-check
+
+# Every Docker command goes through this seam so the whole file can be pointed at a throwaway
+# Compose project — which is how the clean-environment bootstrap is proved without destroying
+# anyone's volume. It is never anything but this project's own stack in normal use.
+COMPOSE ?= docker compose
+
+# The disposable database every integration test targets, and where to reach it. Test-only by
+# name: `test-db-init` refuses to create anything the fixture loader would refuse to load into
+# (ADR-036).
+#
+# Both halves are here because a reviewer split them and broke something real. When only the name
+# was a variable, `make LECP_TEST_DB=lecp_demo schema-verify` created `lecp_demo`, said so, exited
+# 0 — and then the suite failed on `lecp_test`, because the test modules read their own default.
+# When only the name followed `COMPOSE`, `fixtures-load` created a database in a throwaway project
+# and then reset the corpus in the developer's real one. A target that creates one database and
+# then talks to another is worse than no target at all, so every recipe below derives its DSN from
+# exactly these three values.
+LECP_TEST_DB ?= lecp_test
+LECP_DB_PORT ?= 15432
+LECP_TEST_DSN = postgresql://lecp:lecp_local_dev@localhost:$(LECP_DB_PORT)/$(LECP_TEST_DB)
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -25,43 +48,62 @@ test: ## Unit tests with coverage (no Docker required)
 
 gate: install fmt-check lint types test ## Run the full local quality gate, in CI order
 
-coverage-gate: ## The authoritative coverage gate: whole suite, real database (needs db-up)
-	uv run pytest -m "" --ignore=tests/test_integration_stack.py --cov-fail-under=90
+coverage-gate: test-db-init ## The authoritative coverage gate: whole suite, real database
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest -m "" --ignore=tests/test_integration_stack.py --cov-fail-under=90
 
 build: ## Build the application container
-	docker compose build app
+	$(COMPOSE) build app
 
 up: ## Start the local stack (postgres, redis, app) and wait for health
-	docker compose up -d --build --wait
+	$(COMPOSE) up -d --build --wait
 
 down: ## Stop the stack, keeping volumes
-	docker compose down
+	$(COMPOSE) down
 
-down-volumes: ## Stop the stack and delete its data volumes
-	docker compose down -v
+down-volumes: ## DESTRUCTIVE. Stop the stack and delete its data volumes, lecp_test included
+	$(COMPOSE) down -v
 
 ps: ## Show stack status
-	docker compose ps
+	$(COMPOSE) ps
 
 logs: ## Tail application logs
-	docker compose logs -f app
+	$(COMPOSE) logs -f app
 
-smoke: ## Run ALL integration tests (needs the full stack: make up)
-	uv run pytest -m integration -p no:cacheprovider
+smoke: test-db-init ## Run ALL integration tests (needs the full stack: make up)
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest -m integration -p no:cacheprovider
 
 # --- schema / migrations (need PostgreSQL only, not the whole stack) ---
 
 db-up: ## Start only PostgreSQL, for schema and migration work
-	docker compose up -d --wait postgres
+	$(COMPOSE) up -d --wait postgres
 
-migrate: ## Apply migrations up to head
+# The name is captured into a single-quoted shell variable before anything looks at it. Make
+# interpolates its variables into the recipe verbatim, so spelling `$(LECP_TEST_DB)` inside the
+# double-quoted messages below let a backtick in the value run a command while the guard was busy
+# composing its refusal — and the refusal then named a permitted database, because the substitution
+# had already eaten the payload. Captured once, quoted once, read as "$$db" everywhere after.
+test-db-init: db-up ## Create the disposable integration database if absent (idempotent)
+	@db='$(LECP_TEST_DB)'; \
+	case "$$db" in \
+	  lecp_test|lecp_demo|lecp_fixtures) ;; \
+	  *) echo "refusing to create '$$db': an integration database is named lecp_test, lecp_demo or lecp_fixtures" >&2; exit 1 ;; \
+	esac; \
+	if [ "$$($(COMPOSE) exec -T postgres psql -tAqX -U lecp -d postgres -c \
+	        "SELECT 1 FROM pg_database WHERE datname = '$$db'")" = "1" ]; then \
+	  echo "$$db already exists"; \
+	else \
+	  $(COMPOSE) exec -T postgres createdb -U lecp -O lecp "$$db" \
+	    && echo "created $$db"; \
+	fi
+
+migrate: ## Apply migrations up to head (against LECP_POSTGRES_DSN, or the app's configured database)
 	uv run alembic upgrade head
 
 migrate-down: ## Roll back one revision
 	uv run alembic downgrade -1
 
-schema-verify: ## Verify migrations and schema integrity against real PostgreSQL
-	uv run pytest tests/test_schema_postgres.py -m integration -p no:cacheprovider --no-cov
+schema-verify: test-db-init ## Verify migrations and schema integrity against real PostgreSQL
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_schema_postgres.py -m integration -p no:cacheprovider --no-cov
 
 # --- deterministic fixture corpus (M1.3) ---
 
@@ -71,26 +113,26 @@ fixtures: ## Regenerate the committed canonical corpus
 fixtures-check: ## Fail if the committed corpus has drifted from the generator
 	uv run python -m ledger_exception_control_plane.fixtures verify
 
-fixtures-load: ## Load the canonical corpus into the disposable test database (needs db-up)
-	LECP_POSTGRES_DSN=postgresql://lecp:lecp_local_dev@localhost:15432/lecp_test 		uv run python -m ledger_exception_control_plane.fixtures load --reset
+fixtures-load: test-db-init ## Load the canonical corpus into the disposable test database
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run python -m ledger_exception_control_plane.fixtures load --reset
 
-fixtures-verify: ## Prove the corpus loads against real PostgreSQL with constraints on
-	uv run pytest tests/test_fixtures_postgres.py -m integration -p no:cacheprovider --no-cov
+fixtures-verify: test-db-init ## Prove the corpus loads against real PostgreSQL with constraints on
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_fixtures_postgres.py -m integration -p no:cacheprovider --no-cov
 
 # --- settlement ingestion (M2.1) ---
 
-ingest-verify: ## Prove ingestion and quarantine against real PostgreSQL (needs db-up)
-	uv run pytest tests/test_ingest_postgres.py -m integration -p no:cacheprovider --no-cov
+ingest-verify: test-db-init ## Prove ingestion and quarantine against real PostgreSQL
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_ingest_postgres.py -m integration -p no:cacheprovider --no-cov
 
 # --- deterministic matching (M2.2) ---
 
-match-verify: ## Prove matching, tolerance and concurrency against real PostgreSQL (needs db-up)
-	uv run pytest tests/test_matching_postgres.py -m integration -p no:cacheprovider --no-cov
+match-verify: test-db-init ## Prove matching, tolerance and concurrency against real PostgreSQL
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_matching_postgres.py -m integration -p no:cacheprovider --no-cov
 
 # --- residual classification (M2.3) ---
 
-classify-verify: ## Prove the taxonomy, provenance, integrity and races against real PostgreSQL (needs db-up)
-	uv run pytest tests/test_classification_postgres.py -m integration -p no:cacheprovider --no-cov
+classify-verify: test-db-init ## Prove the taxonomy, provenance, integrity and races against real PostgreSQL
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_classification_postgres.py -m integration -p no:cacheprovider --no-cov
 
 # --- deterministic money path (M2.4) ---
 
