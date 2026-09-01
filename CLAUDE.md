@@ -19,12 +19,15 @@ amount.
 
 **Status: implementation in progress.** M0 (scaffold, stack), M1 (schema, fixture corpus) and all
 of M2 (ingestion, deterministic matching, residual classification, and the deterministic adjustment
-calculator) are complete, and **increment 3.1 — the treatment-enum closure gate — has passed**: the
-treatment set genuinely closes into four values and no case in the corpus requires a model to propose
-an amount (ADR-048). **M3.2 — the provider port and closed response schema — is next**, and OPEN-5
-must be settled first. Nothing beyond that is implemented: no model, no provider, no proposal
-generation, no approval workflow, no ledger adapter, no dispatcher, no console, and no `adjustment`
-is ever persisted yet. `PROJECT_STATUS.md` is the authority on exactly what exists.
+calculator) are complete; **increment 3.1 — the treatment-enum closure gate — has passed** (ADR-048);
+and **3.2 has delivered the provider port and the closed proposal contract**, with OPEN-5 resolved to
+Anthropic and OpenAI (ADR-049). **M3.3 — evidence assembly and the proposal flow — is next.**
+
+The model layer exists as a *shape*, not as a call: no provider SDK is a dependency, nothing under
+`llm/` imports an HTTP client, and no live request is made anywhere. Nothing beyond that is
+implemented: no evidence assembly, no prompt construction, no proposal is ever persisted, no approval
+workflow, no ledger adapter, no dispatcher, no console, and no `adjustment` is ever persisted yet.
+`PROJECT_STATUS.md` is the authority on exactly what exists.
 
 ---
 

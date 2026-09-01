@@ -960,13 +960,17 @@ def test_no_model_layer_exists_anywhere_in_the_source_tree() -> None:
     across the whole package rather than over one directory's imports.
 
     ``db.control`` declares a ``treatment_proposal`` *table*, and that is not a model layer — M1.2
-    built somewhere for M3 to write. What must not exist yet is anything that calls a provider or
-    constructs a proposal: no client, no adapter, no SDK. Checked as imports rather than as a
-    substring scan, which caught the schema and was measuring the wrong thing.
+    built somewhere for M3 to write. What must not exist is anything that calls a provider: no
+    client, no SDK. Checked as imports rather than as a substring scan, which caught the schema and
+    was measuring the wrong thing.
+
+    The ``not (root / "llm").exists()`` half was correct at M2.4 and expired at M3.2, which built
+    exactly that package. What survives is the half that was always the real claim and is stronger
+    for having outlived the increment it was written in: **no provider SDK is imported anywhere**,
+    so the calculator still cannot reach a model even now that one has a port. The adapters speak
+    wire-level JSON and take their transport by injection.
     """
     root = MONEY_ROOT.parent
-    assert not (root / "llm").exists()
-    assert not (root / "providers").exists()
 
     providers = {"openai", "anthropic", "litellm", "instructor", "langchain", "cohere"}
     for path in sorted(root.rglob("*.py")):

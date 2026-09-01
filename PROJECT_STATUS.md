@@ -3,8 +3,8 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M3.1 complete — the treatment-enum closure gate passed. **Next:** M3.2 — the
-provider port and closed response schema, which OPEN-5 blocks.
+**Current milestone:** M3.2 complete — the provider port and the closed proposal contract, with
+OPEN-5 resolved. **Next:** M3.3 — evidence assembly and the proposal flow.
 **The whole deterministic core exists.** A settlement file is ingested, normalised and either
 accepted or quarantined; its lines are matched deterministically against ledger entries with
 tolerance; every line that fails to match becomes exactly one classified exception; and an approved
@@ -29,7 +29,8 @@ and persists nothing.
 | **2.3 Exception creation and classification** | **DONE** | Three reachable classes plus a fallback; zero wrong classifications measured at four scales |
 | **2.4 Deterministic amount calculator** | **DONE** | Pure `compute_adjustment`; OPEN-4 resolved; zero wrong financial instructions at four scales |
 | **3.1 KILL-TEST GATE — treatment enum closure** | **PASSED** | The set closes into four; every corpus exception resolves inside it with no amount proposed |
-| 3.2 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **3.2 Provider port and closed response schema** | **DONE** | Five-field contract with no numeric anywhere; two adapters behind one port; OPEN-5 resolved |
+| 3.3 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -691,6 +692,173 @@ accept the clean copy:
 Mutations are applied to in-memory copies — a parsed AST, a throwaway enum — so a crashed test cannot
 leave one in the money path, and a further test asserts none reached disk. A previous increment had a
 reviewer leave a mutation behind; this one is built so it cannot.
+
+## What M3.2 delivered
+
+**The model layer exists as a shape, not as a call.** Nothing here contacts a provider, and nothing
+here could: no HTTP client is imported anywhere under `llm/`, and no provider SDK is a dependency.
+
+### The contract (`PROJECT_SPEC.md` §6.1, verbatim)
+
+```
+TreatmentProposal
+  treatment     : TreatmentCode     # the canonical M3.1 enum, imported not restated
+  confidence    : ConfidenceBand    # LOW | MEDIUM | HIGH — a band, never a score
+  rationale     : str               # provenance for humans; no code parses it, and none can
+  evidence_refs : list[EvidenceRef] # EvidenceRef = { evidence_id: str } — pointers, no values
+  abstained     : bool              # a flag, not a fifth treatment
+```
+
+**No numeric type anywhere in the tree, `extra="forbid"` on every model in it, `strict=True`, and
+`frozen=True`.** A provider returning `{"treatment": "rebook", "amount": 125.50}` does not produce a
+proposal with an ignored extra — it produces a validation error. Strict mode is what stops
+`abstained: "true"` and `treatment: 1` from being helpfully coerced into something that looks like a
+decision.
+
+`abstained ⇒ ESCALATE`, one direction, matching the database constraint and ADR-048. Escalating
+without abstaining stays valid: a model that read the evidence and concluded a human must decide has
+made a decision, and that is not the same event as declining to answer.
+
+### The port
+
+`TreatmentProposer.propose(prompt) -> TreatmentProposal`, async, with two adapters behind it —
+**Anthropic `claude-opus-5`** and **OpenAI `gpt-5.4-mini-2026-03-17`**, pinned 2026-09-01 (OPEN-5,
+ADR-049). What crosses is the validated contract or one of two errors; never a vendor object, a
+`dict`, raw JSON or free text.
+
+The two providers are genuinely different, which is the point: one returns the answer as a text
+block in a content list, the other as a JSON string inside a message inside a choice; one takes the
+system prompt as a top-level field, the other as a message. A test drives both from the same prompt
+and asserts the resulting proposals are equal.
+
+### Measured and asserted
+
+| Check | Result |
+|---|---|
+| Proposal contract and port suite | 90 tests |
+| AI/money firewall and kill tests | 42 tests |
+| Numeric types anywhere in the schema tree | **0**, in both the annotated and the wire copy |
+| Object boundaries with `additionalProperties: false` | all of them |
+| Wire schema sent to a provider | 714 bytes, structure only, no internal prose |
+| Guards shown failing against a deliberate violation | every one |
+
+### What adversarial review changed
+
+Three reviewers raised nineteen findings; after two duplicates, **seventeen distinct defects**, every
+one reproduced before it was fixed. None was a hole in the shipped contract — no route was found by
+which a numeric value, an extra field or an unknown treatment reaches a validated proposal — but
+most of the guards *around* it were weaker than they read, and two design decisions were wrong.
+
+- **`metadata: Any` walked through every guard.** `dict[str, Any]` was caught; the strictly wider
+  `Any` was not, because it emits `{}` — no type, no properties — and every guard keyed off a
+  declared type. The rule is stated positively now: a schema node must constrain something.
+- **An ordinary alias defeated the financial-field check.** `postingAmount` was one token to a
+  splitter that only split on underscores, and `amounts` was its own word. It now splits camelCase
+  and tests singulars.
+- **A numeric `default` reached a validated instance** with no numeric type in the schema, because
+  Pydantic does not validate defaults. `default`, `const` and `examples` are checked now.
+- **The wire schema's prose-stripping deleted a property named `description`** while leaving it in
+  `required` — an unsatisfiable schema no response could match. The stripper is structure-aware, and
+  a new guard asserts `required ⊆ properties`.
+- **The port leaked transport exceptions.** `propose` passed them straight through, so at 3.4 an
+  `httpx` timeout would have surfaced in a caller the port exists to shield from vendor vocabulary.
+  There are two error types now: the answer was invalid, or there was no answer.
+- **The port was synchronous** in an application that is async throughout. A real HTTP transport
+  would have forced a change to the port and both adapters at 3.4 — precisely the compatibility
+  question this increment existed to settle. It is async now.
+- **`max_tokens` was 1024** against a model whose reasoning is on by default and counts against the
+  same ceiling: it would have truncated the JSON and reported a parse error. One shared ceiling of
+  16000 now, the same for both providers, so the cost comparison stays fair.
+- The Anthropic adapter **ignored `stop_reason`**, so a refusal read as "no text block to parse"
+  while the other adapter reported its equivalent properly. Both now report refusal and truncation
+  as themselves.
+- `model_copy(update=...)` **bypassed the abstention validator** and produced a proposal that
+  serialised to a state the database constraint forbids. Nothing uses it; a guard now ensures
+  nothing starts.
+
+And the ones about the tests themselves:
+
+- **The default gate was red and I had not noticed.** A *fourth* copy of the expired `llm/` fence
+  lived in `test_demo_snapshot.py`; three were retargeted and that one was missed. `uv run pytest`
+  failed while the increment was being written up as finished.
+- **A test that could not fail.** `test_a_rationale_full_of_numbers_changes_nothing` compared
+  `compute_adjustment` called twice with byte-identical arguments — `TreatmentCode` is a singleton,
+  so it asserted `f(x) == f(x)` and passed against a calculator that ignored its arguments. The
+  property it reached for is carried by two falsifiable tests; what remains asserts only what the
+  comparison genuinely shows.
+- **Two module exemptions that exempted nothing** while blinding the scope check inside the two
+  modules most able to violate it. `_constructed` collects call sites, so a class definition was
+  never going to trip it; the skips are gone.
+- **A provenance clause dropped without cause.** `rationale=` was removed from M3.1's fence
+  alongside two clauses that genuinely had expired. It had not — nothing under `src/` assigns it,
+  and it is the only guard anywhere that would catch model free text being written into an
+  unrelated record.
+- `gl_code` and `net_settlement` passed the financial-field guard. `gl_code` is `account_code` by
+  another name.
+
+Every one of these is now its own kill test.
+
+### Four scope fences expired, and were retargeted rather than deleted
+
+`test_money.py`, `test_treatment_closure.py` and `test_demo_snapshot.py` each asserted
+`not (… / "llm").exists()`, which forbade exactly the package this increment was for, and M3.1
+asserted that nothing constructs a `TreatmentProposal`, which stopped being true when the response
+contract appeared. What survives in each case is the half that was always the real claim: **no
+provider SDK is imported anywhere**, the demo cannot reach the model layer, and nothing persists a
+proposal or builds its provenance.
+
+Finding the fourth copy took a reviewer, which is the argument for grepping the whole suite for a
+fence rather than the modules you expect to hold it.
+
+## M3.2 verification
+
+Every row was run.
+
+| Check | Result |
+|---|---|
+| M3.2 contract: `PROJECT_SPEC.md` §6.1 vs `IMPLEMENTATION_PLAN.md` §3.2 | PASS — no contradiction; field list implemented verbatim |
+| Clean `uv sync --frozen` / `uv lock --check` | PASS |
+| `ruff format --check` / `ruff check` | PASS — 79 files |
+| `mypy` strict | PASS — 73 files |
+| Default gate, no Docker | PASS — 887 passed, 166 deselected |
+| **Coverage gate, whole suite against real PostgreSQL** | **PASS — 1051 tests, 97.66% ≥ 90%** |
+| Proposal contract and provider port suite | PASS — 90 |
+| AI/money firewall and kill tests | PASS — 42 |
+| M3.1 treatment closure suite | PASS — 79, unchanged |
+| M2.4 calculator and firewall suite | PASS — 114 |
+| **No numeric type anywhere in the schema tree** | **PASS — annotated and wire copies, recursive** |
+| No numeric enum value, default, const or example | PASS |
+| `additionalProperties: false` at every object boundary | PASS — both copies |
+| No amount-like, account, period, posting or operation field | PASS — §6.1's list plus §7's machine fields |
+| No unconstrained node and no open map | PASS — the `Any` hole, closed |
+| `required ⊆ properties` | PASS |
+| Treatment is exactly the canonical four | PASS — reuses M3.1's enum, not a copy |
+| Confidence is a closed non-numeric band | PASS |
+| Strict validation: 15 malformed provider values | PASS — all refused, none coerced |
+| Extra fields, top-level and nested | PASS — 9 cases refused, not ignored |
+| A validated treatment is the canonical member by identity | PASS |
+| Abstention implies escalate; escalate alone stays valid | PASS — matches the DB constraint |
+| **Boundary guard: the calculator cannot see the proposal** | **PASS — §23.5, killed four ways** |
+| The calculator has no parameter model text could flow through | PASS — signature asserted |
+| Only `proposal.treatment` crosses into the money path | PASS — proposal, rationale, confidence and refs all refused |
+| Provider swap: two adapters, one identical proposal | PASS — the portability claim, asserted |
+| Each adapter sends the closed schema verbatim | PASS |
+| A provider returning an amount cannot cross the port | PASS — both providers |
+| Malformed, refused and truncated responses | PASS — 22 shape failures refused |
+| No credential in any request, adapter or fixture | PASS — structural, keys and values |
+| No provider SDK imported, and none in the manifest | PASS — 0 matches |
+| No HTTP client reachable from `llm/` | PASS — this layer performs no I/O |
+| No validation escape hatch (`model_construct`, `model_copy`) | PASS — AST guard |
+| **Every guard fails against its own injected violation** | **PASS — 24 mutations + clean-tree control** |
+| No mutation reached disk | PASS — AST check plus `git status` |
+| No evidence assembly, prompt construction or persistence | PASS — 3.3's scope, fenced |
+| No approval, outbox, dispatcher, cassette or frontend | PASS |
+| No new dependency, CI or migration change | PASS — `pyproject.toml`, `uv.lock`, `.github/`, `migrations/` untouched |
+| `alembic check` | PASS — no schema change |
+| Fixture corpus and M2 demo drift | PASS — both byte for byte |
+| Integration database bootstrap and tooling contract | PASS — 23 |
+| `git diff --check` | PASS |
+| Secret and attribution scan | PASS — 0 findings |
 
 ## M3.1 correction — the integration database was not reproducible
 
@@ -1418,16 +1586,18 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-whole suite:  919 passed against a real database (0 failed, 33m52s)
-coverage:     97.99% (gate 90%)
-ruff format:  71 files already formatted
+whole suite:  1051 passed against a real database (0 failed, 27m12s)
+default gate: 887 passed, 166 deselected (no Docker required)
+coverage:     97.66% (gate 90%)
+ruff format:  79 files already formatted
 ruff check:   All checks passed!
-mypy:         Success: no issues found in 65 source files
+mypy:         Success: no issues found in 73 source files
 alembic:      No new upgrade operations detected
 corpus:       matches the generator byte for byte
 demo snapshot: artifacts/m2-demo.html matches the pipeline byte for byte
 treatment closure: 79 passed (8 mutations shown failing, then restored)
 tooling bootstrap: 23 passed (14 mutations shown failing, then restored)
+proposal contract: 90 passed;  AI/money firewall: 42 passed
 ```
 
 Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-08-30.
@@ -1436,7 +1606,7 @@ Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 50 ADRs and 8 OPEN items. OPEN-2 was resolved at M2.2 (ADR-042), OPEN-3 at M2.3
+`DECISIONS.md` holds 51 ADRs and 8 OPEN items. **OPEN-5 was resolved at M3.2 (ADR-049).** OPEN-2 was resolved at M2.2 (ADR-042), OPEN-3 at M2.3
 (ADR-045) and OPEN-4 at M2.4 (ADR-047); M3.1 recorded ADR-048 without opening or closing any.
 **OPEN-5** (which two model providers) is the next one due and blocks M3.2. Still relevant:
 

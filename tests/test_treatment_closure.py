@@ -959,15 +959,21 @@ def test_no_mutation_reached_disk() -> None:
 
 
 # ======================================================================================
-# Scope: M3.2 and beyond do not exist
+# Scope: what M3.1 owns, and what it still does not
 # ======================================================================================
 
 
-def test_no_provider_or_model_code_exists() -> None:
-    """M3.1 calls nothing. The provider port, the response schema and the prompt are all M3.2."""
-    assert not (PACKAGE_ROOT / "llm").exists()
-    assert not (PACKAGE_ROOT / "providers").exists()
+def test_no_provider_sdk_is_a_dependency() -> None:
+    """M3.2 built the port. It did so **without** adding a vendor SDK, and that must hold.
 
+    This fence used to read ``not (PACKAGE_ROOT / "llm").exists()``, which was correct at M3.1 and
+    is the kind of assertion that expires: the package it forbade is exactly what the next
+    increment was for. What does not expire is the half that was always the real claim — no
+    provider SDK anywhere, so no vendor type exists that could leak past the adapter, and CI needs
+    no key to run the suite. The proposal contract's own guards live in
+    ``test_proposal_firewall.py``; this one stays here because it is the M3.1 closure argument that
+    the vocabulary has exactly one declaration and reaches the money path by exactly one route.
+    """
     providers = {
         "openai",
         "anthropic",
@@ -989,11 +995,20 @@ def test_no_provider_or_model_code_exists() -> None:
                 assert module.split(".")[0] not in providers, f"{path.name} imports {module}"
 
 
-def test_no_proposal_generation_workflow_exists() -> None:
-    """``treatment_proposal`` is a table M1.2 built for M3.2 to write. Nothing writes it yet."""
+def test_no_proposal_is_persisted_and_no_provenance_is_built() -> None:
+    """``treatment_proposal`` is a table M1.2 built. M3.2 defined the shape; nothing writes a row.
+
+    Narrowed from "nothing constructs a ``TreatmentProposal``", which stopped being true the moment
+    the response contract existed — the *Pydantic* model is constructed at the provider boundary by
+    design. The ORM row, the prompt hash and the cassette id are still 3.3's, and this is the part
+    of the original fence that survives.
+
+    ``rationale=`` stayed. It was dropped in the first draft of this narrowing along with the two
+    clauses that genuinely had expired, and a reviewer pointed out that it had not: nothing under
+    ``src/`` assigns it as a keyword, the contract declares it as an annotation, and it is the only
+    fence anywhere that would catch model free text being written into an unrelated record.
+    """
     for path in sorted(PACKAGE_ROOT.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
-        if path.name != "control.py":
-            assert "TreatmentProposal(" not in text, f"{path.name} constructs a proposal"
         for forbidden in ("prompt_hash=", "cassette_id=", "rationale="):
             assert forbidden not in text, f"{path.name} builds proposal provenance"

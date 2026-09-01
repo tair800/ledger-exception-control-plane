@@ -1,0 +1,127 @@
+"""OpenAI Chat Completions adapter (OPEN-5, ADR-049).
+
+The same closed contract, reached along a different path. Structured output arrives as a **JSON
+string inside a message inside a choice** — ``choices[0].message.content`` — rather than as a block
+in a list, and the system prompt is a message rather than a top-level field. Those two differences
+are the substance of provider portability: if the port were shaped around either vendor's response,
+the other one would not fit, and the mismatch would be discovered when a provider was swapped under
+load rather than here.
+
+There is a third difference with teeth. This API declines in band: ``message.refusal`` carries text
+and ``content`` is then null. That is not a proposal and it is not an abstention — an abstention is
+something a model chooses inside the contract, a refusal is the API declining to answer at all — so
+it raises rather than quietly becoming ``ESCALATE``. ``finish_reason`` gets the same treatment for
+the same reason.
+
+No SDK, for the same reason as the other adapter: a JSON body in, a JSON body out, replayable
+offline.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Final
+
+from ledger_exception_control_plane.llm.port import (
+    ProviderId,
+    ProviderRequest,
+    ProviderResponseError,
+    Transport,
+)
+from ledger_exception_control_plane.llm.providers import (
+    OPENAI_MODEL_ID,
+    OUTPUT_TOKEN_CEILING,
+    sent,
+    validated_proposal,
+)
+from ledger_exception_control_plane.llm.schema import (
+    ProposalPrompt,
+    TreatmentProposal,
+    proposal_wire_schema,
+)
+
+__all__ = ["OpenAIChatProposer"]
+
+_PATH: Final = "/v1/chat/completions"
+
+#: Names the schema in the provider's own error messages. Not part of the contract.
+_SCHEMA_NAME: Final = "treatment_proposal"
+
+
+class OpenAIChatProposer:
+    """Implements :class:`~..port.TreatmentProposer` over Chat Completions."""
+
+    def __init__(self, transport: Transport, *, model_id: str = OPENAI_MODEL_ID) -> None:
+        self._transport = transport
+        self._model_id = model_id
+
+    @property
+    def provider(self) -> ProviderId:
+        return ProviderId.OPENAI
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
+
+    def build_request(self, prompt: ProposalPrompt) -> ProviderRequest:
+        """The wire body. Same schema object, different envelope around it.
+
+        The output ceiling is the same number the other adapter sends. Giving the two providers
+        different budgets would quietly make the `Measured` comparison unfair, which is the reason
+        these constants exist at all.
+        """
+        return ProviderRequest(
+            path=_PATH,
+            body={
+                "model": self._model_id,
+                "max_completion_tokens": OUTPUT_TOKEN_CEILING,
+                # A system *message*, where the other adapter uses a top-level field.
+                "messages": [
+                    {"role": "system", "content": prompt.system},
+                    {"role": "user", "content": prompt.user},
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": _SCHEMA_NAME,
+                        # Without this the schema is a suggestion. With it the provider enforces
+                        # the same closure the validator enforces on the way back — belt and
+                        # braces, and the braces are the ones that are tested.
+                        "strict": True,
+                        "schema": proposal_wire_schema(),
+                    },
+                },
+            },
+        )
+
+    async def propose(self, prompt: ProposalPrompt) -> TreatmentProposal:
+        return self.parse(await sent(self._transport, self.build_request(prompt)))
+
+    def parse(self, payload: Mapping[str, object]) -> TreatmentProposal:
+        """Walk choice → message → content, refusing anything that is not that shape."""
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ProviderResponseError("openai response has no choices")
+
+        first = choices[0]
+        if not isinstance(first, Mapping):
+            raise ProviderResponseError("openai choice is not an object")
+
+        if first.get("finish_reason") == "length":
+            raise ProviderResponseError(
+                "openai stopped at the output ceiling before completing the proposal"
+            )
+
+        message = first.get("message")
+        if not isinstance(message, Mapping):
+            raise ProviderResponseError("openai choice carries no message")
+
+        refusal = message.get("refusal")
+        if isinstance(refusal, str) and refusal:
+            raise ProviderResponseError(f"openai declined to answer: {refusal}")
+
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise ProviderResponseError("openai message content is not a JSON string")
+
+        return validated_proposal(content, ProviderId.OPENAI)

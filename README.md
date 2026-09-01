@@ -4,7 +4,7 @@ PSP settlement files against the general ledger. Deterministic matching clears t
 proposes a treatment from a closed enum whose type has no numeric field. A chaos suite proves no
 double-post against a RED baseline that does.
 
-> ## Status: milestone M3.1 of 31
+> ## Status: milestone M3.2 of 31
 >
 > **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
 > liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
@@ -22,6 +22,10 @@ double-post against a RED baseline that does.
 > including a refusal for any value that is not a genuine member of the treatment vocabulary.
 > Increment 3.1 was a **gate rather than a feature**: it exists to try to break the containment
 > claim before a model is built on it, and the claim survived.
+>
+> As of M3.2 — **the model layer, as a shape rather than a call**: a closed `TreatmentProposal`
+> contract with no numeric type anywhere in its tree, and a provider-neutral port with two adapters
+> behind it. No provider SDK is a dependency, nothing imports an HTTP client, and no request is made.
 >
 > **What does not exist: anything that decides, approves or posts.** Nothing chooses a treatment,
 > assembles evidence for a model, obtains an approval or writes an `adjustment` row — the calculator
@@ -170,6 +174,33 @@ treatment carrying an amount, a second vocabulary, a hardcoded string in the mon
 drift one directory outside it, a module that stops naming the type, a guard handed nothing to
 inspect, and the runtime check removed. Every mutation is applied to an in-memory copy, and a
 further test asserts none reached disk.
+
+### The model's only channel, as a type
+
+```
+TreatmentProposal
+  treatment     : TreatmentCode     # REBOOK | ACCRUE | WRITE_OFF | ESCALATE
+  confidence    : ConfidenceBand    # LOW | MEDIUM | HIGH — a band, never a score
+  rationale     : str               # provenance for humans; no code parses it, and none can
+  evidence_refs : list[EvidenceRef] # { evidence_id: str } — pointers that carry no values
+  abstained     : bool              # a flag, not a fifth treatment
+```
+
+Five fields, **no numeric type anywhere in the tree**, `extra="forbid"` on every model in it, and
+strict validation at the boundary so `"true"` is not quietly accepted as a boolean. A provider that
+returns an `amount` does not produce a proposal with an ignored extra; it produces a validation
+error. A CI guard walks the exported JSON Schema — through `$defs`, combinators and array items —
+and fails on a numeric type, a numeric default, an amount-like field name, an open object, or an
+unconstrained node. A second guard asserts the calculator cannot import the proposal model. Both are
+shown failing against deliberate violations, which is what the specification asks of them.
+
+Two adapters sit behind one async port — **Anthropic** and **OpenAI**, pinned for measurement in
+ADR-049. They are genuinely different underneath: one returns the answer as a text block in a
+content list, the other as a JSON string inside a message inside a choice. A test drives both from
+the same prompt and asserts the proposals are identical, which is the portability claim stated as an
+assertion rather than an intention. **No provider SDK is a dependency** — the adapters speak
+wire-level JSON with the transport injected, so no vendor type exists anywhere that could leak past
+them, and the whole layer is provable offline without a paid call.
 
 This repository also carries the portfolio's written **"why we did NOT use an agent here"**: the same
 labelled exception set run through the deterministic matcher, an LLM-as-matcher baseline, and the

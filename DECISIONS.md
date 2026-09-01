@@ -1955,6 +1955,156 @@ anticipates it.
 
 ---
 
+## ADR-049 — Two providers behind one port, and the closed proposal contract (M3.2)
+
+**Status:** Accepted (M3.2). **Resolves OPEN-5.**
+
+### The vocabulary of this increment
+
+M3.1 proved the *treatment* set closes. This increment answers the next question: what else may a
+model say, and how does anything it says get into the system? The answer is a five-field contract
+and one interface, and the design goal for both is that the dangerous thing is not *guarded against*
+but *unrepresentable*.
+
+### The contract (`PROJECT_SPEC.md` §6.1, implemented verbatim)
+
+| Field | Type | Why it is safe |
+|---|---|---|
+| `treatment` | `TreatmentCode` | The canonical M3.1 enum, imported not restated. Four values. |
+| `confidence` | `ConfidenceBand` | `LOW · MEDIUM · HIGH`. A band, never a score. |
+| `rationale` | `str` | Provenance for humans. No code parses it and none can (§6.2). |
+| `evidence_refs` | `list[EvidenceRef]` | `{evidence_id: str}` — opaque pointers that carry no values. |
+| `abstained` | `bool` | A flag, not a fifth treatment. |
+
+**No numeric type anywhere in the tree**, and `extra="forbid"` on every model in it. A provider that
+returns `{"treatment": "rebook", "amount": 125.50}` does not produce a proposal with an ignored
+extra — it produces a validation error.
+
+Three choices inside that are worth recording:
+
+**`strict=True`, and `model_validate_json` on the wire path.** This boundary parses text a third
+party produced. In Pydantic's lax mode `"true"` becomes `True` and `1` becomes an enum member, which
+is precisely how a malformed response turns into a plausible-looking domain object. Measured against
+the real contract: `treatment=1`, `treatment=true`, `treatment="REBOOK"`, `treatment=" rebook"`,
+`confidence=0.9`, `abstained="true"`, `abstained=1`, `rationale=["text"]`, `evidence_refs="EV-1"`
+are all refused.
+
+**`frozen=True`.** A validated proposal is a record of what a model said, and a record later code can
+edit is not provenance. It also makes the abstention rule an invariant rather than an entry check —
+the M3.1 account-table lesson applied before it could be repeated.
+
+**No maximum on `rationale`.** The specification sets none and the column behind it is `Text`.
+Inventing a limit here would truncate or reject provenance the system was told to keep.
+
+### Abstention: the implication, not the equivalence
+
+`abstained ⇒ treatment == ESCALATE`. One direction, matching the database constraint
+(`NOT abstained OR treatment = 'escalate'`) and ADR-048.
+
+Escalating *without* abstaining stays valid, and the distinction is real: a model that read the
+evidence and concluded a human must decide has **made a decision**; one that declined to answer has
+not. Collapsing them would lose exactly what the audit trail exists to keep, and would reject valid
+output that the table it is stored in accepts. A contradictory pair (`REBOOK` + `abstained=true`) is
+refused rather than normalised — silently clearing one field would decide on the model's behalf
+which half it meant.
+
+### OPEN-5 — the two providers
+
+**Anthropic** (`claude-opus-5`) and **OpenAI** (`gpt-5.4-mini-2026-03-17`). Pinned 2026-09-01.
+
+Why these two:
+
+* **Separate vendors, separate infrastructure.** Not two front doors onto one model, which OPEN-5
+  explicitly warns against. A gateway and its upstream would prove nothing about portability.
+* **Both do enforced structured output**, by different mechanisms — `output_config.format` against
+  `response_format.json_schema` with `strict: true`. The difference is the point: the port has to
+  fit both, so it is shaped around neither.
+* **Genuinely different response shapes.** One returns the answer as a text block inside a content
+  list; the other as a JSON string inside a message inside a choice. An abstraction that only ever
+  saw one of them would look fine until the day it was swapped.
+* **Deterministic offline testing.** Neither adapter performs I/O, so the whole layer is provable
+  without a paid call — which is what lets the eval gate run in CI on cassettes (§20).
+
+The identifiers are stamped differently because the vendors number things differently: OpenAI's
+snapshot date is part of the identifier, Anthropic's current identifiers carry no date component and
+appending one names a model that does not exist. So that pin's date is recorded here instead.
+
+**They are not tier-matched**, and that is stated rather than hidden: a frontier model against a
+small one. This pin exists so the port has two real implementations and so a measurement has
+something to name. The evaluation increment (3.5) measures accuracy, cost per 1,000 lines and p95,
+and may re-pin to comparable tiers to make that table a fair comparison — a one-line change,
+reviewed, with a new date.
+
+### The port
+
+```
+TreatmentProposer (Protocol)
+    provider   : ProviderId
+    model_id   : str
+    propose(prompt: ProposalPrompt) -> TreatmentProposal
+```
+
+What crosses it is the validated contract and nothing else — never a vendor object, a `dict`, raw
+JSON or free text. A failure raises `ProviderResponseError`; there is deliberately **no** "assume
+escalate" fallback, because a caller that cannot tell a real abstention from a parse failure would
+record a decision no model made. What to do about the failure — queue for a human, never block the
+deterministic path (NFR-11) — belongs to 3.3.
+
+**No provider SDK is a dependency, and none is imported.** The adapters build and parse wire-level
+JSON with a `Transport` injected. Three reasons, in order of weight: with no SDK in the tree there
+is no vendor class anywhere that *could* leak past the adapter; JSON is the only form a cassette can
+replay in CI without a key; and the alternative would add two large dependencies whose only exercised
+code path in this increment would be one nobody can run offline. **No transport implementation ships
+here** — the one that speaks HTTP arrives with the cassette harness at 3.4.
+
+Authentication belongs to the transport, never the adapter. `ProviderRequest` is `{path, body}` with
+nowhere to put a header, so no adapter, fixture or recorded cassette can come to hold a credential.
+
+### Sent to the provider: structure, not prose
+
+Pydantic folds every docstring in the tree into `description` keys. Those docstrings are the
+engineering argument behind a financial control — including a worked example of the numeric escape
+hatch this project refuses — and shipping them on every call would be hundreds of wasted tokens and
+a needless disclosure. `proposal_wire_schema()` is the same structure with the prose removed: 714
+characters, same properties, same enums, same `additionalProperties: false`, same `required`. Both
+copies are checked by every guard, so the stripping step cannot become a place to hide something.
+
+What the model should *do* stays in the prompt (3.3), which is where instructions belong.
+
+### The guards, and the mutations that kill them
+
+`PROJECT_SPEC.md` §23 makes two of these acceptance criteria for the whole project — the schema
+guard must fail "when a numeric field is deliberately added" (§23.4) and the boundary guard "when
+the calculator is made to import the proposal model" (§23.5).
+
+Six schema guards walk the tree — root, `$defs`, `anyOf`/`oneOf`/`allOf`, array items, nested
+objects — checking: no numeric type and no numeric enum value; `additionalProperties: false` at
+every boundary; no property name that names money, an account, a period or a posting; no free-form
+object or open map; treatment is exactly the canonical four; confidence is a closed non-numeric
+band. Field **names** only, never descriptions — prose legitimately discusses the words the list
+forbids, and a guard that fires on its own documentation gets weakened until it is switched off.
+
+Each is shown failing against a deliberately broken copy, and the schema mutations are **real
+Pydantic models** a developer could actually write — a class with `amount: Decimal`, one with
+`confidence: float`, one with `extra="allow"`, one with `metadata: dict[str, Any]`, one with
+`account_code: str`, one with a nested `adjustment_amount` — rather than doctored dictionaries. The
+boundary guard is killed four ways and the vendor-import guard three, each against an in-memory copy
+of the source. Nothing is written to disk.
+
+### What this increment does not do
+
+No live call, and nothing here could make one: no HTTP client is imported anywhere under `llm/`. No
+evidence assembly, no prompt construction, no persistence — the `treatment_proposal` table stays
+empty until 3.3 — no approval, no posting, no schema change, no migration, and no new dependency.
+
+Two M3.1 scope fences were retargeted rather than deleted. `not (PACKAGE_ROOT / "llm").exists()`
+forbade exactly the package this increment was for; what survives from it is the half that was
+always the real claim, that no provider SDK is imported anywhere. `"TreatmentProposal(" not in
+source` stopped being true the moment the response contract existed, and narrowed to what still
+holds: nothing constructs the ORM row or builds proposal provenance.
+
+---
+
 ---
 
 # Open decisions
@@ -1967,12 +2117,12 @@ ADR-045, and **OPEN-4** (account mapping and period assignment) at M2.4 as ADR-0
 removed from this list rather than left with a "resolved" marker, because an open-decisions list that
 accumulates closed items stops being read.
 
-## OPEN-5 — Which two model providers
+## OPEN-5 — Which two model providers — **RESOLVED at M3.2 (ADR-049)**
 
-**Must decide:** the two provider adapters implemented behind the port, and the specific model
-identifiers pinned for measurement.
-**Constraint:** must be pinned and date-stamped, since the `Measured` table is meaningless otherwise.
-**Needed before:** increment 3.2.
+Anthropic (`claude-opus-5`) and OpenAI (`gpt-5.4-mini-2026-03-17`), pinned 2026-09-01. Separate
+vendors, both with enforced structured output by different mechanisms, and genuinely different
+response shapes — which is what makes the port's portability claim testable rather than asserted.
+Not tier-matched; 3.5 may re-pin for a fair `Measured` comparison. See ADR-049.
 
 ## OPEN-6 — Evaluation threshold for the CI gate
 

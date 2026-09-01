@@ -435,12 +435,32 @@ def test_fixture_ground_truth_never_reaches_a_production_boundary() -> None:
     assert "intended_classification" not in render(build())
 
 
-def test_no_frontend_tooling_or_model_layer_was_introduced() -> None:
-    """M3 and M7 both stay unstarted. One HTML file is not an operations console."""
+def test_the_demo_introduced_no_frontend_tooling_and_still_involves_no_model() -> None:
+    """M7 stays unstarted, and the snapshot stays a pipeline artifact. One HTML file is not a
+    console, and the page must keep saying so.
+
+    The ``llm``/``providers`` clause here expired at M3.2, which built the first of those on
+    purpose — the third copy of a fence that also lived in ``test_money.py`` and
+    ``test_treatment_closure.py``, and the one that made the default gate red because it was
+    missed. What replaces it is the claim that actually matters for *this* artifact: the demo
+    renders deterministic pipeline output, so it must not reach the model layer even now that one
+    exists.
+    """
     for forbidden in ("package.json", "package-lock.json", "node_modules", "frontend", "web", "ui"):
         assert not (REPO_ROOT / forbidden).exists(), f"{forbidden} was introduced"
-    for forbidden in ("llm", "providers"):
-        assert not (DEMO_ROOT.parent / forbidden).exists()
+
+    for path in sorted(DEMO_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            modules: list[str] = []
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                modules = [node.module]
+            for module in modules:
+                assert "llm" not in module.split("."), (
+                    f"demo/{path.name} imports {module}: the snapshot must stay deterministic"
+                )
 
     page = COMMITTED.read_text(encoding="utf-8")
     assert "No AI is involved" in page
