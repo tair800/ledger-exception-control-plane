@@ -23,7 +23,9 @@ from ledger_exception_control_plane.llm.schema import TreatmentProposal
 
 __all__ = [
     "ANTHROPIC_MODEL_ID",
+    "ANTHROPIC_MODEL_VERSION",
     "OPENAI_MODEL_ID",
+    "OPENAI_MODEL_VERSION",
     "OUTPUT_TOKEN_CEILING",
     "sent",
     "validated_proposal",
@@ -42,6 +44,15 @@ __all__ = [
 #: lives in ADR-049.
 ANTHROPIC_MODEL_ID = "claude-opus-5"
 OPENAI_MODEL_ID = "gpt-5.4-mini-2026-03-17"
+
+#: What each vendor calls a version, which is not the same thing on both sides.
+#:
+#: Anthropic's identifiers carry no version component — the identifier is the pinned behaviour — so
+#: the version is the identifier and ADR-049 holds the pin date. OpenAI's embed a dated snapshot,
+#: and that date is genuinely the version: the same family on two snapshots is two models. 3.3
+#: persists whichever applies, so the difference is recorded rather than flattened.
+ANTHROPIC_MODEL_VERSION = ANTHROPIC_MODEL_ID
+OPENAI_MODEL_VERSION = "2026-03-17"
 
 #: One output ceiling, applied to both providers.
 #:

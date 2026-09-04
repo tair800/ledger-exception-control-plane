@@ -28,6 +28,7 @@ from ledger_exception_control_plane.llm.port import (
 )
 from ledger_exception_control_plane.llm.providers import (
     ANTHROPIC_MODEL_ID,
+    ANTHROPIC_MODEL_VERSION,
     OUTPUT_TOKEN_CEILING,
     sent,
     validated_proposal,
@@ -57,6 +58,20 @@ class AnthropicMessagesProposer:
     @property
     def model_id(self) -> str:
         return self._model_id
+
+    @property
+    def model_version(self) -> str:
+        """The version this vendor publishes, for the model actually called.
+
+        Anthropic's current identifiers carry no separate version component — the identifier *is*
+        the pinned behaviour — so the version is the identifier, and ADR-049 carries the pin date.
+
+        Derived from ``self._model_id`` rather than returned as a constant, which was the first
+        version and was self-contradictory: overriding the model id left the *other* model's name
+        sitting in the version column, so one row named two different models. Provenance that can
+        disagree with itself is worse than none.
+        """
+        return self._model_id if self._model_id != ANTHROPIC_MODEL_ID else ANTHROPIC_MODEL_VERSION
 
     def build_request(self, prompt: ProposalPrompt) -> ProviderRequest:
         """The wire body, including the closed schema itself as the output constraint.

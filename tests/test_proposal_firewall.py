@@ -452,17 +452,74 @@ def test_the_port_returns_the_domain_type_and_nothing_looser() -> None:
     assert annotation in (TreatmentProposal, "TreatmentProposal")
 
 
-def test_the_llm_package_cannot_reach_a_database_session() -> None:
-    """The M1.2 table exists and stays empty. Writing it is 3.3's increment, not this one."""
+#: The one module in ``llm/`` allowed to touch a database. Everything else stays pure.
+PERSISTENCE_MODULE: Final = "llm/service.py"
+
+
+def test_only_one_module_in_the_llm_package_can_reach_a_database() -> None:
+    """The contract, the port, the adapters, the assembler and the flow are all pure.
+
+    Narrowed at M3.3, which is the increment that legitimately persists a proposal. Before it, the
+    fence said *nothing* under ``llm/`` may reach a session, and that was right — the table was
+    supposed to stay empty. What survives is the part that was always the real claim: exactly one
+    module may talk to the database, so the prompt, the hash, the evidence pack and every branch of
+    the flow can be tested with no database and no network at all. If that list ever grows, the
+    reason to keep those layers pure has quietly gone.
+    """
     forbidden = {"sqlalchemy", "asyncpg", "alembic"}
+    inspected = 0
     for name, source in _package_sources().items():
-        if not name.startswith("llm/"):
+        if not name.startswith("llm/") or name == PERSISTENCE_MODULE:
             continue
+        inspected += 1
         for module in _imports(source):
             assert module.split(".")[0] not in forbidden, f"{name} imports {module}"
         assert not {"Session", "AsyncSession", "session"} & _code_identifiers(source), (
             f"{name} reaches for a database session"
         )
+    assert inspected >= 5, "the scan is not seeing the llm package"
+
+
+def test_the_persistence_module_writes_only_the_three_proposal_tables() -> None:
+    """Assembly records evidence and a proposal. It does not touch the deterministic path.
+
+    Reading ``settlement_line`` and ``ledger_entry`` is how evidence gets assembled; *writing*
+    either of them would mean a model call could alter the reconciliation it is describing. The
+    same goes for ``approval`` and ``adjustment``, which belong to increments that do not exist.
+    """
+    source = _package_sources()[PERSISTENCE_MODULE]
+    written = {
+        node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+    }
+    # Every ORM class the assembler must not write, resolved from the schema module rather than
+    # typed out. A reviewer showed the hand-written list checking `RecoveryQueue` — a *table* name
+    # that matches no class, so the entry could never fire — while omitting `ExceptionRecord`,
+    # `SettlementLine` and `LedgerEntry`, which are the three the docstring actually names.
+    from ledger_exception_control_plane.db import control, models
+
+    writable = {
+        name
+        for module in (control, models)
+        for name in dir(module)
+        if isinstance(getattr(module, name), type)
+        and hasattr(getattr(module, name), "__tablename__")
+    }
+    permitted = {"Evidence", "TreatmentProposal", "TreatmentProposalEvidence"}
+    assert {
+        "ExceptionRecord",
+        "SettlementLine",
+        "LedgerEntry",
+        "Approval",
+        "Adjustment",
+    } <= writable
+
+    for forbidden in sorted(writable - permitted):
+        assert forbidden not in written, f"the assembler constructs {forbidden}"
+
+    for statement in ("update(", "delete("):
+        assert statement not in source, f"the assembler issues a {statement} statement"
 
 
 def test_no_mutation_reached_disk() -> None:
@@ -482,35 +539,110 @@ def test_no_mutation_reached_disk() -> None:
 # ======================================================================================
 
 
-def test_nothing_assembles_evidence_or_builds_a_prompt() -> None:
-    """3.3 owns evidence assembly, prompt construction and persistence. None of it is here.
+def test_nothing_reaches_past_this_increment() -> None:
+    """3.4 owns the cassette harness and every transport that speaks HTTP. Neither is here.
 
-    ``ProposalPrompt`` is a two-string envelope the port needs in order to have a signature. It
-    holds no assembly logic, and nothing in the package constructs one.
+    Replaces the fence that forbade evidence assembly and prompt construction outright, which 3.3
+    was the increment to build. What is still true, and is the part worth guarding, is that no
+    recorded response and no socket exists anywhere in this package — so the whole model layer is
+    still provable offline with no key.
     """
     for name, source in _package_sources().items():
-        # No module is skipped. `_constructed` collects call sites only, so a class *definition* is
-        # never in its output — the exemptions that used to sit here for `llm/schema.py` and
-        # `db/control.py` protected nothing the walker would have flagged, while blinding the check
-        # inside the two modules most able to build one. A reviewer walked straight through them.
-        assert "ProposalPrompt" not in _constructed(source), f"{name} builds a prompt"
-
-        if name == "db/control.py":
-            # M1.2 built `treatment_proposal` with `prompt_hash` and `cassette_id` columns for 3.3
-            # to fill. A declared column is not a workflow — what must not exist is code that
-            # *populates* one, which the loop over every other module below is what checks.
-            continue
         identifiers = _code_identifiers(source)
-        for forbidden in ("prompt_hash", "cassette_id", "assemble_evidence", "EvidenceAssembler"):
-            assert forbidden not in identifiers, f"{name} uses {forbidden}"
+        for forbidden in ("Cassette", "record_cassette", "replay_cassette"):
+            assert forbidden not in identifiers, f"{name} uses {forbidden}: 3.4 owns cassettes"
+
+        # `cassette_id` is a column M1.2 declared for 3.4, and 3.3 writes `None` into it. Naming
+        # the field is not owning the harness; *setting* it would be, so the assertion is about the
+        # value rather than the identifier.
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.keyword) and node.arg == "cassette_id":
+                assert isinstance(node.value, ast.Constant) and node.value.value is None, (
+                    f"{name} records a cassette id, which is 3.4's increment"
+                )
+
+    assert not (PACKAGE_ROOT / "cassettes").exists()
+    assert not (PACKAGE_ROOT.parents[1] / "tests" / "cassettes").exists()
 
 
-def test_nothing_persists_a_proposal() -> None:
-    """The M1.2 table exists and stays empty. Writing it is 3.3's increment, not this one."""
+def test_only_the_assembler_persists_a_proposal() -> None:
+    """3.3 records a proposal. Nothing else in the package may.
+
+    This fence used to read "the table stays empty; writing it is 3.3's increment, not this one" —
+    and it survived 3.3, which *is* that increment and does write the table. It passed only because
+    ``service.py`` imports the ORM class as ``TreatmentProposal as TreatmentProposalRow`` and the
+    walker records the call *identifier*. Two reviewers found it independently: a false green, from
+    an alias, in a guard whose whole job is to notice this.
+
+    Resolved by name rather than by alias now, and scoped to the one module allowed to do it.
+    """
     for name, source in _package_sources().items():
-        assert "TreatmentProposal" not in _constructed(source), (
-            f"{name} constructs a proposal; persistence is 3.3"
-        )
+        if name == PERSISTENCE_MODULE:
+            continue
+        for constructed in _proposal_constructors(source):
+            raise AssertionError(f"{name} constructs {constructed}; persistence is the assembler's")
+
+    assert _proposal_constructors(_package_sources()[PERSISTENCE_MODULE]), (
+        "the assembler no longer persists a proposal, and this fence is measuring nothing"
+    )
+
+
+def _proposal_constructors(source: str) -> set[str]:
+    """Call sites of the ORM proposal row, resolved through any import alias.
+
+    ``import X as Y`` then ``Y(...)`` is invisible to a check that matches on the called name, and
+    that is exactly how the previous version of this fence was evaded — accidentally, by the
+    increment it was supposed to be watching.
+    """
+    tree = ast.parse(source)
+    aliases = {
+        alias.asname or alias.name.rsplit(".", 1)[-1]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom | ast.Import)
+        for alias in node.names
+        if alias.name.rsplit(".", 1)[-1] == "TreatmentProposal"
+    }
+    # The Pydantic contract shares the class name and is constructed at the provider boundary by
+    # design, so only the module that imports the *ORM* one is interesting.
+    if "ledger_exception_control_plane.db.control" not in source:
+        aliases = set()
+    return {name for name in _constructed(source) if name in aliases}
+
+
+@pytest.mark.parametrize(
+    ("label", "source", "detected"),
+    [
+        (
+            "a direct construction",
+            "from ledger_exception_control_plane.db.control import TreatmentProposal\n"
+            "row = TreatmentProposal()\n",
+            True,
+        ),
+        (
+            "the alias that evaded the old fence",
+            "from ledger_exception_control_plane.db.control import TreatmentProposal as Row\n"
+            "row = Row()\n",
+            True,
+        ),
+        (
+            "the Pydantic contract, which is not the row",
+            "from ledger_exception_control_plane.llm.schema import TreatmentProposal\n"
+            "value = TreatmentProposal()\n",
+            False,
+        ),
+    ],
+)
+def test_kill_an_aliased_proposal_write_is_detected(
+    label: str, source: str, detected: bool
+) -> None:
+    """The evasion, kept as a test so it cannot happen twice.
+
+    ``import X as Y`` then ``Y(...)`` is invisible to a check that matches on the called name, and
+    that is how the previous fence stayed green through the very increment it was watching. The
+    third case is the control: the Pydantic contract shares the class name and is constructed at
+    the provider boundary by design, so resolving by name alone would flag it wrongly.
+    """
+    assert bool(_proposal_constructors(source)) is detected
 
 
 def test_no_approval_posting_or_outbox_machinery_exists() -> None:

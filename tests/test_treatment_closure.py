@@ -995,20 +995,30 @@ def test_no_provider_sdk_is_a_dependency() -> None:
                 assert module.split(".")[0] not in providers, f"{path.name} imports {module}"
 
 
-def test_no_proposal_is_persisted_and_no_provenance_is_built() -> None:
-    """``treatment_proposal`` is a table M1.2 built. M3.2 defined the shape; nothing writes a row.
+def test_no_approval_or_adjustment_is_ever_written() -> None:
+    """``treatment_proposal`` is written at 3.3. Nothing past it is.
 
-    Narrowed from "nothing constructs a ``TreatmentProposal``", which stopped being true the moment
-    the response contract existed — the *Pydantic* model is constructed at the provider boundary by
-    design. The ORM row, the prompt hash and the cassette id are still 3.3's, and this is the part
-    of the original fence that survives.
+    This fence has been narrowed twice, and both narrowings were forced by the increment that made
+    the previous wording false. It first said nothing constructs a ``TreatmentProposal`` — untrue
+    once M3.2 defined the response contract, which is constructed at the provider boundary by
+    design. It then said nothing persists one or builds its provenance — untrue once M3.3 recorded
+    a proposal with its model id, version and prompt hash, which is that increment's stated
+    deliverable.
 
-    ``rationale=`` stayed. It was dropped in the first draft of this narrowing along with the two
-    clauses that genuinely had expired, and a reviewer pointed out that it had not: nothing under
-    ``src/`` assigns it as a keyword, the contract declares it as an annotation, and it is the only
-    fence anywhere that would catch model free text being written into an unrelated record.
+    What survives is the claim no increment so far has touched: **no approval exists and no
+    adjustment is ever written.** A proposal is a recommendation; FR-7 requires an explicit human
+    decision before any ledger write, and there is no code anywhere that could produce one.
+
+    ``rationale=`` is gone from this list for the same reason — 3.3 persists the model's rationale
+    as provenance, which is exactly what the column is for. The claim that replaced it is stronger
+    and lives in ``test_proposal_firewall.py``: the money path cannot name the rationale at all.
     """
     for path in sorted(PACKAGE_ROOT.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        for forbidden in ("prompt_hash=", "cassette_id=", "rationale="):
-            assert forbidden not in text, f"{path.name} builds proposal provenance"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        constructed = {
+            node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+        }
+        for forbidden in ("Approval", "Adjustment", "Outbox", "PostingAttempt"):
+            assert forbidden not in constructed, f"{path.name} constructs {forbidden}"

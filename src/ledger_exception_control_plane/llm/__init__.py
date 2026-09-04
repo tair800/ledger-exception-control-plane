@@ -9,20 +9,38 @@ numeric anywhere in its tree and no room for a field it does not name. :mod:`~.p
 vendor data stops. Between them, a provider can return an amount only by returning something that
 fails validation.
 
-Deliberately absent, and owned by later increments: evidence assembly and prompt construction
-(3.3), the cassette harness and any transport that speaks HTTP (3.4), persistence of a proposal,
-approval, and posting. This package cannot reach a database session, and a guard test keeps it
-that way.
+Deliberately absent, and owned by later increments: the cassette harness and any transport
+that speaks HTTP (3.4), approval, and posting. Exactly one module here touches a database — the
+assembler's persistence layer — and a guard test keeps the rest pure.
 """
 
 from __future__ import annotations
 
+from ledger_exception_control_plane.llm.evidence import (
+    CandidateEntryFact,
+    EvidenceItem,
+    ExceptionSubject,
+    assemble_evidence,
+    evidence_id_for,
+)
+from ledger_exception_control_plane.llm.flow import (
+    CitationError,
+    ProposalOutcome,
+    ProposalStatus,
+    propose_treatment,
+)
 from ledger_exception_control_plane.llm.port import (
     ProviderId,
     ProviderRequest,
     ProviderResponseError,
     Transport,
     TreatmentProposer,
+)
+from ledger_exception_control_plane.llm.prompt import (
+    SYSTEM_POLICY,
+    build_prompt,
+    canonical_payload,
+    prompt_hash,
 )
 from ledger_exception_control_plane.llm.schema import (
     EvidenceRef,
@@ -32,13 +50,26 @@ from ledger_exception_control_plane.llm.schema import (
 )
 
 __all__ = [
+    "SYSTEM_POLICY",
+    "CandidateEntryFact",
+    "CitationError",
+    "EvidenceItem",
     "EvidenceRef",
+    "ExceptionSubject",
+    "ProposalOutcome",
     "ProposalPrompt",
+    "ProposalStatus",
     "ProviderId",
     "ProviderRequest",
     "ProviderResponseError",
     "Transport",
     "TreatmentProposal",
     "TreatmentProposer",
+    "assemble_evidence",
+    "build_prompt",
+    "canonical_payload",
+    "evidence_id_for",
+    "prompt_hash",
     "proposal_wire_schema",
+    "propose_treatment",
 ]

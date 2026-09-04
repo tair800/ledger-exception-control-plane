@@ -2105,6 +2105,97 @@ holds: nothing constructs the ORM row or builds proposal provenance.
 
 ---
 
+## ADR-050 — What evidence a model may see, and how a candidate is chosen (M3.3)
+
+**Status:** Accepted (M3.3). Supersedes nothing; records two decisions and one gap that adversarial
+review forced into the open.
+
+### Only two of FR-5's five evidence kinds can be assembled
+
+FR-5 names dispute reason text, merchant memo, support-ticket notes, remittance references and
+candidate ledger entries. The system holds two of them.
+
+| Kind | Source | Assembled |
+|---|---|---|
+| `remittance_reference` | `settlement_line.psp_reference`, `merchant_reference`, `transaction_type` | **yes** |
+| `candidate_ledger_entry` | `ledger_entry`, selected as below | **yes** |
+| `merchant_memo` | a settlement-file column, parsed and validated at ingestion — and then dropped | no |
+| `dispute_reason` | no source system | no |
+| `support_ticket_note` | no source system | no |
+
+The memo one is the uncomfortable one and is worth stating plainly: `NormalisedLine.memo` exists,
+ingestion validates it, and `settlement_line` has no column to put it in, so it is discarded at
+persistence. The corpus deliberately contains empty and ambiguous memos as scenario features, which
+means the most discriminating evidence FR-5 names is the evidence this system throws away.
+
+Adding the column is a migration, an ingestion change and a regeneration of the byte-hashed fixture
+corpus — too much blast radius for the increment whose deliverable is the assembler, and a change
+that should be made deliberately rather than as a side effect. Recorded as **OPEN-14**.
+
+The enum keeps all five members. The taxonomy is what FR-5 asks for; `ASSEMBLED_KINDS` is what the
+system can produce, and a test asserts the three unavailable kinds are never emitted so that a
+future increment which starts persisting a memo has to change this decision on purpose.
+
+### A candidate is a near miss, not a would-be match
+
+**The first implementation had this exactly backwards, and the measurement is the argument.**
+
+It selected entries inside the matcher's own tolerance band — same currency, amount within the
+band, value date within the window. That set is by definition *the set that would have matched*: an
+entry inside it which is also unique is an entry the matcher took, and a matched line cannot carry
+an exception. So candidate evidence could only ever appear where the matcher was ambiguous or where
+the ledger had moved since. Across the committed corpora:
+
+| Corpus | Residuals | Residuals with candidate evidence |
+|---|---|---|
+| `canonical` @ 200 | 13 | **0** |
+| `bulk` @ 200 | 39 | **0** |
+| `bulk` @ 1000 | 207 | **2** |
+
+The two that did fire were the harmful case: a contested entry presented to *two* exceptions as an
+exact, same-day, unconsumed match, with the contest — the single fact that explains why those lines
+are exceptions — mentioned nowhere. Two proposals could each recommend rebooking against one ledger
+entry, which is the double-count the matcher's mutual-uniqueness rule exists to prevent, reintroduced
+one layer up.
+
+So the rule is inverted. A candidate is one of the **nearest** unconsumed entries in the same
+currency within a wide date window:
+
+* **Currency** must match. A cross-currency comparison is not a near miss, it is a different
+  question, and §7 forbids implicit FX anywhere.
+* **`EVIDENCE_WINDOW_DAYS = 35`**, deliberately wider than the matcher's one-day window. The
+  matcher's window is an eligibility filter; this is a relevance filter, and five weeks covers the
+  cross-period cases the taxonomy names.
+* **Ranked by proximity** — absolute amount delta, then day delta, then `external_ref`, then the
+  entry id as a total tie-break — so the order is deterministic and the closest survive the cap.
+* **`MAX_CANDIDATES = 5`**, with the number omitted stated in the pack. A cap rather than a token
+  budget, because the specification sets no budget and inventing one would be inventing a number.
+  It exists because the fan-out is otherwise quadratic in the commonest ambiguity shape: 30
+  identical charges produce 30 exceptions of 31 items each, 930 rows from one settlement file.
+
+Every candidate carries **why the matcher did not take it** — `inside_tolerance_unmatched`,
+`outside_amount_band`, `outside_date_window`, or both. The first of those is the label that fixes
+the contested-entry case: an entry the matcher was eligible to take and did not take was refused,
+and saying so is the difference between evidence and a trap.
+
+The predicate calls `TolerancePolicy.band` and `.within_window` — the matcher's own API — rather
+than reimplementing the arithmetic. The first version inlined it and claimed it "cannot drift from
+the matcher because it is the matcher's own policy object"; a reviewer changed the matcher's
+semantics through that API and the assembler carried on unaffected. The policy *data* was shared;
+the predicate was a copy.
+
+### Selection is by explicit rule, never by resemblance
+
+There is no identifier relating a settlement line to a ledger entry in this system — `external_ref`
+is a GL reference and has nothing to do with a merchant's own — so "same merchant, therefore
+relevant" was not merely unacceptable, it was unavailable. Proximity in amount and date is the only
+relationship there is, it is the same one the matcher uses, and every candidate states its distance
+so a reader can see how weak or strong the resemblance is.
+
+Cross-exception isolation does not rest on that, though. It rests on the evidence id: `uuid5` over
+`(exception_id, kind, discriminator)`, so the same ledger entry offered to two exceptions produces
+two ids and neither exception's citation can resolve to the other's evidence.
+
 ---
 
 # Open decisions
@@ -2123,6 +2214,31 @@ Anthropic (`claude-opus-5`) and OpenAI (`gpt-5.4-mini-2026-03-17`), pinned 2026-
 vendors, both with enforced structured output by different mechanisms, and genuinely different
 response shapes — which is what makes the port's portability claim testable rather than asserted.
 Not tier-matched; 3.5 may re-pin for a fair `Measured` comparison. See ADR-049.
+
+## OPEN-13 — Recording which evidence pack a proposal was shown
+
+**Must decide:** whether `treatment_proposal` gains a column identifying the pack sent with the
+request, or whether the citation table is widened from "evidence the model cited" to "evidence the
+model was shown".
+**Why:** `prompt_hash` proves what was sent, and checking it later needs the pack. Evidence rows are
+never rewritten — correctly, since an audit record that silently updated itself would be worse — so
+a fresh assembly after the ledger moves produces a different pack from the one an older proposal
+saw, and that proposal's hash is no longer re-derivable from the database. Two reviewers
+demonstrated it at M3.3.
+**Constraint:** a column is a migration, which M3.3 did not own.
+**Needed before:** the console shows an auditor what a model was given (M7), or the evaluation gate
+replays a recorded call (M3.4).
+
+## OPEN-14 — Whether `settlement_line` should persist the merchant memo
+
+**Must decide:** whether to add a `memo` column, persist it at ingestion, and extend the fixture
+corpus, so `merchant_memo` becomes assemblable evidence.
+**Why:** FR-5 names it, ingestion already parses and validates it, and the corpus deliberately
+contains empty and ambiguous memos as scenario features — so the most discriminating evidence the
+requirement names is currently discarded at persistence. See ADR-050.
+**Constraint:** a migration, an ingestion change, and a regeneration of the byte-hashed corpus.
+**Needed before:** the measured provider comparison (M3.5) claims to be evaluating models on the
+evidence FR-5 specifies.
 
 ## OPEN-6 — Evaluation threshold for the CI gate
 

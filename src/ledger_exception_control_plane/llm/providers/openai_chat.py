@@ -19,6 +19,7 @@ offline.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Final
 
@@ -47,6 +48,13 @@ _PATH: Final = "/v1/chat/completions"
 #: Names the schema in the provider's own error messages. Not part of the contract.
 _SCHEMA_NAME: Final = "treatment_proposal"
 
+#: The trailing ``YYYY-MM-DD`` OpenAI puts on a pinned snapshot.
+#:
+#: A first attempt split on the last hyphen and read ``17`` off ``gpt-5.4-mini-2026-03-17``,
+#: so every model reported ``unversioned`` — the fix for one reviewer's finding introducing a
+#: quieter version of the same thing, caught only because the check was re-run.
+_DATED_SNAPSHOT: Final = re.compile(r"-(\d{4}-\d{2}-\d{2})$")
+
 
 class OpenAIChatProposer:
     """Implements :class:`~..port.TreatmentProposer` over Chat Completions."""
@@ -62,6 +70,20 @@ class OpenAIChatProposer:
     @property
     def model_id(self) -> str:
         return self._model_id
+
+    @property
+    def model_version(self) -> str:
+        """The version this vendor publishes, for the model actually called.
+
+        OpenAI's identifiers embed a dated snapshot, and the date is the version: the same family
+        on two snapshots is two models. Parsed out of the identifier in use rather than returned as
+        a constant — a reviewer overrode the id and the row still claimed the pinned snapshot date,
+        naming a model that was never called.
+
+        An identifier with no dated suffix reports ``unversioned`` rather than guessing.
+        """
+        dated = _DATED_SNAPSHOT.search(self._model_id)
+        return dated.group(1) if dated else "unversioned"
 
     def build_request(self, prompt: ProposalPrompt) -> ProviderRequest:
         """The wire body. Same schema object, different envelope around it.

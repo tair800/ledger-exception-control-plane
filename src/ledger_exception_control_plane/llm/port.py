@@ -119,9 +119,11 @@ class Transport(Protocol):
 class TreatmentProposer(Protocol):
     """The port. One method, one return type, no vendor vocabulary.
 
-    ``provider`` and ``model_id`` are on the interface because a proposal without them is not
-    reproducible: the audit trail has to answer *which model said this*, and OPEN-5 pins the
-    identifiers precisely so a measured result means something later.
+    ``provider``, ``model_id`` and ``model_version`` are on the interface because a proposal
+    without them is not reproducible: the audit trail has to answer *which model said this*, and
+    OPEN-5 pins the identifiers precisely so a measured result means something later. 3.3 persists
+    all three, which is why the version is a declared property rather than something a caller has
+    to know — and the two vendors version differently, so it is the adapter that knows how.
 
     Raises :class:`ProviderResponseError` if the answer is not a valid proposal, and
     :class:`ProviderUnavailableError` if there was no answer. Nothing else escapes.
@@ -132,5 +134,8 @@ class TreatmentProposer(Protocol):
 
     @property
     def model_id(self) -> str: ...
+
+    @property
+    def model_version(self) -> str: ...
 
     async def propose(self, prompt: ProposalPrompt) -> TreatmentProposal: ...

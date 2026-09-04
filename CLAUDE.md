@@ -20,13 +20,15 @@ amount.
 **Status: implementation in progress.** M0 (scaffold, stack), M1 (schema, fixture corpus) and all
 of M2 (ingestion, deterministic matching, residual classification, and the deterministic adjustment
 calculator) are complete; **increment 3.1 — the treatment-enum closure gate — has passed** (ADR-048);
-and **3.2 has delivered the provider port and the closed proposal contract**, with OPEN-5 resolved to
-Anthropic and OpenAI (ADR-049). **M3.3 — evidence assembly and the proposal flow — is next.**
+**3.2 delivered the provider port and the closed proposal contract**, with OPEN-5 resolved to
+Anthropic and OpenAI (ADR-049); and **3.3 has delivered deterministic evidence assembly, prompt
+construction and the proposal flow**, recording proposals with their model id, version and prompt
+hash (ADR-050). **M3.4 — the cassette recording harness — is next.**
 
-The model layer exists as a *shape*, not as a call: no provider SDK is a dependency, nothing under
-`llm/` imports an HTTP client, and no live request is made anywhere. Nothing beyond that is
-implemented: no evidence assembly, no prompt construction, no proposal is ever persisted, no approval
-workflow, no ledger adapter, no dispatcher, no console, and no `adjustment` is ever persisted yet.
+The model layer still makes **no live call**: no provider SDK is a dependency, nothing under `llm/`
+imports an HTTP client, and no transport that speaks HTTP exists — the flow is exercised entirely
+through injected fakes. Nothing beyond that is implemented: no cassettes, no evaluation, no approval
+workflow, no ledger adapter, no dispatcher, no console, and no `adjustment` is ever persisted.
 `PROJECT_STATUS.md` is the authority on exactly what exists.
 
 ---
