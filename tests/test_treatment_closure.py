@@ -54,7 +54,14 @@ from ledger_exception_control_plane.classification import (
     classify,
     movement_type,
 )
-from ledger_exception_control_plane.db.control import ExceptionClassification, TreatmentCode
+from ledger_exception_control_plane.db.control import (
+    Adjustment,
+    Approval,
+    ExceptionClassification,
+    Outbox,
+    PostingAttempt,
+    TreatmentCode,
+)
 from ledger_exception_control_plane.fixtures.generator import generate
 from ledger_exception_control_plane.fixtures.schema import Profile
 from ledger_exception_control_plane.matching import (
@@ -1003,9 +1010,19 @@ def _package_sources() -> dict[str, str]:
     }
 
 
-#: The one module allowed to create an ``adjustment`` row. Everything else stays out of the money
-#: path's persistence entirely.
-ADJUSTMENT_WRITER: Final = "operations/service.py"
+#: Exactly which module may write each guarded entity. Everything absent from this map is forbidden
+#: outright, everywhere.
+#:
+#: ``Approval`` is not here and must not be: FR-7 requires an explicit human decision before any
+#: ledger write, the gate that records one is 5.1, and nothing may manufacture its own authority.
+ENTITY_WRITERS: Final = {
+    "Adjustment": "operations/service.py",
+    "Outbox": "operations/service.py",
+    "PostingAttempt": "operations/dispatcher.py",
+}
+
+#: Kept as its own name because several tests and their kill tests read it directly.
+ADJUSTMENT_WRITER: Final = ENTITY_WRITERS["Adjustment"]
 
 
 #: The table each guarded ORM class maps to, for the raw-SQL half of the scan.
@@ -1078,40 +1095,195 @@ def _written_entities(source: str) -> set[str]:
     return written
 
 
-def assert_only_one_module_writes_an_adjustment(sources: Mapping[str, str]) -> None:
-    """No approval is ever created, and exactly one module constructs an adjustment.
+#: The module allowed to change a guarded row that already exists.
+#:
+#: One module for the whole set, which is why :func:`_mutated_columns` does not need to work out
+#: *which* entity an attribute belongs to — an ambiguity it could not resolve anyway, since
+#: ``state`` is a column of both ``Outbox`` and ``PostingAttempt`` and ``posting_ref`` of both
+#: ``Adjustment`` and ``PostingAttempt``.
+ENTITY_MUTATOR: Final = "operations/dispatcher.py"
 
-    This fence has now been narrowed three times, and every narrowing was forced by the increment
+#: Every mapped column of every guarded entity, read off the ORM rather than typed out here.
+#:
+#: Introspected on purpose: a hand-written list silently stops covering a column added later, and
+#: the column added later is exactly the one a new write would use.
+GUARDED_COLUMNS: Final[frozenset[str]] = frozenset(
+    column.key
+    for entity in (Adjustment, Outbox, PostingAttempt, Approval)
+    for column in entity.__table__.columns
+)
+
+
+def _holds_a_guarded_row(source: str) -> bool:
+    """Whether a module imports a guarded entity, and so could be holding one to mutate.
+
+    The scope limiter for the mutation fence. Without it the scan fires on ``self.state = ...`` in
+    any module at all, because these column names are ordinary words; with it the fence sees every
+    module that could actually have a mapped instance in hand. Reaching one through a relationship
+    (``outbox.adjustment.posting_ref``) still requires querying for the parent, which requires the
+    class, so the limiter does not open a route around itself.
+    """
+    guarded = {"Adjustment", "Outbox", "PostingAttempt", "Approval"}
+    return any(
+        alias.name in guarded
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    )
+
+
+def _mutated_columns(source: str) -> set[str]:
+    """Every guarded column this module assigns to as an attribute.
+
+    **The fifth route into a guarded table, and the one that walked past the other four.** Those
+    four all watch a row *coming into existence* — construction, ``insert(Entity)``, an aliased
+    constructor, raw ``INSERT``. None of them sees ``adjustment.posting_ref = ref``, which changes a
+    committed financial record without naming a class, a table or a DML verb anywhere in the
+    statement. A reviewer pointed out that the dispatcher does precisely this to three entities, so
+    the fence was asserting "exactly ``operations/service.py`` writes an ``Outbox``" while another
+    module updated outbox rows on every single dispatch.
+
+    ``AnnAssign`` is included so a type-annotated assignment cannot slip past, and ``AugAssign`` so
+    ``attempt_count += 1`` — an increment of a persisted counter — counts as the write it is.
+    """
+    mutated: set[str] = set()
+
+    for node in ast.walk(ast.parse(source)):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AugAssign | ast.AnnAssign):
+            targets = [node.target]
+
+        for target in targets:
+            candidates = target.elts if isinstance(target, ast.Tuple) else [target]
+            mutated.update(
+                element.attr
+                for element in candidates
+                if isinstance(element, ast.Attribute) and element.attr in GUARDED_COLUMNS
+            )
+
+    return mutated
+
+
+def assert_only_one_module_mutates_a_guarded_row(sources: Mapping[str, str]) -> None:
+    """Exactly one module may change a guarded row in place, and it is the dispatcher.
+
+    The companion to :func:`assert_only_one_module_writes_an_adjustment`, and the two divide the
+    question the way the increments do: 4.1 and 4.2's service *create* these rows, 4.2's dispatcher
+    *settles* them. Neither fence is the other's weaker form — a module can pass one and fail the
+    other, which is why they are split rather than either being widened.
+
+    The allowed module must actually mutate something. A fence that passes because its subject
+    stopped doing the thing has become a comment, and this project has already had one of those.
+    """
+    inspected = 0
+    mutators: set[str] = set()
+    for name, source in sources.items():
+        if name.startswith("db/") or not _holds_a_guarded_row(source):
+            continue
+        inspected += 1
+        if _mutated_columns(source):
+            mutators.add(name)
+
+    assert inspected >= 2, "the mutation fence is not seeing the modules that hold guarded rows"
+    assert mutators == {ENTITY_MUTATOR}, (
+        f"exactly {ENTITY_MUTATOR} may change a guarded row in place; found {sorted(mutators)}"
+    )
+
+
+def test_only_one_module_mutates_a_guarded_row() -> None:
+    assert_only_one_module_mutates_a_guarded_row(_package_sources())
+
+
+def test_kill_an_in_place_write_to_a_guarded_row_is_detected() -> None:
+    """The hole, demonstrated. This injection leaves all four creation routes untouched."""
+    clean = _package_sources()["operations/service.py"]
+    sources = dict(_package_sources())
+    sources["operations/service.py"] = (
+        clean + "\ndef _rogue(adjustment):\n    adjustment.posting_ref = 'x'\n"
+    )
+
+    assert _written_entities(sources["operations/service.py"]) == _written_entities(clean), (
+        "the creation fence cannot see this, which is the whole reason the mutation fence exists"
+    )
+
+    with pytest.raises(AssertionError, match="may change a guarded row"):
+        assert_only_one_module_mutates_a_guarded_row(sources)
+
+
+def test_kill_an_augmented_write_to_a_guarded_row_is_detected() -> None:
+    """``attempt_count += 1`` is a write to a persisted counter, whatever it looks like."""
+    sources = dict(_package_sources())
+    sources["operations/service.py"] += "\ndef _rogue(outbox):\n    outbox.attempt_count += 1\n"
+
+    with pytest.raises(AssertionError, match="may change a guarded row"):
+        assert_only_one_module_mutates_a_guarded_row(sources)
+
+
+def test_kill_a_dispatcher_that_stopped_settling_rows_is_detected() -> None:
+    """The other direction, which is the half that rots quietly.
+
+    If the dispatcher stopped writing outcomes back, ``mutators`` would be empty and a fence phrased
+    as "no more than one" would pass — greenest at the moment the behaviour disappeared.
+    """
+    sources = dict(_package_sources())
+    sources[ENTITY_MUTATOR] = "from ledger_exception_control_plane.db.control import Outbox\n"
+
+    with pytest.raises(AssertionError, match="may change a guarded row"):
+        assert_only_one_module_mutates_a_guarded_row(sources)
+
+
+def test_kill_a_vacuous_mutation_scan_is_detected() -> None:
+    with pytest.raises(AssertionError, match="not seeing the modules"):
+        assert_only_one_module_mutates_a_guarded_row({})
+
+
+def test_the_guarded_column_set_is_read_off_the_orm() -> None:
+    """Introspected, so a column added tomorrow is guarded tomorrow rather than never."""
+    assert {"posting_ref", "last_outcome", "attempt_count", "resolved_at"} <= GUARDED_COLUMNS
+    assert len(GUARDED_COLUMNS) >= 25, "the ORM introspection returned implausibly little"
+
+
+def assert_only_one_module_writes_an_adjustment(sources: Mapping[str, str]) -> None:
+    """Each guarded entity is **created** by exactly one named module, and ``Approval`` by none.
+
+    This fence has now been narrowed four times, and every narrowing was forced by the increment
     that made the previous wording false. It first said nothing constructs a ``TreatmentProposal`` —
     untrue once M3.2 defined the response contract, which is constructed at the provider boundary by
     design. It then said nothing persists one or builds its provenance — untrue once M3.3 recorded a
     proposal with its model id, version and prompt hash. It then said **no adjustment is ever
-    written**, which 4.1 makes false: persisting the operation identifier before dispatch is that
-    increment's stated deliverable, and ``adjustment.operation_id`` is the column that holds it.
+    written**, which 4.1 made false. It then said **no ``Outbox`` and no ``PostingAttempt`` are ever
+    written**, which 4.2 makes false in the same way: the transactional outbox row and the
+    write-ahead attempt record are that increment's stated deliverables.
 
-    The replacement is deliberately not a weaker version of the old claim. "Nothing writes one" was
-    unfalsifiable once one thing legitimately did; **"exactly one module writes one"** is checkable,
-    fails loudly if a second appears, and fails just as loudly if the first stops — which is what
-    keeps it from decaying into a comment.
+    Each replacement has been the same move, and it is deliberately not a weaker version of the old
+    claim. "Nothing writes one" is unfalsifiable the moment something legitimately does;
+    **"exactly this module writes one"** is checkable, fails loudly if a second appears, and fails
+    just as loudly if the first stops — which is what keeps it from decaying into a comment.
 
-    ``Approval`` stays forbidden outright: FR-7 requires an explicit human decision before any
-    ledger write, the gate that records one is 5.1, and nothing at 4.1 may manufacture its own
-    authority. ``Outbox`` and ``PostingAttempt`` stay forbidden because dispatch intent and the
-    write-ahead attempt record are 4.2's, and an increment that quietly acquired them would make
-    the transactional boundary 4.2 has to prove untestable.
+    **This fence watches creation, and only creation.** All four routes below observe a row
+    coming into existence; none of them sees an existing row being changed in place, which is a
+    separate question with a separate answer — see
+    :func:`assert_only_one_module_mutates_a_guarded_row`. This docstring used to say "writes",
+    which reads as covering both and did not.
+
+    ``Approval`` is still forbidden outright, everywhere, and 5.1 is the increment entitled to
+    change that.
     """
-    writers: set[str] = set()
+    writers: dict[str, set[str]] = {entity: set() for entity in ENTITY_WRITERS}
     for name, source in sources.items():
         written = _written_entities(source)
-        for forbidden in ("Approval", "Outbox", "PostingAttempt"):
-            assert forbidden not in written, f"{name} writes {forbidden}"
-        if "Adjustment" in written:
-            writers.add(name)
+        assert "Approval" not in written, f"{name} writes Approval"
+        for entity in ENTITY_WRITERS:
+            if entity in written:
+                writers[entity].add(name)
 
     assert sources, "the guard inspected nothing"
-    assert writers == {ADJUSTMENT_WRITER}, (
-        f"exactly {ADJUSTMENT_WRITER} may write an Adjustment; found {sorted(writers)}"
-    )
+    for entity, expected in ENTITY_WRITERS.items():
+        assert writers[entity] == {expected}, (
+            f"exactly {expected} may write {entity}; found {sorted(writers[entity])}"
+        )
 
 
 def test_only_one_module_writes_an_adjustment() -> None:
@@ -1123,7 +1295,7 @@ def test_kill_a_second_adjustment_writer_is_detected() -> None:
     sources = dict(_package_sources())
     sources["llm/service.py"] = sources["llm/service.py"] + "\n_rogue = Adjustment(amount=1)\n"
 
-    with pytest.raises(AssertionError, match="may write an Adjustment"):
+    with pytest.raises(AssertionError, match="may write Adjustment"):
         assert_only_one_module_writes_an_adjustment(sources)
 
 
@@ -1134,22 +1306,7 @@ def test_kill_an_aliased_adjustment_writer_is_detected() -> None:
         sources["llm/service.py"] + "\nimport x as _y\n_rogue = _y.Adjustment(amount=1)\n"
     )
 
-    with pytest.raises(AssertionError, match="may write an Adjustment"):
-        assert_only_one_module_writes_an_adjustment(sources)
-
-
-def test_kill_losing_the_only_adjustment_writer_is_detected() -> None:
-    """The other direction, and the one a narrowed fence usually forgets.
-
-    A guard that only notices *extra* writers passes happily when the deliverable it was narrowed
-    for disappears — the fence would then be asserting something about an empty set and reading as
-    though 4.1 were still intact.
-    """
-    sources = {
-        name: source for name, source in _package_sources().items() if name != ADJUSTMENT_WRITER
-    }
-
-    with pytest.raises(AssertionError, match="may write an Adjustment"):
+    with pytest.raises(AssertionError, match="may write Adjustment"):
         assert_only_one_module_writes_an_adjustment(sources)
 
 
@@ -1164,15 +1321,30 @@ def test_kill_an_approval_written_anywhere_is_detected() -> None:
         assert_only_one_module_writes_an_adjustment(sources)
 
 
-@pytest.mark.parametrize("forbidden", ["Outbox", "PostingAttempt"])
-def test_kill_dispatch_machinery_written_anywhere_is_detected(forbidden: str) -> None:
-    """4.2's deliverables, kept out of 4.1 by the same fence."""
-    sources = dict(_package_sources())
-    sources["operations/service.py"] = (
-        sources["operations/service.py"] + f"\n_rogue = {forbidden}(id=1)\n"
-    )
+@pytest.mark.parametrize("entity", sorted(ENTITY_WRITERS))
+def test_kill_a_second_writer_of_any_guarded_entity_is_detected(entity: str) -> None:
+    """Each entity independently. A fence that only watched one would let the others drift.
 
-    with pytest.raises(AssertionError, match=f"writes {forbidden}"):
+    ``llm/service.py`` is the injection site because it is the module furthest from any legitimate
+    reason to write one of these — it persists proposals, and a proposal is a recommendation.
+    """
+    sources = dict(_package_sources())
+    sources["llm/service.py"] = sources["llm/service.py"] + f"\n_rogue = {entity}(id=1)\n"
+
+    with pytest.raises(AssertionError, match=f"may write {entity}"):
+        assert_only_one_module_writes_an_adjustment(sources)
+
+
+@pytest.mark.parametrize("entity", sorted(ENTITY_WRITERS))
+def test_kill_losing_the_writer_of_any_guarded_entity_is_detected(entity: str) -> None:
+    """The other direction, per entity: the deliverable disappearing must fail too."""
+    sources = {
+        name: source
+        for name, source in _package_sources().items()
+        if name != ENTITY_WRITERS[entity]
+    }
+
+    with pytest.raises(AssertionError, match="may write"):
         assert_only_one_module_writes_an_adjustment(sources)
 
 
@@ -1203,27 +1375,47 @@ def test_kill_a_second_adjustment_writer_by_any_route_is_detected(
     sources = dict(_package_sources())
     sources["llm/service.py"] = sources["llm/service.py"] + "\n" + injection + "\n"
 
-    with pytest.raises(AssertionError, match="may write an Adjustment"):
+    with pytest.raises(AssertionError, match="may write Adjustment"):
         assert_only_one_module_writes_an_adjustment(sources)
 
 
 @pytest.mark.parametrize(
-    ("label", "injection"),
+    ("label", "injection", "expected"),
     [
-        ("a core insert", "_rogue = insert(Outbox).values(id=1)"),
-        ("a dialect insert", "_rogue = pg_insert(PostingAttempt).values(id=1)"),
-        ("raw sql", '_rogue = text("INSERT INTO posting_attempt (id) VALUES (1)")'),
-        ("a raw approval write", '_rogue = text("INSERT INTO approval (id) VALUES (1)")'),
+        ("a core insert", "_rogue = insert(Outbox).values(id=1)", "may write Outbox"),
+        (
+            "a dialect insert",
+            "_rogue = pg_insert(PostingAttempt).values(id=1)",
+            "may write PostingAttempt",
+        ),
+        (
+            "raw sql",
+            '_rogue = text("INSERT INTO posting_attempt (id) VALUES (1)")',
+            "may write PostingAttempt",
+        ),
+        (
+            "a raw approval write",
+            '_rogue = text("INSERT INTO approval (id) VALUES (1)")',
+            "writes Approval",
+        ),
+        ("a raw outbox update", '_rogue = text("UPDATE outbox SET state = 1")', "may write Outbox"),
     ],
 )
-def test_kill_later_increment_machinery_by_any_route_is_detected(
-    label: str, injection: str
+def test_kill_a_guarded_write_by_any_route_is_detected(
+    label: str, injection: str, expected: str
 ) -> None:
-    """4.2's and 5.1's deliverables, kept out by the same widened scan."""
-    sources = dict(_package_sources())
-    sources["operations/service.py"] = sources["operations/service.py"] + "\n" + injection + "\n"
+    """Every route into a guarded table, from a module entitled to none of them.
 
-    with pytest.raises(AssertionError, match=r"writes (?:Outbox|PostingAttempt|Approval)"):
+    ``llm/service.py`` is the injection site deliberately: it legitimately writes nothing on this
+    list, so a hit there is unambiguous. Injecting into ``operations/service.py`` — which the
+    previous version of this test did — could no longer detect an ``Outbox`` write at all, because
+    that module is now the legitimate ``Outbox`` writer and the assertion would have been satisfied
+    by the very thing it was meant to catch.
+    """
+    sources = dict(_package_sources())
+    sources["llm/service.py"] = sources["llm/service.py"] + "\n" + injection + "\n"
+
+    with pytest.raises(AssertionError, match=expected):
         assert_only_one_module_writes_an_adjustment(sources)
 
 

@@ -3,15 +3,19 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M4.1 complete — claim locking and the retry-independent operation
-identifier, the first increment of the reliability phase. **Next:** M4.2.
+**Current milestone:** M4.2 complete — the transactional outbox and the capability-declaring
+ledger adapter. **Next:** M4.3 (bounded retry, backoff and the dead-letter queue).
 **The whole deterministic core exists.** A settlement file is ingested, normalised and either
 accepted or quarantined; its lines are matched deterministically against ledger entries with
 tolerance; every line that fails to match becomes exactly one classified exception; and an approved
 treatment for that exception can be priced into a financial instruction, or refused with a reason.
-What does *not* exist: anything that decides a treatment, approves one, or posts. There is no model,
-no approval workflow, no ledger adapter and no `adjustment` row — the calculator is a pure function
-and persists nothing.
+**An approved instruction can now be dispatched.** 4.1 gave it a retry-independent identifier and
+persisted it; 4.2 writes the outbox row in the same transaction as the state change, commits a
+write-ahead attempt record before every send, and posts through a ledger port whose guarantees are
+*declared and proven* rather than assumed. What still does not exist: anything that decides a
+treatment or approves one — there is no approval workflow and no console — and, inside the
+reliability phase, no retry, no dead-letter queue, no `UNKNOWN` recovery workflow and no chaos
+suite.
 
 ---
 
@@ -33,7 +37,8 @@ and persists nothing.
 | **3.3 Evidence assembly and proposal flow** | **DONE** | Stable evidence ids, canonical prompt and hash, citation subset validation, proposals recorded |
 | **3.4 Cassette recording harness** | **DONE** | Whole-request fingerprint match, scrubbing, fail-closed capture; the corpus replays offline through both adapters |
 | **4.1 Claim locking and operation identifier** | **DONE** | `SKIP LOCKED` claim proven under forced concurrency; identifier retry-independent, instruction-bound, approver-independent, and persisted before dispatch |
-| 4.2 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **4.2 Transactional outbox and ledger adapter** | **DONE** | Outbox written in the state change's transaction; write-ahead attempt record before every send; three-valued `PostingOutcome` and `QueryOutcome`; capability declared, proven by a conformance run, and branched on |
+| 4.3 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -695,6 +700,104 @@ accept the clean copy:
 Mutations are applied to in-memory copies — a parsed AST, a throwaway enum — so a crashed test cannot
 leave one in the money path, and a further test asserts none reached disk. A previous increment had a
 reviewer leave a mutation behind; this one is built so it cannot.
+
+## What M4.2 delivered
+
+The dispatch path, and the thing that makes a dispatch path safe to reason about: an adapter whose
+guarantees are **declared as data and proven by a run**, rather than assumed by the code that calls
+it. **No migration** — `outbox` and `posting_attempt` have existed since M1.2, with every constraint
+this increment relies on.
+
+### The outbox is written by the state change, not beside it
+
+`enqueue_posting()` writes the `adjustment` row and its `outbox` row in the caller's single
+transaction. There is no window in which one is durable and the other is not, because there is no
+second transaction for a crash to fall between. `record_operation()` is unchanged and still writes no
+outbox row — persisting an identifier and intending to send it stay separable, which is what 4.1's
+ordering was for.
+
+**At-least-once, and only that.** The outbox guarantees the intent cannot be lost. It says nothing
+about delivery happening once, and no document in this repository now says otherwise.
+
+### The port is closed, three-valued and structurally typed
+
+`PostingOutcome` is five variants — `Confirmed`, `Rejected`, `Throttled`, `Unknown`,
+`PartiallyApplied` — and `QueryOutcome` is three: `Found`, `NotFound`, `Indeterminate`. An adapter
+whose `post` cannot express `Unknown`, or whose query cannot express `Indeterminate`, is refused at
+`assert_admissible()`. So is one whose return type is `PostingOutcome | None`: a union that also
+admits `None` has not expressed the outcome, it has smuggled a two-valued answer back in beside it.
+
+The query capability is expressed as **typed absence** — a separate `QueryableLedgerAdapter`
+protocol — rather than a method that raises. An adapter that cannot be queried has no method to call,
+which the type checker enforces before anything runs.
+
+### Capability is declared, proven, and only then believed
+
+`capabilities()` returns a declaration. `capabilities_for()` returns the declaration with every
+unproven strong claim downgraded to `NONE`, and it is the only supported way to obtain a record a
+caller may act on. A guard test asserts the dispatcher calls it and never the raw method.
+
+Evidence is keyed on the **implementation class**. The first version keyed it on `adapter.name`, so a
+class declaring `name = "simulated-ledger"` inherited the reference adapter's proven capabilities and
+the effectively-once bar with them. A second test re-runs the conformance suite against every
+implementation in the committed record and fails if the record and the behaviour disagree.
+
+### The dispatcher branches, and where it cannot act it refuses
+
+Three transactions: read the intent and check the gate; commit the write-ahead attempt record;
+record what came back. A crash between the second and the send leaves an `in_flight` attempt with no
+outcome, which §12.1.1 defines as `UNKNOWN`.
+
+After an ambiguous outcome — a recorded `UNKNOWN` or `PARTIALLY_APPLIED`, **or an unresolved
+in-flight attempt** — a further send is refused unless the effective capability is `ENFORCES_KEY`.
+Where the adapter is queryable, the refusal names reconciliation; where it is neither, manual
+recovery. 4.2 names the routes and walks neither: the bounds, the reconciliation and the recovery
+queue are 4.4's.
+
+**Concurrency is settled by the write-ahead insert, not by the row lock.** The gate's `FOR UPDATE` is
+released when its transaction commits, because §12.1.1 requires the attempt record to be committed
+separately. `uq_posting_attempt_adjustment_no` is what stops two dispatchers sending attempt *N*, and
+the loser is refused rather than promoted to *N+1*.
+
+### What this increment did not build
+
+No dispatcher loop, no retry, no backoff, no DLQ, no replay (4.3). No `UNKNOWN` reconciliation
+workflow, no idempotency-window or inflight-window enforcement, no supersession interlock, no
+manual-recovery queue (4.4). No naive baseline and no chaos suite — **the kill-test gate is at 4.5
+and has not run** (ADR-053). No approval gate, no audit events, no console, no evaluation, no
+deployment. A guard test asserts the dispatcher contains no loop, imports nothing that schedules, and
+has no parameter that could express a batch.
+
+### The claim, at the strength it holds
+
+1. **Internal processing** — unconditional: two workers cannot claim one residual, at most one
+   `adjustment` per `operation_id`.
+2. **The transactional outbox** — at-least-once.
+3. **Duplicate dispatch prevention** — bounded by what this system knows.
+4. **Adapter capability** — declared data, downgraded to `NONE` until proven.
+5. **An effectively-once financial side effect** — **conditional** on (1) plus a *verified*
+   `ENFORCES_KEY` or `BY_OPERATION_ID`. Otherwise the claim is withdrawn and the send refused.
+
+**No unconditional "exactly once" claim is made anywhere.** See ADR-054.
+
+## M4.2 verification
+
+```
+unit suite:           1318 passed, no database (whole default run)
+adapter suite:        70 passed (tests/test_ledger_adapter.py)
+dispatch suite:       32 passed against real PostgreSQL (tests/test_dispatch_postgres.py)
+whole suite:          1565 passed with the integration marker, real PostgreSQL
+coverage:             97.80% (gate 90%, whole suite against the real database)
+schema:               no migration; alembic reports no new upgrade operations
+```
+
+Every exit criterion was run rather than asserted. **Dispatch end to end** posts through the
+reference adapter and records the reference in both places. **The capability branch** is observed
+through the dispatcher for the two branches a shipped adapter can reach, and over constructed
+capability records for the third — which no adapter in this repository can reach, because reaching it
+needs a conformance run that proved the query and not the suppression. **The crash between the socket
+write and the response** is injected at the adapter and leaves an `in_flight` record with no outcome,
+a `pending` intent, and one application at the ledger.
 
 ## What M4.1 delivered
 

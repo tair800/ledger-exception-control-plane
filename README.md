@@ -4,7 +4,7 @@ PSP settlement files against the general ledger. Deterministic matching clears t
 proposes a treatment from a closed enum whose type has no numeric field. A chaos suite proves no
 double-post against a RED baseline that does.
 
-> ## Status: milestone M4.1 of 31
+> ## Status: milestone M4.2 of 31
 >
 > **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
 > liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
@@ -34,7 +34,8 @@ double-post against a RED baseline that does.
 > on a fingerprint of the whole request, so a changed prompt, schema, ceiling or model produces a
 > loud miss rather than a stale answer, and a cassette fault is never reported as a provider outage.
 >
-> Still no live call. The committed cassettes are **synthesised, not captured** — nothing in this
+> Still no live model call, and none from the ledger either: the reference adapter is a **simulated
+> ledger**, in-process, with no socket. The committed cassettes are **synthesised, not captured** — nothing in this
 > repository has ever spoken to a provider — and the file format records which a cassette is so that
 > a later measurement cannot be mistaken for evidence about a model.
 >
@@ -46,18 +47,37 @@ double-post against a RED baseline that does.
 > attempt five produce the identical value; changing any component of the instruction changes it;
 > changing only the approver does not.
 >
-> **What does not exist: anything that posts.** No approval is obtained by any workflow — approvals
-> are seeded directly in tests, and the gate that records one is M5.1. Nothing dispatches: there is
-> no outbox row, no write-ahead attempt record, no ledger adapter, no capability declaration, no
-> retry, no DLQ replay, no `UNKNOWN` handling, no recovery workflow, no audit emission and no chaos
-> suite. An `outbox` table is not a transactional outbox and a `posting_attempt` table is not a
-> write-ahead protocol.
+> And as of M4.2 — **the transactional outbox and a capability-declaring ledger adapter**. The
+> `adjustment` row and its dispatch intent are written in one transaction, so there is no window in
+> which one is durable and the other is not. A **write-ahead attempt record** is committed in its own
+> transaction before every send, so a crash between the socket write and the response leaves an
+> `in_flight` row with no outcome rather than no evidence at all. The adapter port is closed and
+> three-valued — `Confirmed`, `Rejected`, `Throttled`, `Unknown`, `PartiallyApplied` for a posting;
+> `Found`, `NotFound`, `Indeterminate` for a query — and an adapter that cannot express `Unknown` is
+> refused rather than adapted around.
 >
-> **No duplicate-suppression claim is made.** Sending an operation identifier to a ledger does not
-> make anything idempotent — it is a *request* for idempotent treatment, honoured only if the
-> provider implements one. What exists today is the internal half: at most one worker holds a
-> residual, and at most one adjustment exists per identifier. The conditional effectively-once
-> financial effect needs an adapter that declares its capabilities, and no adapter exists yet.
+> **Capability is declared as data, proven by a run, and only then believed.** An adapter publishes
+> what it can do; a conformance suite must demonstrate the two strong claims before either is
+> credited, and an unproven claim is read as `NONE`. The evidence is keyed on the implementation
+> class, so an adapter cannot inherit another's proven capabilities by adopting its name.
+>
+> **What does not exist: anything that decides or approves.** No approval is obtained by any workflow
+> — approvals are seeded directly in tests, and the gate that records one is M5.1. Inside the
+> reliability phase there is still no retry, no backoff, no DLQ or replay (M4.3); no `UNKNOWN`
+> reconciliation workflow, no idempotency-window enforcement, no supersession interlock and no
+> recovery queue (M4.4); **no naive baseline and no chaos suite — the kill-test gate is at 4.5 and
+> has not run**; and no audit emission, console, evaluation or deployment.
+>
+> **No unconditional duplicate-suppression claim is made.** Sending an operation identifier to a
+> ledger does not make anything idempotent — it is a *request* for idempotent treatment, honoured
+> only if the provider implements one. The transactional outbox is **at-least-once**: it guarantees
+> the intent cannot be lost, never that it is delivered once. A second send is refused for an
+> operation in a *known* terminal state, and refused after an ambiguous one unless the adapter's
+> *verified* capability permits it — where it does not, the automatic path stops rather than
+> guessing. The conditional effectively-once financial effect therefore holds for the reference
+> adapter shipped here, whose `ENFORCES_KEY` and `BY_OPERATION_ID` have a recorded conformance run
+> behind them, and is **withdrawn rather than reworded** for any adapter that has not.
+>
 > Everything below that is not listed as existing is a *specification of intended behaviour*.
 >
 > No measurement here is a result — the `Measured` table is an obligation the build must produce

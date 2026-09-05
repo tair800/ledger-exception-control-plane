@@ -42,6 +42,7 @@ NEEDS_THE_DATABASE: Final = (
     "match-verify",
     "classify-verify",
     "operations-verify",
+    "dispatch-verify",
 )
 
 

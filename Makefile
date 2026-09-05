@@ -4,7 +4,7 @@
         ps smoke build db-up test-db-init migrate migrate-down schema-verify fixtures \
         fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify \
         money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
-        operations-verify
+        operations-verify dispatch-verify ledger-verify
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -152,6 +152,14 @@ m2-demo-check: ## Fail if the committed snapshot has drifted from the pipeline
 
 operations-verify: test-db-init ## Prove the claim lock and the persisted identifier against real PostgreSQL
 	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_operations_postgres.py -m integration -p no:cacheprovider --no-cov
+
+# --- transactional outbox and ledger adapter (M4.2) ---
+
+ledger-verify: ## Prove the adapter capability contract and the conformance gate (no Docker needed)
+	uv run pytest tests/test_ledger_adapter.py -p no:cacheprovider --no-cov
+
+dispatch-verify: test-db-init ## Prove the outbox and one dispatch end to end against real PostgreSQL
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_dispatch_postgres.py -m integration -p no:cacheprovider --no-cov
 
 # --- recorded cassettes (M3.4) ---
 #

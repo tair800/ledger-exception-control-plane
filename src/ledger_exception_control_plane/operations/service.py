@@ -27,9 +27,14 @@ the amount was computed for the treatment the human actually authorised. Those t
 and both are refusals rather than reconciliations: pricing exception A and posting it under
 exception B's authorisation is a financial defect no amount of downstream care recovers from.
 
-**Nothing here dispatches.** No outbox row, no attempt record, no adapter, no socket. §12.3 is
-explicit that an operation identifier is a *request* for idempotent treatment and nothing more; what
-happens to it belongs to 4.2 and is conditional on a declared adapter capability (§13.5).
+**Two entry points, and the split is the point.** :func:`record_operation` records the identifier
+and nothing else — it is 4.1's primitive and writes no dispatch intent, which a scope test still
+pins. :func:`enqueue_posting` is 4.2's: it does the same work *and* writes the outbox row, in the
+caller's single transaction, so §13.2's guarantee holds by construction rather than by discipline.
+
+**Still nothing here sends.** No attempt record, no adapter call, no socket. §12.3 is explicit that
+an operation identifier is a *request* for idempotent treatment and nothing more; what happens to it
+belongs to the dispatcher, and is conditional on a declared adapter capability (§13.5).
 
 Three properties a caller has to know, because none is visible from the signature:
 
@@ -60,6 +65,7 @@ from ledger_exception_control_plane.db.control import (
     Adjustment,
     Approval,
     ApprovalDecision,
+    Outbox,
     TreatmentCode,
 )
 from ledger_exception_control_plane.money import (
@@ -79,6 +85,7 @@ __all__ = [
     "IdentifierContradictionError",
     "OperationRecord",
     "RecordingRefusedError",
+    "enqueue_posting",
     "record_operation",
 ]
 
@@ -311,3 +318,39 @@ async def record_operation(
     await session.flush()
 
     return OperationRecord(adjustment_id=adjustment.id, identity=identity, created=True)
+
+
+async def enqueue_posting(
+    session: AsyncSession, *, approval_id: uuid.UUID, instruction: AdjustmentInstruction
+) -> OperationRecord:
+    """Record the operation **and** its dispatch intent, in one transaction (§13.2, Guarantee 2).
+
+    *"The state change and the dispatch intent are written in a single database transaction. There
+    is no committed approval without an outbox row, and no outbox row without a committed
+    approval."* Both halves are the caller's single transaction here: this function flushes and
+    never commits, so if the caller rolls back, neither row exists — and if the caller commits, both
+    do. There is no window in which one is durable and the other is not, because there is no second
+    transaction for a crash to fall between.
+
+    **Deliberately at-least-once, and that is not a shortfall.** The outbox guarantees the intent is
+    not *lost*. It does not, and cannot, guarantee the intent is delivered only once — conflating
+    those two is, in the specification's words, the most common error in this pattern. Delivery is
+    the dispatcher's problem and duplicate *effect* is the adapter capability's.
+
+    Idempotent for the same reason :func:`record_operation` is: called twice for one approval it
+    returns the same record and adds no second intent. ``uq_outbox_adjustment_id`` is the guarantee
+    behind that, and this only spares the caller an integrity error where a no-op is the truth.
+    """
+    record = await record_operation(session, approval_id=approval_id, instruction=instruction)
+
+    existing = (
+        await session.execute(select(Outbox).where(Outbox.adjustment_id == record.adjustment_id))
+    ).scalar_one_or_none()
+    if existing is None:
+        # `state` and `attempt_count` take their column defaults — pending, zero. `next_attempt_at`
+        # stays NULL: scheduling is 4.3's, and a value written here would be this increment quietly
+        # deciding a retry policy nobody has specified.
+        session.add(Outbox(adjustment_id=record.adjustment_id))
+        await session.flush()
+
+    return record

@@ -160,6 +160,15 @@ jobs:
       - name: Verify claim locking and operation identity against real PostgreSQL
         run: uv run pytest tests/test_operations_postgres.py -m integration --no-cov
 
+      # The transactional outbox and one dispatch, end to end. Every property here is about
+      # persisted state and transaction boundaries: that the state change and the dispatch intent
+      # commit together or not at all, that the write-ahead attempt record is committed *before*
+      # the adapter is called, and that a crash between the send and the response leaves an
+      # in_flight row with no outcome. None of that is observable without a real server — the
+      # ordering proof in particular reads the table from a second connection mid-call.
+      - name: Verify the transactional outbox and dispatch against real PostgreSQL
+        run: uv run pytest tests/test_dispatch_postgres.py -m integration --no-cov
+
       # The authoritative coverage gate, and the only place it can be honest.
       #
       # The unit job cannot see `matching.service` or `classification.service` — their entire

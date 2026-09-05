@@ -690,7 +690,16 @@ def test_kill_an_aliased_proposal_write_is_detected(
 #: Concepts that would mean a later increment had started, matched at **any** depth and as either
 #: a module or a package: ``outbox``, ``outbox.py`` and ``operations/outbox.py`` are all the same
 #: arrival.
-LATER_MILESTONE_NAMES: Final = ("approval", "outbox", "dispatcher", "workers")
+#:
+#: ``dispatcher`` left this list at 4.2, the increment whose deliverables name it: "Outbox write in
+#: the same transaction as the state change; **dispatcher**; ledger adapter port". What replaced the
+#: filename ban is a shape check on the module itself, below.
+#:
+#: The rest stay. ``approval`` is 5.1's gate; ``workers`` is the background machinery 4.3's bounded
+#: retry needs; and ``outbox`` stays because **no module needs that name** — 4.2 writes the outbox
+#: row from the module that already owns adjustment writes, so a file under that name would mean a
+#: second dispatch path had appeared without review.
+LATER_MILESTONE_NAMES: Final = ("approval", "outbox", "workers")
 
 
 def _later_milestone_paths(root: pathlib.Path) -> list[str]:
@@ -716,39 +725,127 @@ def _later_milestone_paths(root: pathlib.Path) -> list[str]:
 
 
 def test_no_approval_posting_or_outbox_machinery_exists() -> None:
-    """4.1 delivers claim locking and an operation identifier. It delivers no dispatch path.
+    """4.2 delivers a dispatch unit. It delivers no retry loop, no worker and no approval gate.
 
-    ``operations/`` exists as of 4.1 and is deliberately not on this list: it holds the claim query,
-    the identifier derivation and the one module that persists an identifier. What it must not grow
-    is a dispatcher, a worker loop, an outbox writer or an approval gate — 4.2, 4.3 and 5.1
-    respectively.
+    ``operations/dispatcher.py`` exists as of 4.2 and is no longer forbidden — it is named in that
+    increment's deliverables. What the package must still not grow is a ``workers`` package (the
+    background machinery 4.3's bounded retry needs), an ``approval`` module (5.1's gate) or a module
+    named ``outbox``: the outbox row is written by the module that owns adjustment writes, so a file
+    under that name would mean a second dispatch path had appeared.
     """
     assert _later_milestone_paths(PACKAGE_ROOT) == []
 
 
-def test_kill_a_nested_dispatcher_is_detected(tmp_path: pathlib.Path) -> None:
+def assert_the_dispatcher_is_not_a_loop(source: str) -> None:
+    """The word ``dispatcher`` came off the fence, so what replaced it has to be checkable.
+
+    The plan gives 4.2 a "dispatcher" and gives 4.3 everything that would make one a loop:
+    exponential backoff, jitter, bounded attempts, a time budget. This asserts the shape rather
+    than trusting the docstring — a scheduling loop is what this fence used to prevent by forbidding
+    the filename, and removing the filename ban without replacing the claim would have been a
+    weakening dressed as a narrowing.
+    """
+    tree = ast.parse(source)
+
+    called = {
+        node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    }
+    for scheduling in ("sleep", "uniform", "random", "jitter", "backoff", "schedule"):
+        assert scheduling not in called, f"the dispatcher calls {scheduling}(): 4.3 owns scheduling"
+
+    for node in ast.walk(tree):
+        assert not isinstance(node, ast.While), "the dispatcher contains a while loop"
+        assert not isinstance(node, ast.For | ast.AsyncFor), "the dispatcher iterates"
+        assert not isinstance(node, ast.comprehension), "the dispatcher iterates a collection"
+
+    for module in _imports(source):
+        root = module.split(".")[0]
+        assert root != "asyncio", "the dispatcher schedules"
+        # A reviewer pointed out that the first version banned `sleep()` by name while leaving the
+        # module that provides it importable, so `time.sleep` and `random.random` were both one
+        # attribute access from a fence that read as closed.
+        assert root not in {"time", "random", "sched", "tenacity", "backoff"}, (
+            f"the dispatcher imports {module}: 4.3 owns retry, backoff and scheduling"
+        )
+
+    # The signature cannot express a batch. `dispatch_once(adjustment_id=...)` sends one operation
+    # because there is nowhere to put a second — which is a stronger statement than "it contains no
+    # loop", and survives a refactor that moves the loop somewhere else.
+    entries = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "dispatch_once"
+    ]
+    assert len(entries) == 1, f"expected exactly one dispatch_once, found {len(entries)}"
+    entry = entries[0]
+    parameters = {argument.arg for argument in entry.args.args + entry.args.kwonlyargs}
+    assert "adjustment_id" in parameters, "dispatch_once no longer takes one adjustment"
+    assert not (parameters & {"adjustment_ids", "batch", "limit", "batch_size", "operations"}), (
+        f"dispatch_once takes a batch parameter: {sorted(parameters)}"
+    )
+    assert entry.args.vararg is None, "dispatch_once takes a variable number of operations"
+
+
+def test_the_dispatcher_that_4_2_delivers_is_a_unit_and_not_a_loop() -> None:
+    assert_the_dispatcher_is_not_a_loop(_package_sources()["operations/dispatcher.py"])
+
+
+@pytest.mark.parametrize(
+    ("label", "injection"),
+    [
+        ("a sleep import", "import time"),
+        ("a retry library", "import tenacity"),
+        ("a scheduler", "import asyncio"),
+        ("a work loop", "def _drain(rows):\n    for row in rows:\n        pass"),
+        ("an async work loop", "async def _drain(rows):\n    async for row in rows:\n        pass"),
+        ("a while loop", "def _spin():\n    while True:\n        pass"),
+        ("a batch parameter", "async def dispatch_once(engine, *, adjustment_ids, batch): pass"),
+    ],
+)
+def test_kill_a_dispatcher_that_became_a_loop_is_detected(label: str, injection: str) -> None:
+    """The fence narrowing is only worth having if each shape it now names actually fails it.
+
+    **This calls the guard rather than re-deciding the question.** The first version computed
+    "does the mutated tree contain a loop or a scheduling import" in the test body — which is the
+    guard's own logic written twice, so it would have passed with the guard deleted. That is the
+    exact defect a reviewer found in the dispatcher-purity kill test, reproduced here while fixing
+    that one.
+
+    Injected into an in-memory copy. Nothing is written to disk, so a crashed test cannot leave
+    scheduling machinery in the dispatch path.
+    """
+    mutated = _package_sources()["operations/dispatcher.py"] + "\n" + injection + "\n"
+
+    with pytest.raises(AssertionError):
+        assert_the_dispatcher_is_not_a_loop(mutated)
+
+
+def test_kill_a_nested_later_milestone_module_is_detected(tmp_path: pathlib.Path) -> None:
     """The hole the widening closes, demonstrated rather than described.
 
-    Under the root-only check this planted file was invisible, because it is not at the package
-    root — which is precisely where 4.2's dispatcher would naturally land now that ``operations/``
-    exists.
+    Under the root-only check these planted files were invisible, because they are not at the
+    package root — which is precisely where a later increment's machinery would naturally land now
+    that ``operations/`` exists. ``dispatcher.py`` was one of them until 4.2 shipped one on purpose;
+    the names below are the ones still owned by increments that have not started.
     """
     (tmp_path / "operations").mkdir()
-    (tmp_path / "operations" / "dispatcher.py").write_text("", encoding="utf-8")
     (tmp_path / "operations" / "outbox.py").write_text("", encoding="utf-8")
+    (tmp_path / "operations" / "approval.py").write_text("", encoding="utf-8")
     (tmp_path / "workers").mkdir()
 
     assert _later_milestone_paths(tmp_path) == [
-        "operations/dispatcher.py",
+        "operations/approval.py",
         "operations/outbox.py",
         "workers",
     ]
-    assert not (tmp_path / "dispatcher.py").exists(), "the planted files are not at the root"
+    assert not (tmp_path / "outbox.py").exists(), "the planted files are not at the root"
 
 
 @pytest.mark.parametrize(
     "planted",
-    ["outbox.py", "dispatcher.py", "approval.py", "workers.py", "outbox/__init__.py"],
+    ["outbox.py", "approval.py", "workers.py", "outbox/__init__.py", "workers/__init__.py"],
 )
 def test_kill_each_later_milestone_shape_is_detected(tmp_path: pathlib.Path, planted: str) -> None:
     """Module *and* package, at depth. ``outbox.py`` was invisible to the first widened version."""
@@ -765,9 +862,14 @@ def test_kill_a_vacuous_later_milestone_scan_is_detected(tmp_path: pathlib.Path)
     assert any(PACKAGE_ROOT.rglob("*.py")), "the fence is being pointed at an empty package"
 
 
-#: The one module in ``operations/`` allowed to reach a database, mirroring the ``llm/`` fence.
+#: The modules in ``operations/`` allowed to reach a database, mirroring the ``llm/`` fence.
+#:
+#: ``dispatcher.py`` joined at 4.2: it reads the dispatch intent, commits the write-ahead attempt
+#: record and records the outcome, all of which are database work by definition. The list is still
+#: the point — ``identity.py`` stays off it, which is what keeps the derivation testable and
+#: copyable with no database at all.
 OPERATIONS_MODULES_THAT_MAY_REACH_A_DATABASE: Final = frozenset(
-    {"operations/claim.py", "operations/service.py"}
+    {"operations/claim.py", "operations/service.py", "operations/dispatcher.py"}
 )
 
 
@@ -818,7 +920,12 @@ def test_only_the_two_named_operations_modules_reach_a_database() -> None:
             assert module.split(".")[0] not in {"asyncpg", "alembic"}, f"{name} imports {module}"
         assert "AsyncSession" not in _code_identifiers(source), f"{name} reaches for a session"
 
+    # The floor is deliberately re-checked whenever the allowlist grows: widening it shrinks the
+    # pure half, and a scan with nothing left to inspect would pass for the worst possible reason.
     assert inspected >= 2, "the scan is not seeing the pure half of the operations package"
+    assert "operations/identity.py" not in OPERATIONS_MODULES_THAT_MAY_REACH_A_DATABASE, (
+        "the derivation must stay pure; it is copied into three later repositories"
+    )
 
 
 def test_no_transport_implementation_ships() -> None:
@@ -841,6 +948,225 @@ def test_no_transport_implementation_ships() -> None:
                 "aiohttp",
                 "ssl",
             }, f"{name} imports {module}: this layer performs no I/O"
+
+
+# ======================================================================================
+# 4.2 — the ledger package's own fences
+#
+# Three docstrings in `ledger/` each said "a guard test asserts ...". None of the three existed. A
+# cited guard that does not exist is worse than no guard at all, because it reads as evidence: a
+# later reader trusts the sentence instead of checking the property. These are those three tests.
+# ======================================================================================
+
+
+def _ledger_sources() -> dict[str, str]:
+    sources = {
+        name: source for name, source in _package_sources().items() if name.startswith("ledger/")
+    }
+    assert len(sources) >= 4, "the ledger package scan is not seeing the package"
+    return sources
+
+
+#: Names that hold money in this project, and therefore may never appear in an arithmetic
+#: expression inside the adapter layer.
+#:
+#: A vocabulary rather than a ban on arithmetic as such, and that was a correction made against a
+#: running test: the first version forbade every binary operation in the package and immediately
+#: caught ``self._application_count.get(op, 0) + 1``. That counter is an integer, it is the
+#: instrument the entire suppression proof rests on, and it is not money. A fence that has to be
+#: relaxed to let a correct line compile is a fence nobody will keep.
+MONEY_NAMES: Final = frozenset(
+    {"amount", "value", "total", "fee", "balance", "net", "gross", "sum"}
+)
+
+
+def _operand_names(node: ast.expr) -> set[str]:
+    """Every name and attribute mentioned anywhere in an expression."""
+    return {
+        child.id if isinstance(child, ast.Name) else child.attr
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name | ast.Attribute)
+    }
+
+
+def assert_the_ledger_package_never_computes_an_amount(sources: Mapping[str, str]) -> None:
+    """**M2.4 is the sole owner of every posted amount, and the adapter layer is downstream of it.**
+
+    `PROJECT_SPEC.md` §10.1 puts the amount into `PostingInstruction` as a value already computed,
+    already persisted and already past the database's own money constraints. An adapter that
+    re-derived, re-rounded or adjusted it would be a second money path — reachable, unreviewed, and
+    invisible to every test in `test_money.py`.
+
+    Three checks, because "does not compute an amount" has three distinct evasions:
+
+    1. **Arithmetic on a money-named operand.** ``instruction.amount * 2``.
+    2. **A `Decimal` built from something computed.** ``Decimal(str(x))`` launders a float through a
+       string and lands in a money column looking exactly like a legitimate literal. Only a string
+       *constant* is admissible, and the package has exactly one, in the conformance probe.
+    3. **A quantisation or scaling call.** ``.quantize()`` changes an amount with no arithmetic
+       operator appearing anywhere, which is how the rounding-mode defects this project's money
+       layer documents at length actually happen.
+    """
+    inspected = 0
+    for name, source in sources.items():
+        if not name.startswith("ledger/"):
+            continue
+        inspected += 1
+        tree = ast.parse(source)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.BinOp):
+                mentioned = _operand_names(node.left) | _operand_names(node.right)
+            elif isinstance(node, ast.AugAssign):
+                mentioned = _operand_names(node.target) | _operand_names(node.value)
+            else:
+                continue
+            offending = mentioned & MONEY_NAMES
+            assert not offending, f"{name} performs arithmetic on {sorted(offending)}"
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            called = (
+                node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+            )
+
+            if called == "Decimal":
+                argument = node.args[0] if node.args else ast.Constant(value=None)
+                assert isinstance(argument, ast.Constant) and isinstance(argument.value, str), (
+                    f"{name} builds a Decimal from a computed value; M2.4 owns every amount"
+                )
+
+            assert called not in {"quantize", "scaleb", "shift", "normalize", "fma"}, (
+                f"{name} calls {called}(): M2.4 owns quantisation and rounding"
+            )
+
+    assert inspected >= 4, "the money fence inspected too little to mean anything"
+
+
+def test_the_ledger_package_never_computes_an_amount() -> None:
+    assert_the_ledger_package_never_computes_an_amount(_package_sources())
+
+
+@pytest.mark.parametrize(
+    ("label", "injection", "expected"),
+    [
+        ("an adjusted amount", "_x = instruction.amount * 2", "arithmetic on"),
+        ("an accumulated total", "total += instruction.amount", "arithmetic on"),
+        ("a laundered float", "_x = decimal.Decimal(str(0.1))", "computed value"),
+        ("a requantisation", "_x = _stored.quantize(2)", "owns quantisation"),
+    ],
+)
+def test_kill_each_route_to_computing_an_amount_is_detected(
+    label: str, injection: str, expected: str
+) -> None:
+    """Every evasion the three checks are aimed at, each proven against the real fence.
+
+    Injected into an in-memory copy of the real source. Nothing is written to disk, so a crashed
+    test cannot leave arithmetic in the adapter layer.
+    """
+    sources = dict(_package_sources())
+    sources["ledger/simulated.py"] += "\n" + injection + "\n"
+
+    with pytest.raises(AssertionError, match=expected):
+        assert_the_ledger_package_never_computes_an_amount(sources)
+
+
+def test_the_money_fence_admits_the_counter_it_must_admit() -> None:
+    """The control. The simulated ledger's applied-count is an integer and must stay writable.
+
+    Without this, the obvious response to a future false positive is to relax the fence, and the
+    relaxation is never re-examined. The counter is named here so the next reader can see that
+    integer arithmetic was considered and permitted rather than overlooked.
+    """
+    assert not MONEY_NAMES & {"_application_count", "attempt_no", "_posts_received"}
+    assert "_application_count" in _package_sources()["ledger/simulated.py"]
+
+
+def test_kill_a_vacuous_money_fence_is_detected() -> None:
+    with pytest.raises(AssertionError, match="inspected too little"):
+        assert_the_ledger_package_never_computes_an_amount({})
+
+
+def test_nothing_branches_on_the_reserved_reversal_field() -> None:
+    """§10.1: *"`reversal` is RESERVED and consumed by nothing today."*
+
+    Declared so the capability record is complete and so OPEN-12 has somewhere to land — not so
+    anything can act on it. The distinction only survives if reading the field is checkable, and
+    the definition site plus the record that declares a value are the only two places entitled to
+    name it.
+    """
+    entitled = {"ledger/port.py", "ledger/simulated.py"}
+    for name, source in _package_sources().items():
+        if name in entitled:
+            continue
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Attribute):
+                assert node.attr != "reversal", f"{name} reads capabilities.reversal"
+
+    # And within the two entitled modules, no comparison or condition is built on it either: a
+    # declaration is a value, a branch is a consumer.
+    for name in entitled:
+        for node in ast.walk(ast.parse(_package_sources()[name])):
+            if isinstance(node, ast.Compare):
+                sides = [node.left, *node.comparators]
+                assert not any(
+                    isinstance(side, ast.Attribute) and side.attr == "reversal" for side in sides
+                ), f"{name} branches on reversal"
+
+
+def assert_the_dispatcher_reads_effective_capabilities(source: str) -> None:
+    """**The one call that separates a declared capability from a proven one.**
+
+    `capabilities_for()` returns the declaration with every unverified strong claim downgraded to
+    `NONE`; `adapter.capabilities()` returns whatever the adapter says about itself. §10.1 requires
+    anyone *branching* on capability to see the first. The dispatcher is the only module that
+    branches, so one direct call to the raw method would silently restore the "declaration is
+    evidence" behaviour the whole conformance suite exists to prevent — and it would look right.
+    """
+    called = {
+        node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+    }
+    assert "capabilities_for" in called, "the dispatcher no longer reads effective capabilities"
+    assert "capabilities" not in called, (
+        "the dispatcher calls adapter.capabilities() directly, skipping the conformance downgrade"
+    )
+
+
+def test_the_dispatcher_reads_effective_capabilities_and_never_the_raw_declaration() -> None:
+    assert_the_dispatcher_reads_effective_capabilities(
+        _package_sources()["operations/dispatcher.py"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "injection", "expected"),
+    [
+        ("the raw declaration", "_raw = adapter.capabilities()", "directly"),
+        ("the downgrade removed", None, "no longer reads"),
+    ],
+)
+def test_kill_a_dispatcher_that_skips_the_conformance_downgrade_is_detected(
+    label: str, injection: str | None, expected: str
+) -> None:
+    """Both directions, and the second is the one that rots quietly.
+
+    Reading the raw declaration is the evasion — it is one word shorter than the correct call and
+    looks right. Losing the ``capabilities_for`` call entirely is the other failure, and a fence
+    that only banned the raw call would go green the moment the downgrade stopped being applied at
+    all.
+    """
+    source = _package_sources()["operations/dispatcher.py"]
+    mutated = (
+        source + "\n" + injection + "\n"
+        if injection is not None
+        else source.replace("capabilities_for(", "_not_the_downgrade(")
+    )
+
+    with pytest.raises(AssertionError, match=expected):
+        assert_the_dispatcher_reads_effective_capabilities(mutated)
 
 
 def test_the_confidence_band_stays_canonical() -> None:

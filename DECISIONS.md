@@ -2603,6 +2603,147 @@ about a system that can.
 observability work or the deployment. Whoever runs 4.5 should treat a failure as the plan's exit
 criteria require — stop, not soften.
 
+## ADR-054 — Declared capability, proven capability, and what a dispatcher is allowed to conclude (M4.2)
+
+**Status:** Accepted. Records the decisions taken while building the transactional outbox and the
+capability-declaring ledger adapter. Six of them were forced by adversarial review of the first
+working version; each is written with the defect that produced it, because the defect is the reason
+the decision is not obvious.
+
+### 1. Evidence is keyed on the implementation, never on what the adapter calls itself
+
+`PROJECT_SPEC.md` §10.1 requires a conformance run before `ENFORCES_KEY` or `BY_OPERATION_ID` may be
+believed: *"Declaration is not evidence."* The first version stored that run against `adapter.name`
+and looked it up the same way — so a two-line class declaring `name = "simulated-ledger"` inherited
+the reference adapter's proven suppression and query, and with them the effectively-once bar, on the
+strength of a run against something else entirely. Four reviewers found it independently.
+
+Verification is now matched on `f"{cls.__module__}.{cls.__qualname__}"`, which cannot be adopted by
+assignment. `name` survives for messages and the human-readable record and decides nothing. Two
+regression tests hold the line in both directions: a forger taking the reference adapter's name gets
+`NONE`/`NONE`, and the reference adapter keeps its evidence under any name.
+
+A second test re-runs the conformance suite against every implementation named in the committed
+record and requires the outcome to match what the record claims. The record was the one link in the
+chain nobody was checking; a hand-written entry granted both strong claims with nothing behind it.
+
+### 2. The weakest default is not uniformly zero
+
+The capability record has three duration fields, and the first version set all three to zero
+reasoning that zero is the most conservative value. It is, for one of them.
+
+- `idempotency_window` **permits** a re-send — §13.5 allows one only while
+  `now - first_send < idempotency_window`. Undeclared must therefore mean *never*: zero.
+- `query_consistency` and `max_inflight_window` say **how long you must wait before believing a
+  negative answer**. `Eventual(visibility_bound=0)` behaves exactly like `LINEARIZABLE` for the only
+  rule that reads it — the strongest possible claim about read-after-write visibility, asserted on
+  behalf of an author who declared nothing. Undeclared must mean *a long lag*: `UNDECLARED_LAG`, one
+  day.
+
+Getting this backwards resolves the first `NotFound` immediately for a request still in flight,
+which is the §14 row whose consequence the specification states plainly: acting on it is a
+double-post.
+
+### 3. 4.2 owns the **refusal** half of §13.5's capability branch, and only that half
+
+The plan gives 4.2 a dispatcher and gives 4.4 the `UNKNOWN` reconciliation workflow, so the first
+version took no branch at all: it recorded an `Unknown` and stopped. Stopping is not the same as
+being unable to continue — called again, it would have sent again, from an ambiguous state, with
+nothing consulted. That is §13.5 clause 3's defect, *"do not blindly retry an irreversible financial
+write"*, reachable through a function this increment ships.
+
+The gate now reads the **effective** capability record and refuses unless it says `ENFORCES_KEY`:
+
+| Effective capability | Decision | Who walks the route |
+|---|---|---|
+| `idempotency == ENFORCES_KEY` | `PERMITTED` | the bounds are 4.4's |
+| `posting_identity_query == BY_OPERATION_ID` | `RECONCILE_FIRST` — refused here | 4.4 |
+| neither | `MANUAL_RECOVERY` — refused here | 4.4 |
+
+Refusing without the bounds is not implementing them; it is declining to act without them, which is
+what *"otherwise the automatic path stops"* asks for. `Throttled` is deliberately not ambiguous —
+§10.1 splits it out because it means the request was turned away before it could be applied.
+
+**The middle branch is unreachable through any adapter this repository ships**, because reaching it
+needs a conformance run that proved the query and not the suppression. It is tested where it can be
+tested honestly: `resend_decision()` is a pure function of the capability record, and all three
+branches are exercised over constructed records.
+
+### 4. The gate must read unresolved attempts, not just the recorded outcome
+
+`outbox.last_outcome` is written when a dispatch *completes*. A send that failed mid-flight — the
+crash §12.1.1 exists for — leaves it `NULL`, so a gate reading only that column was blind to the
+state the specification defines as `UNKNOWN`. The gate now also counts `IN_FLIGHT` attempts.
+
+### 5. Concurrent dispatch is settled by the write-ahead insert, not by the row lock
+
+Transaction 1 takes `FOR UPDATE` on the outbox row and then commits, releasing it before the send.
+§12.1.1 forces that: the write-ahead record must be committed in a transaction of its own, so no
+lock can be held from the gate across the socket write. Two dispatchers can therefore both pass the
+gate.
+
+What they cannot both do is insert attempt *N*: `uq_posting_attempt_adjustment_no` is unique on
+`(adjustment_id, attempt_no)`. The loser is **refused**, not silently promoted to attempt *N+1* — a
+caller that took the next number would be sending a second time precisely because someone else was
+already sending. The race test asserts the invariant rather than the interleaving (at most one
+application, measured at the ledger), because which branch runs is a scheduling accident.
+
+### 6. A posting reference that cannot be recorded is refused before the send
+
+An empty reference stores cleanly and then sits in the database looking exactly like evidence of a
+posting. A reference wider than the column raises a driver error in the transaction that records the
+outcome — *after* an irreversible write, leaving the attempt `IN_FLIGHT` and the reference lost.
+
+Both are refused in `Confirmed.__post_init__`, which moves the failure to before the socket write,
+where the write-ahead record's ordinary `UNKNOWN` semantics already cover it. `MAX_POSTING_REF` is
+asserted equal to the mapped column width so the two cannot drift.
+
+### 7. The applied-count is a counter, not a membership test
+
+The reference ledger's `applied_count()` returned `1 if operation_id in self._applied else 0`. It can
+never return 2, so the conformance suite's "applied-count == 1" was true by construction and would
+have survived the suppression being deleted. The instrument every duplicate-suppression claim in this
+project is measured against was incapable of reporting the failure it exists to detect.
+
+### 8. Creating a row and changing one are separate claims
+
+The fence asserting "exactly one module writes an `Adjustment`" watched four routes, all of them
+about a row coming into existence. None of them sees `adjustment.posting_ref = ref` — which changes a
+committed financial record without naming a class, a table or a DML verb — and the dispatcher does
+exactly that to three entities. The claim was broader than the check.
+
+There are now two fences: creation, and in-place mutation of any mapped column of a guarded entity.
+Each names exactly one module and fails both when a second appears and when the first stops.
+
+### 9. Fences enumerate what is excused, not what is watched
+
+The retry-independence fence listed the three modules it parsed. A module added by 4.3 or 4.4 would
+have sat outside it, watched by nothing, with the suite green — and this fence had already been
+widened once for exactly that reason. It now parses every module in the package except an explicit
+exemption dictionary, each entry carrying its reason. A planted module proves the inversion.
+
+### What is deliberately absent
+
+No dispatcher loop, retry, backoff, DLQ or replay (4.3). No `UNKNOWN` reconciliation workflow, no
+idempotency-window or inflight-window enforcement, no supersession interlock, no manual-recovery
+queue (4.4). No naive baseline and no chaos suite — **the kill-test gate is at 4.5 and has not run**
+(ADR-053). No approval gate (5.1), no audit events (5.2), no console, no evaluation, no deployment.
+
+### The reliability claim, at the strength it holds
+
+1. **Internal processing** — unconditional: two workers cannot claim one residual, and at most one
+   `adjustment` exists per `operation_id`.
+2. **The transactional outbox** — at-least-once, and only that.
+3. **Duplicate dispatch prevention** — bounded by what this system knows. A second send is refused
+   for an operation in a *known* terminal state, and after an ambiguous one unless capability permits
+   it. An outcome nobody observed constrains nothing.
+4. **Adapter capability** — declared data, read and branched on, downgraded to `NONE` until proven.
+5. **An effectively-once financial side effect** — **conditional** on (1) together with a *verified*
+   `ENFORCES_KEY` or `BY_OPERATION_ID` from (4). Where an adapter does not meet that bar the claim is
+   withdrawn rather than reworded, and the dispatcher refuses rather than guessing.
+
+**No unconditional "exactly once" claim is made anywhere**, and none may be added.
+
 ---
 
 # Open decisions

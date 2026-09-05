@@ -24,24 +24,37 @@ calculator) are complete; **increment 3.1 — the treatment-enum closure gate �
 Anthropic and OpenAI (ADR-049); **3.3 delivered deterministic evidence assembly, prompt construction
 and the proposal flow**, recording proposals with their model id, version and prompt hash (ADR-050);
 **3.4 delivered the cassette record/replay harness** — the whole corpus replays offline through
-both adapters, from a committed file, with no credential (ADR-051); and **4.1 has delivered claim
+both adapters, from a committed file, with no credential (ADR-051); **4.1 delivered claim
 locking and the retry-independent operation identifier**, the first increment of the reliability
-phase (ADR-052). **M4.2 is next.**
+phase (ADR-052); and **4.2 has delivered the transactional outbox and the capability-declaring
+ledger adapter** — the intent written in the state change's own transaction, a write-ahead attempt
+record before every send, and a port whose guarantees are declared as data, proven by a conformance
+run and branched on rather than assumed (ADR-054). **M4.3 is next.**
 
 The model layer still makes **no live call**: no provider SDK is a dependency, nothing under `llm/`
 imports an HTTP client, and no transport that speaks HTTP exists — the flow is exercised entirely
 through injected fakes and recorded cassettes. The committed cassettes are **synthesised, not
 captured**; the format records which a file is and a test asserts it, because 6.3 will publish
-measurements produced from cassettes and the difference must never be lost. Nothing beyond that is
-implemented: no evaluation, no scorer, no approval workflow, no ledger adapter, no dispatcher and
-no console.
+measurements produced from cassettes and the difference must never be lost.
 
-**An `adjustment` row is now written**, and that sentence used to say the opposite. 4.1 derives a
-retry-independent `operation_id`, binds it to the whole posting instruction, and persists it before
-anything could dispatch it — which is the increment's stated deliverable. Exactly one module may
-write that row and a guard test enforces it. What still does not exist is anything that *sends* one:
-no outbox row, no attempt record, no adapter, no socket. `PROJECT_STATUS.md` is the authority on
-exactly what exists.
+**Nor does the ledger side open a socket.** The reference adapter is an in-process simulated ledger,
+which is what lets the whole reliability layer be proven offline and in CI; a real adapter would
+need its capability profile established from a vendor's documentation rather than assumed, which is
+OPEN-11. Still not implemented: no evaluation, no scorer, no approval workflow, no retry or DLQ, no
+`UNKNOWN` recovery workflow, no chaos suite and no console.
+
+**An `adjustment` row is now written and can now be dispatched**, and both sentences used to say
+the opposite. 4.1 derives a retry-independent `operation_id`, binds it to the whole posting
+instruction and persists it before anything could dispatch it; 4.2 writes the outbox row in that
+same transaction, commits a write-ahead attempt record before every send, and posts through the
+adapter port. Exactly one module may create each guarded row and exactly one may change one in
+place; guard tests enforce both, separately, because creating a row and mutating one are different
+claims.
+
+What still does not exist is anything that sends *again*: no retry, no backoff, no DLQ, no replay,
+no reconciliation and no recovery queue. A second send after an ambiguous outcome is **refused**
+unless the adapter's verified capability permits it. `PROJECT_STATUS.md` is the authority on exactly
+what exists.
 
 ---
 
@@ -251,6 +264,14 @@ genuine sessions contending for one row — so it lives with the integration sui
 make operations-verify   # two workers, one residual; and the identifier, persisted
 ```
 
+The outbox and the adapter (M4.2). The capability contract and its conformance gate need no
+database; the outbox, the write-ahead record and the transaction boundaries need a real server:
+
+```bash
+make ledger-verify     # the port, the capability matrix and the conformance gate
+make dispatch-verify   # the outbox and one dispatch, end to end
+```
+
 Adding a dependency: `uv add <pkg>` for runtime, `uv add --dev <pkg>` for tooling. Both update
 `uv.lock`, which is committed. CI runs `--frozen`, so a dependency change that skipped the lockfile
 cannot reach `main`.
@@ -261,8 +282,11 @@ cannot reach `main`.
 
 - Python 3.12, typed throughout, Pydantic v2 for all boundary schemas.
 - `src/` layout: `db`, `fixtures`, `ingest`, `matching`, `classification`, `money`, `llm`,
-  `operations`, `demo`. The `outbox` and `workers` packages named in earlier drafts do not
-  exist and are forbidden by a guard test until the increment that owns them (4.2, 4.3).
+  `operations`, `ledger`, `demo`. `ledger/` arrived at 4.2 and holds the adapter port, the
+  conformance suite and the reference simulated ledger. A module or package named `outbox`,
+  `approval` or `workers` remains forbidden by a guard test at any depth: the outbox row is written
+  by the module that already owns adjustment writes, so a file under that name would mean a second
+  dispatch path had appeared without review, and `workers` and `approval` belong to 4.3 and 5.1.
 - `naive/` holds the RED baseline and is never imported by `src/`.
 - Migrations via Alembic; every migration applies and rolls back cleanly.
 - Conventional commit messages: `feat:`, `fix:`, `test:`, `chore:`, `docs:`, `refactor:`.

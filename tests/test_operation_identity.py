@@ -589,17 +589,38 @@ def _identity_tree() -> ast.Module:
     return ast.parse(IDENTITY_MODULE.read_text(encoding="utf-8"))
 
 
-def _operations_trees() -> dict[str, ast.Module]:
-    """Every module that participates in producing an identifier, not just the one that hashes.
+#: The modules **exempt** from the retry-independence ban, each with the reason it is exempt.
+#:
+#: An exemption list rather than a list of modules watched, and the inversion is the point. The
+#: first version named the three files it parsed, which meant a module added by a later increment —
+#: a reconciler in 4.4, a retry worker in 4.3 — would sit outside the fence and be watched by
+#: nothing, with the suite green. This fence has already been widened once for precisely that
+#: reason: it parsed ``identity.py`` alone while ``service.py`` supplied two of the identifier's
+#: three components. Enumerating what is *watched* means the next omission is silent; enumerating
+#: what is *excused* means the next module is watched until somebody writes down why it should not
+#: be, in this dictionary, where a reviewer will see it.
+#:
+#: ``dispatcher.py`` is the only real entry, and 4.2 added it. It reads a *persisted*
+#: ``adjustment.operation_id`` and puts it on the wire, contributing no component — while
+#: legitimately needing everything this fence bans: ``sent_at`` on the write-ahead record, an
+#: ``attempt_no``, a ``datetime``. Keeping it in scope would have meant either weakening the ban for
+#: every module or refusing 4.2 its deliverable. The property that matters for it is a different
+#: one, asserted separately below: it must never *derive* an identifier.
+DERIVATION_EXEMPT: Final = {
+    "dispatcher.py": "sends a persisted identifier; contributes no component and needs a clock",
+}
 
-    A reviewer pointed out the gap: ``service.py`` supplies two of the identifier's three
-    components, so ``resolution_version=approval.resolution_version + int(time.time()) % 2`` made
-    the identifier retry-dependent while the fence — which parsed ``identity.py`` alone — stayed
-    green through the entire default suite.
+
+def _operations_trees(root: pathlib.Path | None = None) -> dict[str, ast.Module]:
+    """Every module in the operations package that is not explicitly excused.
+
+    ``root`` is a parameter so the inversion can be *demonstrated* on a planted module rather than
+    asserted about the real package — a fence whose scope nobody has attacked is a comment.
     """
     return {
         path.name: ast.parse(path.read_text(encoding="utf-8"))
-        for path in sorted(OPERATIONS_ROOT.glob("*.py"))
+        for path in sorted((root or OPERATIONS_ROOT).glob("*.py"))
+        if path.name not in DERIVATION_EXEMPT
     }
 
 
@@ -644,7 +665,10 @@ def test_no_module_that_feeds_the_derivation_reads_a_variable_input() -> None:
     them was being watched.
     """
     trees = _operations_trees()
-    assert set(trees) >= {"identity.py", "service.py", "claim.py"}, trees.keys()
+    assert {"identity.py", "service.py", "claim.py"} <= set(trees), (
+        f"a module that feeds the derivation stopped being watched: {sorted(trees)}"
+    )
+    assert not set(trees) & set(DERIVATION_EXEMPT), "an exempt module is being walked anyway"
 
     # The per-module floor is nominal — `__init__.py` is a re-export list and legitimately small —
     # so the coverage claim is made on the total instead, which is what a filtered or empty module
@@ -657,6 +681,40 @@ def test_no_module_that_feeds_the_derivation_reads_a_variable_input() -> None:
             raise AssertionError(f"{name}: {exc}") from exc
 
     assert inspected > 800, "the package walk is not seeing the operations modules"
+
+
+def test_a_new_operations_module_is_watched_without_anyone_adding_it_to_a_list(
+    tmp_path: pathlib.Path,
+) -> None:
+    """**The inversion, demonstrated on a module that does not exist.**
+
+    This is the failure the old shape could not have caught: a later increment adds a module that
+    contributes a component, nobody remembers the fence enumerates its subjects, and the suite stays
+    green while the identifier stops being retry-independent. Under the exemption list the planted
+    module is in scope the moment it exists.
+    """
+    (tmp_path / "reconciler.py").write_text(
+        "import time\n\n\ndef _component() -> int:\n    return int(time.time())\n",
+        encoding="utf-8",
+    )
+
+    trees = _operations_trees(tmp_path)
+    assert set(trees) == {"reconciler.py"}, "the planted module was not picked up"
+
+    with pytest.raises(AssertionError, match="imports time"):
+        assert_derivation_reads_no_variable_input(trees["reconciler.py"], minimum=0)
+
+
+def test_every_exemption_is_a_module_that_actually_exists() -> None:
+    """An exemption for a deleted module is a hole waiting for a file of that name.
+
+    ``operations/dispatcher.py`` is excused today. If 4.3 replaced it with a package, the entry
+    would silently excuse nothing — and would silently excuse a *new* ``dispatcher.py`` written by
+    anyone later, with no review of whether the reason still held.
+    """
+    for name, reason in DERIVATION_EXEMPT.items():
+        assert (OPERATIONS_ROOT / name).exists(), f"{name} is excused but does not exist"
+        assert len(reason) > 20, f"{name} is excused without a stated reason"
 
 
 @pytest.mark.parametrize(
@@ -834,3 +892,89 @@ def test_a_payload_hash_that_is_not_a_sha256_digest_is_refused(payload: str) -> 
         operation_id(
             exception_id=EXCEPTION_ID, resolution_version=1, instruction_payload_hash=payload
         )
+
+
+#: Everything that would mean the dispatcher computed an identifier rather than reading one.
+#:
+#: ``sha256`` and ``hashlib`` are here because the derivation could be inlined rather than called:
+#: banning only the named helpers would catch the tidy version of the defect and miss the one
+#: somebody writes in a hurry.
+IDENTIFIER_DERIVERS: Final = frozenset(
+    {
+        "derive_identity",
+        "operation_id_for",
+        "instruction_payload_hash",
+        "canonical_amount",
+        "sha256",
+        "OperationIdentity",
+    }
+)
+
+
+def _package_source(name: str) -> str:
+    return (OPERATIONS_ROOT / name).read_text(encoding="utf-8")
+
+
+def assert_the_dispatcher_derives_nothing(source: str) -> None:
+    """The dispatcher may read an identifier and may not compute one.
+
+    Takes source text rather than reading the file itself, so a mutation can be put through the
+    identical check. The first version inlined the walk into its test, which left its kill test with
+    nothing to call and made it assert something about the mutation instead of about the guard.
+    """
+    tree = ast.parse(source)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            called = (
+                node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+            )
+            assert called not in IDENTIFIER_DERIVERS, f"the dispatcher calls {called}()"
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                assert alias.name not in IDENTIFIER_DERIVERS, f"the dispatcher imports {alias.name}"
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name.split(".")[0] != "hashlib", "the dispatcher imports hashlib"
+
+
+def test_the_dispatcher_never_derives_an_identifier() -> None:
+    """**The property that replaced the clock ban for the dispatcher**, and a stronger one for it.
+
+    4.2's dispatcher is outside :data:`DERIVATION_MODULES` because it legitimately reads a clock and
+    counts attempts — a write-ahead record with no send time is not evidence. Dropping it from that
+    fence without replacing the claim would have been a weakening, so this asserts the thing that
+    actually matters: the dispatcher must send the identifier that was **persisted** at 4.1, never
+    one it computed. §12.1 is explicit that the identifier is "persisted before the external call,
+    never derived at call time", and an identifier re-derived at dispatch would be computed from
+    whatever the configuration happened to be at that moment.
+    """
+    assert_the_dispatcher_derives_nothing((OPERATIONS_ROOT / "dispatcher.py").read_text("utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("label", "injection"),
+    [
+        ("a re-derivation", "_id = derive_identity(i, exception_id=x, resolution_version=1)"),
+        ("a payload rehash", "_h = instruction_payload_hash(i)"),
+        ("a raw digest", "import hashlib"),
+        (
+            "an imported deriver",
+            "from ledger_exception_control_plane.operations import operation_id_for",
+        ),
+    ],
+)
+def test_kill_a_dispatcher_that_re_derives_the_identifier_is_detected(
+    label: str, injection: str
+) -> None:
+    """The guard above, killed — **by running the guard**, which the first version did not do.
+
+    It parsed the mutated source and then asserted that the injected call was present in it. That is
+    true by construction and would have passed with the guard deleted, so it demonstrated nothing
+    about the guard. A reviewer walked through it. The guard is now a function taking source text,
+    and this points it at each mutation in turn.
+    """
+    mutated = _package_source("dispatcher.py") + "\n" + injection + "\n"
+
+    with pytest.raises(AssertionError):
+        assert_the_dispatcher_derives_nothing(mutated)
