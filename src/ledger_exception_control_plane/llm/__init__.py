@@ -9,13 +9,41 @@ numeric anywhere in its tree and no room for a field it does not name. :mod:`~.p
 vendor data stops. Between them, a provider can return an amount only by returning something that
 fails validation.
 
-Deliberately absent, and owned by later increments: the cassette harness and any transport
-that speaks HTTP (3.4), approval, and posting. Exactly one module here touches a database — the
-assembler's persistence layer — and a guard test keeps the rest pure.
+3.4 added the cassette harness, which records and replays without owning a socket: it wraps a
+transport it is handed. **No transport that speaks HTTP exists anywhere in this package**, and a
+guard test fails the build if any module here imports an HTTP client — which is why the recording
+half can exist at all without weakening that claim.
+
+Deliberately absent, and owned by later increments: the golden set and scorer (6.1), the CI
+evaluation gate (6.2), the three-arm comparison (6.3), approval, and posting. Exactly one module
+here touches a database — the assembler's persistence layer — and a guard test keeps the rest
+pure.
 """
 
 from __future__ import annotations
 
+from ledger_exception_control_plane.llm.cassette import (
+    CAPTURE_OPT_IN,
+    CASSETTE_VERSION,
+    IDENTITY_VERSION,
+    REDACTED,
+    Cassette,
+    CassetteError,
+    CassetteMalformedError,
+    CassetteMissError,
+    Interaction,
+    Origin,
+    RecordingTransport,
+    ReplayTransport,
+    canonical,
+    capture_is_enabled,
+    cassette_id_for,
+    load_cassette,
+    redact_text,
+    render_cassette,
+    request_fingerprint,
+    scrub,
+)
 from ledger_exception_control_plane.llm.evidence import (
     CandidateEntryFact,
     EvidenceItem,
@@ -50,26 +78,46 @@ from ledger_exception_control_plane.llm.schema import (
 )
 
 __all__ = [
+    "CAPTURE_OPT_IN",
+    "CASSETTE_VERSION",
+    "IDENTITY_VERSION",
+    "REDACTED",
     "SYSTEM_POLICY",
     "CandidateEntryFact",
+    "Cassette",
+    "CassetteError",
+    "CassetteMalformedError",
+    "CassetteMissError",
     "CitationError",
     "EvidenceItem",
     "EvidenceRef",
     "ExceptionSubject",
+    "Interaction",
+    "Origin",
     "ProposalOutcome",
     "ProposalPrompt",
     "ProposalStatus",
     "ProviderId",
     "ProviderRequest",
     "ProviderResponseError",
+    "RecordingTransport",
+    "ReplayTransport",
     "Transport",
     "TreatmentProposal",
     "TreatmentProposer",
     "assemble_evidence",
     "build_prompt",
+    "canonical",
     "canonical_payload",
+    "capture_is_enabled",
+    "cassette_id_for",
     "evidence_id_for",
+    "load_cassette",
     "prompt_hash",
     "proposal_wire_schema",
     "propose_treatment",
+    "redact_text",
+    "render_cassette",
+    "request_fingerprint",
+    "scrub",
 ]

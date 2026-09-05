@@ -83,7 +83,16 @@ class TreatmentProposal(BaseModel):
     #: truncate or reject provenance the system was told to keep.
     rationale: str
 
-    evidence_refs: list[EvidenceRef]
+    #: A tuple, not a list, and that was a correction. ``frozen=True`` blocks attribute
+    #: *assignment*; it does nothing about the container an attribute holds, so a validated
+    #: proposal could have its citations appended to or cleared in place — by anything holding a
+    #: reference to it, after validation, after the citation check. A reviewer emptied one.
+    #:
+    #: The citation check is the reason this matters rather than being a tidiness point. It refuses
+    #: a proposal whole rather than trimming it, precisely so nobody rewrites a provenance record;
+    #: a mutable list let a caller do afterwards exactly what the check exists to forbid. Third
+    #: occurrence of this shape in the project, after ``AccountPolicy`` and ``ProviderRequest``.
+    evidence_refs: tuple[EvidenceRef, ...]
 
     #: Not a fifth treatment. A model that declines to answer has still not chosen an action, so
     #: abstention is a separate flag — and one that must coincide with escalation, below.

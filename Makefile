@@ -3,7 +3,7 @@
 .PHONY: help install fmt fmt-check lint types test gate coverage-gate up down down-volumes \
         logs ps smoke build db-up test-db-init migrate migrate-down schema-verify \
         fixtures fixtures-check fixtures-load fixtures-verify ingest-verify match-verify \
-        classify-verify money-verify m2-demo m2-demo-check
+        classify-verify money-verify m2-demo m2-demo-check cassettes cassettes-check \n        cassette-verify
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -146,3 +146,18 @@ m2-demo: ## Render artifacts/m2-demo.html from real M2 pipeline output (no Docke
 
 m2-demo-check: ## Fail if the committed snapshot has drifted from the pipeline
 	uv run python -m ledger_exception_control_plane.demo verify
+
+# --- recorded cassettes (M3.4) ---
+#
+# The builder lives under tests/ rather than in the package: it runs the fixture generator to
+# produce the requests, and no module in the package may import the corpus (the M3.3 fixture-truth
+# firewall). A test artifact is made on the test side of that fence.
+
+cassettes: ## Regenerate the committed cassette from the canonical corpus
+	uv run python -m tests.cassette_builder generate
+
+cassettes-check: ## Fail if the committed cassette has drifted from its builder
+	uv run python -m tests.cassette_builder verify
+
+cassette-verify: ## Prove the harness replays the whole corpus offline (no key, no network)
+	uv run pytest tests/test_cassette_harness.py -p no:cacheprovider --no-cov

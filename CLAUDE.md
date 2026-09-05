@@ -21,15 +21,19 @@ amount.
 of M2 (ingestion, deterministic matching, residual classification, and the deterministic adjustment
 calculator) are complete; **increment 3.1 — the treatment-enum closure gate — has passed** (ADR-048);
 **3.2 delivered the provider port and the closed proposal contract**, with OPEN-5 resolved to
-Anthropic and OpenAI (ADR-049); and **3.3 has delivered deterministic evidence assembly, prompt
-construction and the proposal flow**, recording proposals with their model id, version and prompt
-hash (ADR-050). **M3.4 — the cassette recording harness — is next.**
+Anthropic and OpenAI (ADR-049); **3.3 delivered deterministic evidence assembly, prompt construction
+and the proposal flow**, recording proposals with their model id, version and prompt hash (ADR-050);
+and **3.4 has delivered the cassette record/replay harness** — the whole corpus replays offline
+through both adapters, from a committed file, with no credential (ADR-051). **M4.1 is next.**
 
 The model layer still makes **no live call**: no provider SDK is a dependency, nothing under `llm/`
 imports an HTTP client, and no transport that speaks HTTP exists — the flow is exercised entirely
-through injected fakes. Nothing beyond that is implemented: no cassettes, no evaluation, no approval
-workflow, no ledger adapter, no dispatcher, no console, and no `adjustment` is ever persisted.
-`PROJECT_STATUS.md` is the authority on exactly what exists.
+through injected fakes and recorded cassettes. The committed cassettes are **synthesised, not
+captured**; the format records which a file is and a test asserts it, because 6.3 will publish
+measurements produced from cassettes and the difference must never be lost. Nothing beyond that is
+implemented: no evaluation, no scorer, no approval workflow, no ledger adapter, no dispatcher, no
+console, and no `adjustment` is ever persisted. `PROJECT_STATUS.md` is the authority on exactly what
+exists.
 
 ---
 
@@ -211,6 +215,16 @@ make db-up && make coverage-gate   # whole suite, real database, requires 90%
 ```
 
 **Never claim a milestone is complete without running that line and seeing it pass.**
+
+Recorded cassettes (M3.4). Capture is the only thing here that can reach a paid API, so it is gated
+on `CASSETTE_CAPTURE=1` and refused at construction without it. None of the commands below can make
+a call:
+
+```bash
+make cassettes         # regenerate tests/cassettes/canonical-corpus.json from the corpus
+make cassettes-check   # fail if the committed cassette has drifted from its builder
+make cassette-verify   # prove the corpus replays offline through both adapters
+```
 
 Adding a dependency: `uv add <pkg>` for runtime, `uv add --dev <pkg>` for tooling. Both update
 `uv.lock`, which is committed. CI runs `--frozen`, so a dependency change that skipped the lockfile

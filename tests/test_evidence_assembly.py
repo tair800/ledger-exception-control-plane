@@ -855,7 +855,7 @@ def test_both_providers_are_sent_the_same_domain_input() -> None:
     """Semantically equivalent input, whichever vendor is behind the port.
 
     The envelopes differ — that is what the adapters are for — but the policy and the evidence
-    document that reach the wire are byte-identical, so a `Measured` comparison at 3.5 compares
+    document that reach the wire are byte-identical, so the three-arm comparison at 6.3 compares
     models rather than prompts.
     """
     subject = _subject()

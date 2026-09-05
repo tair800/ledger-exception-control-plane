@@ -2031,7 +2031,7 @@ appending one names a model that does not exist. So that pin's date is recorded 
 
 **They are not tier-matched**, and that is stated rather than hidden: a frontier model against a
 small one. This pin exists so the port has two real implementations and so a measurement has
-something to name. The evaluation increment (3.5) measures accuracy, cost per 1,000 lines and p95,
+something to name. The three-arm comparison (6.3) measures accuracy, USD per 1,000 lines and p95,
 and may re-pin to comparable tiers to make that table a fair comparison — a one-line change,
 reviewed, with a new date.
 
@@ -2198,6 +2198,131 @@ two ids and neither exception's citation can resolve to the other's evidence.
 
 ---
 
+## ADR-051 — Replay is matched on the whole request, and a cassette fault is never a provider fault (M3.4)
+
+**Status:** Accepted (M3.4). Supersedes nothing. Records four decisions and one withdrawn claim.
+
+### The plan's goal in one line: CI evaluation with no live API key
+
+The exit criterion is that the suite runs offline from cassettes. It does: no credential, no socket,
+and a guard that fails the build if any module under `llm/` imports an HTTP client. The evaluation
+increments that will replay in anger are 6.1 to 6.3.
+
+### A cassette answers a request only if the bytes match
+
+Replay is keyed on `sha256` over a domain tag, an identity version, the request path and the
+canonical body — **the whole body**, not the prompt. So anything that changes what a provider is
+asked changes the key: the prompt, the response schema that constrains the answer, the output
+ceiling, the model, the path.
+
+The consequence is the point. **Staleness detection is not a separate mechanism; it is the absence
+of a match.** There is no list of things to remember to invalidate, and no way to add a field to the
+request and forget to bump something. A harness keyed on the prompt hash alone would have replayed
+happily through a changed response schema, reporting an answer produced under different constraints
+as though it were the same call.
+
+Two constants, not one. `CASSETTE_VERSION` is the on-disk format; `IDENTITY_VERSION` is what a
+request identity means. Folding them together — which is how it was first written — meant that
+adding a field to the *file* would silently re-key every fingerprint and every derived id, orphaning
+any stored provenance pointing at them. Adding a field to a file is not a change to what was asked
+of a provider.
+
+### A cassette miss is not a provider outage
+
+`CassetteError` is deliberately **not** a `ProviderError`, and `sent()` re-raises it untranslated —
+the one exception to the rule that every vendor failure becomes one of the port's two errors.
+
+If a miss were reported as unavailability, an offline suite would keep passing while testing
+nothing, and the flow would record `UNAVAILABLE` against an event that never involved a provider.
+The failure would read as weather rather than as a bug. There is no fallback from replay to a live
+call: not a discouraged one, not a configurable one.
+
+### Capture fails closed, and cannot be reached by accident
+
+Recording requires `CASSETTE_CAPTURE=1` exactly, checked at **construction** rather than inside
+`send`, so no path records first and checks afterwards. Empty, `0`, `true`, `yes` and `TRUE` all
+mean no.
+
+**The switch is deliberately outside the `LECP_` namespace.** §17 asks for it to be documented in
+`.env.example`; `Settings` forbids unknown `LECP_` names and rejects them from `.env` as well as
+from the process environment, so a `LECP_`-prefixed switch documented there would break startup for
+anyone who copied the example into a real `.env`. Verified rather than assumed: `Settings()` raises
+`extra_forbidden` on `LECP_CASSETTE_CAPTURE` in a dotenv file, and ignores the unprefixed name.
+
+The recording transport also owns no socket. It wraps whatever transport it is handed, which is how
+the recording half of the harness exists without an HTTP client entering the package — and therefore
+without weakening the guard that says none may.
+
+### The committed cassettes are synthesised, and the format says so
+
+`Origin` is `CAPTURED` or `SYNTHESISED`, only a recording transport may claim the former, and a test
+asserts it over every cassette in the tree. The committed ones are synthesised: this repository holds
+no credential and nothing here has ever spoken to a provider.
+
+What they exercise is real — the adapters' own parsing, the fingerprint, scrubbing, canonical
+serialisation, determinism. What they are **not** is evidence about how any model behaves. Recording
+that difference in the file matters more than usual here, because 6.3 will publish measurements
+produced from cassettes, and a reader has to be able to tell which kind they came from.
+
+The answers carry no ground truth. Treatments are assigned by sorted position over exception ids —
+an arbitrary ordering — because deriving them from the fixture generator's intended classification
+would bake the answer key into the artifact a later evaluation is meant to measure *against*.
+
+For the same reason a synthesised recording carries **no `usage` block**. Both vendors return token
+counts and 6.3 computes cost from those fields rather than estimating it, so a synthesised
+`{"input_tokens": 0}` would read as "this call was free" rather than "nobody measured this call" —
+a fabricated zero inside a published cost figure. Absence is the only encoding that cannot be
+mistaken for a measurement, and a test enforces it over every synthesised interaction. Captured
+cassettes will carry usage, and should. The
+builder lives under `tests/` for the same reason expressed as a fence: no module in the package may
+import the fixture corpus, and the M3.3 firewall failed the build when the builder was first written
+inside `llm/`. Moving the file was the correct response; adding it to the firewall's allowlist would
+have been weakening a guard to accommodate a file.
+
+### Withdrawn: "scrubbing is answer-preserving"
+
+The first version asserted that a scrubbed payload parses **identically** to an unscrubbed one. That
+is false, and it is withdrawn rather than reworded. Evidence packs carry third-party text, so a model
+can quote a credential-shaped string back inside its own `rationale`, and scrubbing rewrites it.
+
+The invariant that replaces it is the one that actually matters, and both halves are asserted:
+
+- every field a decision is made from — `treatment`, `confidence`, `evidence_refs`, `abstained` —
+  survives scrubbing exactly;
+- a secret never reaches a committed file, even when a model quoted it, and the free text loses it.
+
+That trade is correct rather than merely necessary, because `rationale` is provenance for humans and
+no code path parses it (§6.2).
+
+### What review changed
+
+Six reviewers produced thirty-eight findings. Each was reproduced before being accepted; one was
+refuted by direct measurement. The corrections worth recording:
+
+| Finding | What was wrong | Evidence |
+|---|---|---|
+| The network guard | Watched `socket.connect` only, and its control used a *blocking* connect — blind to every async connection, the only kind the port makes | A probe: an async connect produced **0** `socket.connect` calls under the proactor loop and 1 under the selector loop. Two reviewers confirmed, one refuted; the probe settled it. `BaseEventLoop` turned out not to define `sock_connect` at all, so the obvious fix would have hooked nothing |
+| The exit criterion | Called the transport's lookup directly and asserted things true by construction | Mutants that ignored the fingerprint, fabricated an answer, or returned one recording for every request all passed the full suite |
+| The §17 secret scan | Banned the substrings `sk-`, `authorization` and `x-api-key` — that is, what *correct* scrubbing leaves behind — and fired on "risk-based" | It would have failed on the first real capture. It now matches secret **values**, with an independent key check beside it |
+| §17 scan coverage | `glob`, not `rglob`, and vacuous over an empty tree | A planted leaking cassette one directory down passed all three guards; so did deleting the directory |
+| `evidence_refs` | `frozen=True` blocks assignment, not mutation of the list a field holds | A reviewer emptied a validated proposal's citations *after* the citation check that exists to prevent exactly that. Now a tuple — third occurrence of this shape, after `AccountPolicy` and `ProviderRequest` |
+| `dict(response)` in the recorder | Ran before the port's own non-object check, so a provider that answered with an array became "unreachable" | An answering provider misreported as an outage sends an operator to the network |
+| Exception messages | A client library's exception carries the request URL and its headers | A reviewer traced a key into `ProposalOutcome.detail`, which a later increment writes to an audit row. Messages are redacted; the exception is still chained |
+| `Interaction.prompt_hash` | Stamped once per recorder, so every row after the first was wrong | A capture run sends many prompts through one recorder. Field removed; the hash belongs on the proposal, where the flow computes it per call |
+| `finish_reason` | `content_filter` was unhandled while the module docstring claimed otherwise | It left `content` null, so a filtered answer arrived as "content is not a JSON string" — a malformed-provider diagnosis for a provider behaving as documented |
+
+Eighteen of the defects are held by mutation tests: each is reintroduced mechanically and must turn
+the suite red. All eighteen do.
+
+### What 3.4 deliberately did not build
+
+No transport that speaks HTTP, no captured cassette, no scorer, no threshold, no evaluation gate, and
+nothing writing `treatment_proposal.cassette_id`. Carrying transport-level provenance up through the
+port is a design change the plan does not ask 3.4 for; it belongs with 6.1 to 6.3, and until then an
+unwritten column is more honest than a plumbed one nothing reads.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.
@@ -2213,7 +2338,7 @@ accumulates closed items stops being read.
 Anthropic (`claude-opus-5`) and OpenAI (`gpt-5.4-mini-2026-03-17`), pinned 2026-09-01. Separate
 vendors, both with enforced structured output by different mechanisms, and genuinely different
 response shapes — which is what makes the port's portability claim testable rather than asserted.
-Not tier-matched; 3.5 may re-pin for a fair `Measured` comparison. See ADR-049.
+Not tier-matched; 6.3 may re-pin for a fair `Measured` comparison. See ADR-049.
 
 ## OPEN-13 — Recording which evidence pack a proposal was shown
 
@@ -2226,8 +2351,14 @@ a fresh assembly after the ledger moves produces a different pack from the one a
 saw, and that proposal's hash is no longer re-derivable from the database. Two reviewers
 demonstrated it at M3.3.
 **Constraint:** a column is a migration, which M3.3 did not own.
-**Needed before:** the console shows an auditor what a model was given (M7), or the evaluation gate
-replays a recorded call (M3.4).
+**Needed before:** the console shows an auditor what a model was given (M7), or the scorer grades a
+replayed proposal against the pack it actually saw (6.1, 6.2).
+
+**Status after M3.4:** still open, and the harness did not force it. Replay matches on a fingerprint
+of the request rather than on stored provenance, and nothing writes `treatment_proposal.cassette_id`
+yet, so a cassette can be replayed without the column existing. What that does *not* solve is the
+original problem — re-deriving an old proposal's `prompt_hash` from the database after the ledger
+has moved — which is why the decision stands.
 
 ## OPEN-14 — Whether `settlement_line` should persist the merchant memo
 
@@ -2237,7 +2368,7 @@ corpus, so `merchant_memo` becomes assemblable evidence.
 contains empty and ambiguous memos as scenario features — so the most discriminating evidence the
 requirement names is currently discarded at persistence. See ADR-050.
 **Constraint:** a migration, an ingestion change, and a regeneration of the byte-hashed corpus.
-**Needed before:** the measured provider comparison (M3.5) claims to be evaluating models on the
+**Needed before:** the measured provider comparison (6.3) claims to be evaluating models on the
 evidence FR-5 specifies.
 
 ## OPEN-6 — Evaluation threshold for the CI gate

@@ -65,6 +65,15 @@ jobs:
       - name: Verify the committed fixture corpus has not drifted
         run: uv run python -m ledger_exception_control_plane.fixtures verify
 
+      # Same reasoning as the corpus step above, for the recorded cassettes. The unit suite
+      # already compares the committed file with its builder byte for byte; this step exists
+      # so a red build says "run make cassettes" instead of showing a 19KB assertion diff.
+      #
+      # It cannot make a provider call: capture is gated on CASSETTE_CAPTURE, which CI never
+      # sets, and the builder synthesises responses rather than sending anything.
+      - name: Verify the committed cassettes have not drifted
+        run: uv run python -m tests.cassette_builder verify
+
   schema:
     name: Migrations and schema integrity
     runs-on: ubuntu-latest

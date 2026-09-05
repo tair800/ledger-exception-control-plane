@@ -539,30 +539,72 @@ def test_no_mutation_reached_disk() -> None:
 # ======================================================================================
 
 
-def test_nothing_reaches_past_this_increment() -> None:
-    """3.4 owns the cassette harness and every transport that speaks HTTP. Neither is here.
+def test_the_cassette_harness_still_cannot_reach_a_provider() -> None:
+    """3.4 built the harness. What it did not build, and must not, is a way to make a live call.
 
-    Replaces the fence that forbade evidence assembly and prompt construction outright, which 3.3
-    was the increment to build. What is still true, and is the part worth guarding, is that no
-    recorded response and no socket exists anywhere in this package — so the whole model layer is
-    still provable offline with no key.
+    This fence used to forbid cassettes outright, which was right until the increment that adds
+    them. What survives is the half that was always the real claim and is stronger for having
+    outlived the increment it was written in: **no HTTP client is imported anywhere in this
+    package**, so recording wraps a transport an operator supplies and nothing here owns a socket.
+
+    Capture is gated on an explicit opt-in, and that gate is a construction-time refusal rather
+    than a branch, so it cannot be reached past.
     """
+    from ledger_exception_control_plane.llm.cassette import CAPTURE_OPT_IN
+
+    inspected = 0
     for name, source in _package_sources().items():
-        identifiers = _code_identifiers(source)
-        for forbidden in ("Cassette", "record_cassette", "replay_cassette"):
-            assert forbidden not in identifiers, f"{name} uses {forbidden}: 3.4 owns cassettes"
+        if not name.startswith("llm/"):
+            continue
+        inspected += 1
+        for module in _imports(source):
+            root = module.split(".")[0]
+            assert root not in {
+                "http",
+                "urllib",
+                "socket",
+                "requests",
+                "httpx",
+                "aiohttp",
+                "ssl",
+            }, f"{name} imports {module}: the harness records what it is given, it does not dial"
 
-        # `cassette_id` is a column M1.2 declared for 3.4, and 3.3 writes `None` into it. Naming
-        # the field is not owning the harness; *setting* it would be, so the assertion is about the
-        # value rather than the identifier.
-        for node in ast.walk(ast.parse(source)):
-            if isinstance(node, ast.keyword) and node.arg == "cassette_id":
-                assert isinstance(node.value, ast.Constant) and node.value.value is None, (
-                    f"{name} records a cassette id, which is 3.4's increment"
-                )
+    # Load-bearing. A scan that inspects nothing passes, and a reviewer pointed out that every
+    # fence in this file was one renamed directory away from proving exactly that.
+    assert inspected >= 8, "the scan is not seeing the llm package"
 
-    assert not (PACKAGE_ROOT / "cassettes").exists()
-    assert not (PACKAGE_ROOT.parents[1] / "tests" / "cassettes").exists()
+    # Not `LECP_`-prefixed, deliberately, and asserted so the reason survives. §17 asks for the
+    # switch to be documented in `.env.example`; every `LECP_` name belongs to the settings model,
+    # which forbids extras, so documenting it under that prefix would break startup for anyone who
+    # copied the example into a real `.env`.
+    assert CAPTURE_OPT_IN == "CASSETTE_CAPTURE"
+    assert "capture_is_enabled" in _package_sources()["llm/cassette.py"]
+
+
+def test_nothing_records_a_cassette_id_against_a_proposal_yet() -> None:
+    """The column stays unwritten, and the reason changed with this increment.
+
+    ``treatment_proposal.cassette_id`` was declared by M1.2 for the increment that would make a
+    cassette id exist. That increment is this one — ids are derived and stable now — but nothing
+    *writes* one, because carrying transport-level provenance up through the port and the flow is a
+    design change the plan does not ask 3.4 for. It belongs with the evaluation increments that
+    replay in anger (6.1 to 6.3), and until then an unwritten column is more honest than a plumbed
+    one nothing reads.
+    """
+    # Scoped to the module that writes the row. The cassette module sets a cassette id on its own
+    # `Interaction`, which is what a cassette id is *for*; a package-wide keyword scan fired on it
+    # and was measuring the wrong thing.
+    source = _package_sources()[PERSISTENCE_MODULE]
+    keywords = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.keyword) and node.arg == "cassette_id"
+    ]
+    assert keywords, f"{PERSISTENCE_MODULE} no longer sets the column at all"
+    for node in keywords:
+        assert isinstance(node.value, ast.Constant) and node.value.value is None, (
+            f"{PERSISTENCE_MODULE} records a cassette id; see 6.1 to 6.3"
+        )
 
 
 def test_only_the_assembler_persists_a_proposal() -> None:

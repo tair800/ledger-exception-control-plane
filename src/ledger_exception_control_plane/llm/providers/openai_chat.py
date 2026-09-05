@@ -10,8 +10,10 @@ load rather than here.
 There is a third difference with teeth. This API declines in band: ``message.refusal`` carries text
 and ``content`` is then null. That is not a proposal and it is not an abstention — an abstention is
 something a model chooses inside the contract, a refusal is the API declining to answer at all — so
-it raises rather than quietly becoming ``ESCALATE``. ``finish_reason`` gets the same treatment for
-the same reason.
+it raises rather than quietly becoming ``ESCALATE``. The two ``finish_reason`` values that leave
+nothing to parse, ``length`` and ``content_filter``, are named individually for the same reason:
+each one raises saying what happened, rather than arriving as a malformed-content error about a
+provider that behaved exactly as documented.
 
 No SDK, for the same reason as the other adapter: a JSON body in, a JSON body out, replayable
 offline.
@@ -129,9 +131,19 @@ class OpenAIChatProposer:
         if not isinstance(first, Mapping):
             raise ProviderResponseError("openai choice is not an object")
 
-        if first.get("finish_reason") == "length":
+        # Named individually, because the diagnosis is the whole value of the check. Both leave
+        # `content` null, so without them the failure surfaces as "content is not a JSON string" —
+        # which reads as a malformed provider and sends an operator to look at the wrong thing.
+        # A reviewer pointed out that `content_filter` was unhandled while the module docstring
+        # claimed `finish_reason` was covered.
+        stop = first.get("finish_reason")
+        if stop == "length":
             raise ProviderResponseError(
                 "openai stopped at the output ceiling before completing the proposal"
+            )
+        if stop == "content_filter":
+            raise ProviderResponseError(
+                "openai stopped on a content filter, so there is no proposal to read"
             )
 
         message = first.get("message")

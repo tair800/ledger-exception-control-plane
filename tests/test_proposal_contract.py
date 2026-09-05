@@ -358,6 +358,34 @@ def test_a_valid_proposal_round_trips() -> None:
     assert again == proposal
 
 
+def test_a_validated_proposal_cannot_be_changed_afterwards() -> None:
+    """``frozen=True`` blocks assignment. It does nothing about a container a field holds.
+
+    So ``evidence_refs`` is a tuple, and that was a correction: as a list, a validated proposal
+    could have its citations appended to or cleared **after** validation and after the citation
+    check — by anything holding a reference to it. A reviewer emptied one.
+
+    It matters here more than as tidiness. The citation check refuses a proposal whole rather than
+    trimming it, precisely so that nobody rewrites a provenance record; a mutable list let a caller
+    do afterwards exactly what that check exists to forbid. Third occurrence of the shape in this
+    project, after ``AccountPolicy`` and ``ProviderRequest``.
+    """
+    proposal = TreatmentProposal.model_validate_json(_json(A_VALID_PROPOSAL))
+
+    with pytest.raises(pydantic.ValidationError):
+        proposal.treatment = TreatmentCode.WRITE_OFF
+
+    assert isinstance(proposal.evidence_refs, tuple)
+    for forbidden in ("append", "clear", "extend", "insert", "pop", "remove", "__setitem__"):
+        assert not hasattr(proposal.evidence_refs, forbidden), (
+            f"citations can be changed with {forbidden}"
+        )
+
+    # And the elements are closed too, so the escape is not one level down.
+    with pytest.raises(pydantic.ValidationError):
+        proposal.evidence_refs[0].evidence_id = "EV-9"
+
+
 def test_the_json_representation_is_stable() -> None:
     """The serialised form is the enum *values*, which is what the database column stores."""
     dumped = json.loads(
@@ -734,6 +762,11 @@ def test_anthropic_shape_failures_are_refused(payload: dict[str, object]) -> Non
         {"choices": "nope"},
         {"choices": ["not an object"]},
         {"choices": [{"index": 0, "finish_reason": "length", "message": {"content": "{}"}}]},
+        {
+            "choices": [
+                {"index": 0, "finish_reason": "content_filter", "message": {"content": None}}
+            ]
+        },
         {"choices": [{"index": 0}]},
         {"choices": [{"index": 0, "message": {"content": None}}]},
         {"choices": [{"index": 0, "message": {"refusal": "I cannot help with that"}}]},
@@ -753,6 +786,23 @@ def test_a_provider_refusal_is_not_silently_turned_into_an_abstention() -> None:
     with pytest.raises(ProviderResponseError, match="declined"):
         OpenAIChatProposer(_FakeTransport({})).parse(
             {"choices": [{"message": {"refusal": "no", "content": None}}]}
+        )
+
+
+@pytest.mark.parametrize(
+    ("stop", "expected"),
+    [("length", "output ceiling"), ("content_filter", "content filter")],
+)
+def test_a_truncated_or_filtered_answer_says_which_it_was(stop: str, expected: str) -> None:
+    """Both leave ``content`` null, and the diagnosis is the whole value of naming them.
+
+    Unnamed, either arrives as "content is not a JSON string" — which reads as a malformed provider
+    and sends an operator to look at the wrong thing. ``content_filter`` was the unhandled one, and
+    the module docstring claimed otherwise; a reviewer read the two against each other.
+    """
+    with pytest.raises(ProviderResponseError, match=expected):
+        OpenAIChatProposer(_FakeTransport({})).parse(
+            {"choices": [{"index": 0, "finish_reason": stop, "message": {"content": None}}]}
         )
 
 

@@ -12,6 +12,7 @@ from collections.abc import Mapping
 
 import pydantic
 
+from ledger_exception_control_plane.llm.cassette import CassetteError, redact_text
 from ledger_exception_control_plane.llm.port import (
     ProviderId,
     ProviderRequest,
@@ -72,11 +73,27 @@ async def sent(transport: Transport, request: ProviderRequest) -> Mapping[str, o
     error, an HTTP status wrapper. The port promises callers two exception types, so the
     translation has to happen above the transport rather than inside each implementation of it,
     where a new transport could forget.
+
+    With exactly one exception, below: a harness fault is not a provider fault.
     """
     try:
         payload = await transport.send(request)
-    except Exception as exc:  # the whole point is that anything at all can arrive here
-        raise ProviderUnavailableError(f"the provider could not be reached: {exc!r}") from exc
+    except CassetteError:
+        # Straight through, and this is the most consequential line in the module.
+        #
+        # A cassette miss is a fault in the *harness* — the request changed, or the recording is
+        # stale — not in a provider. Wrapping it as unavailability would leave an offline suite
+        # passing while it tested nothing, and the failure would read as weather rather than as a
+        # bug. It is the one exception that must not be translated.
+        raise
+    except Exception as exc:  # the whole point is that anything else at all can arrive here
+        # Redacted, because a client library's exception routinely carries the request URL and its
+        # headers — a reviewer traced a key in a query string all the way into
+        # `ProposalOutcome.detail`, which a later increment will put in an audit row. The original
+        # exception is still chained for a debugger; only the *message* is cleaned.
+        raise ProviderUnavailableError(
+            f"the provider could not be reached: {redact_text(repr(exc))}"
+        ) from exc
 
     if not isinstance(payload, Mapping):
         raise ProviderResponseError(

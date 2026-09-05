@@ -126,7 +126,14 @@ class TreatmentProposer(Protocol):
     to know — and the two vendors version differently, so it is the adapter that knows how.
 
     Raises :class:`ProviderResponseError` if the answer is not a valid proposal, and
-    :class:`ProviderUnavailableError` if there was no answer. Nothing else escapes.
+    :class:`ProviderUnavailableError` if there was no answer. **Those are the only two failures
+    that describe a provider**, and every vendor exception is translated into one of them.
+
+    3.4 added the single deliberate exception, and it is recorded here rather than left for a
+    reader to discover: a :class:`~.cassette.CassetteError` — a stale recording, a missing one, a
+    file that does not parse — passes through untranslated. It is a fault in the test harness, not
+    in a provider, and reporting it as unavailability would leave an offline suite passing while it
+    tested nothing. A caller that is not replaying a cassette cannot see one.
     """
 
     @property
