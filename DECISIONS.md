@@ -194,7 +194,14 @@ would reproduce the same error one notch down.
 suite against both branches. Publish both columns.
 
 **Consequences.** `naive/` **must** double-post. If it cannot be made to fail, the suite is theatre and
-the flagship claim collapses. This is a kill-test gate at increment 4.4, not a nice-to-have.
+the flagship claim collapses. This is a kill-test gate at increment **4.5**, not a nice-to-have.
+
+**Increment number corrected at M4.1; see ADR-053.** This ADR was written when phase M4 held four
+increments and the gate was the last of them, so it said 4.4. `IMPLEMENTATION_PLAN.md` §4.4 records
+that the increment now carrying that number — `UNKNOWN` semantics and manual recovery — is "the
+increment added by the side-effect-semantics correction", which inserted a step and moved the gate to
+4.5. The decision is unchanged; only the number was stale, and it is corrected in place so this
+document does not state something false.
 
 ---
 
@@ -2473,7 +2480,13 @@ honoured only if the provider implements one. What 4.1 supplies is the third cla
 condition: a stable, retry-independent identifier. The capability clauses are 4.2's and the branching
 is 4.4's, and until both exist the claim may not be made.
 
-### Not resolved: when the naive kill-test gate runs
+### Not resolved at M4.1: when the naive kill-test gate runs
+
+> **Resolved immediately afterwards by ADR-053**, before M4.2 began. The section below is left as it
+> was written, because the contradiction was real and finding it was part of this increment's
+> record. No decision was invented to close it: the authoritative documents turned out to settle it
+> already, which is exactly why raising it rather than choosing was the right call.
+
 
 `PROJECT_SPEC.md` §23 and `CLAUDE.md` both say **"Before M4:"** the `naive/` branch must be shown to
 double-post, or the chaos suite is theatre and the flagship claim collapses. `IMPLEMENTATION_PLAN.md`
@@ -2488,6 +2501,107 @@ exit criteria are self-contained. It is recorded here rather than resolved, beca
 project-killing gate runs is not an implementation detail and the repository does not settle it.
 **It should be settled before 4.2 begins**, since every increment built on top of an unproven gate is
 work that a failed gate would discard.
+
+---
+
+## ADR-053 — Where the naive kill-test gate is discharged (documentation correction)
+
+**Status:** Accepted. Resolves the contradiction ADR-052 raised and left open. **No new decision is
+made here** — the authoritative documents already settled it, and this ADR records which ones and
+how. Documentation only: no production code, no schema, no test changed.
+
+### The four clauses that appeared to disagree
+
+Quoted **as they stood when ADR-052 raised the conflict**. The ADR-006 row has since been corrected
+in place by this record; the other three are unchanged in substance.
+
+| Document | Clause, as it stood at M4.1 |
+|---|---|
+| `PROJECT_SPEC.md` §23 | "**Before M4:** if `naive/` cannot be made to double-post, the chaos suite is theatre and the flagship claim collapses." |
+| `CLAUDE.md`, "Two gates that can kill this project" | "**Before M4:** the `naive/` branch must be demonstrated to actually double-post under the chaos suite." |
+| `IMPLEMENTATION_PLAN.md` §4.5 | "### 4.5 KILL-TEST GATE — naive RED baseline and chaos suite" |
+| `DECISIONS.md` ADR-006 | "This is a kill-test gate at increment 4.4, not a nice-to-have." **— corrected to 4.5 by this ADR.** |
+
+### The precedence the repository already states
+
+Neither `PROJECT_SPEC.md` nor `CLAUDE.md` is the origin of these gates, and both say so:
+
+- `CLAUDE.md` introduces the section with "**Recorded in the portfolio blueprint** and repeated here",
+  naming itself a repetition.
+- `PROJECT_SPEC.md`'s own header: "Derived from the approved entry in
+  `portfolio-control/PORTFOLIO_BLUEPRINT.md` (Project 1, flagship) and **bound by**
+  `portfolio-control/PORTFOLIO_PROGRESS.md`."
+
+**The origin names no phase at all.** `PORTFOLIO_BLUEPRINT.md` states the gate as a build
+precondition: *"**Kill test.** Build only if (a) the naive branch genuinely double-posts under the
+suite — if it cannot be made to fail, the chaos suite is theatre; (b) the treatment set genuinely
+closes into an enum…"*. "Before M4" is therefore not a rule inherited from the origin; it is
+phrasing that entered in the derived documents.
+
+**The binding tracker supplies the operative reading, and does it for the sibling gate.**
+`PORTFOLIO_PROGRESS.md` — the document `PROJECT_SPEC.md` declares itself bound by — states *both*
+gates in the identical form and then discharges one of them at a numbered increment inside its
+phase:
+
+> - **Gate before M4:** the `naive/` branch must be demonstrated to double-post under the chaos suite. …
+> - **Gate before M3 — this is now the next action.** **Increment 3.1 confirms** the treatment set
+>   genuinely closes into an enum. … **M2.4 built the money path first precisely so this gate is
+>   decided against working code rather than against an intention.**
+
+So "Gate before M*n*" is that document's own shorthand for *a gate discharged at an increment inside
+phase M*n**, and it states the principle that fixes which increment: **a gate is decided against
+working code rather than against an intention.** The M3 gate was placed at 3.1 — not before M3 —
+precisely so the money path built at 2.4 existed to decide it against. It ran there and passed
+(ADR-048).
+
+**Increments are assigned by exactly one document.** `IMPLEMENTATION_PLAN.md` describes itself as
+"Ordered, small, independently verifiable increments … deliberately finer" than the milestone ladder.
+`PROJECT_SPEC.md` assigns no increment anywhere in its text — every `N.M` heading in it is a section
+number, never an increment — so it cannot be read as competing with the plan on placement.
+
+### The resolution
+
+Applying the tracker's own principle to the M4 gate gives the plan's placement:
+
+- The M3 gate is answerable against the treatment vocabulary and the money path alone, so its
+  earliest honest decision point is 3.1.
+- The M4 gate compares `naive/` against a **working `main`** under the §19 chaos suite across three
+  adapter capability configurations. That needs the dispatcher and adapter (4.2), bounded retry and
+  the DLQ (4.3) and `UNKNOWN` handling and recovery (4.4). Its earliest honest decision point is
+  therefore **4.5** — deciding it sooner would decide it against an intention, which is the thing
+  the tracker's principle forbids.
+
+The plan says the same in its own words: *"Both kill-test gates come early (3.1 and 4.5) — before the
+console, evaluation, observability and deployment work that would be wasted if either failed."*
+"Early" is defined there as **before M6–M10**, not as "before the phase the gate sits in", and 4.5
+satisfies it.
+
+**ADR-006's "4.4" was stale, not dissenting.** `IMPLEMENTATION_PLAN.md` §4.4 records that the
+increment now numbered 4.4 is *"the increment added by the side-effect-semantics correction"*. ADR-006
+was written when M4 held four increments and the gate was last; inserting one moved it to 4.5 and the
+ADR was never updated. Corrected in place.
+
+### What changed, and what did not
+
+Four documents now say the same thing. `PROJECT_SPEC.md` §23 and `CLAUDE.md` keep the gate's force and
+name where it is discharged, as `PORTFOLIO_PROGRESS.md` already does for the M3 gate; ADR-006's number
+is corrected; ADR-052's open item is closed by this record rather than by editing what it said.
+
+**Nothing about the gate itself is weakened.** It has not run, `naive/` does not exist, and no
+document now implies otherwise. Failing it still "changes the project rather than being worked around"
+and still means "stop and reconsider rather than proceeding".
+
+### The risk this placement accepts, stated rather than implied
+
+Discharging at 4.5 means **4.2, 4.3 and 4.4 are built before the flagship claim is proven**, and a
+failed gate discards them. That is a real cost and the placement accepts it deliberately, because the
+alternative — deciding the gate against an intention — is the failure mode the tracker's principle
+exists to prevent, and a gate decided against a `main` that cannot yet dispatch would prove nothing
+about a system that can.
+
+"Early" is what bounds the exposure: three increments, not the console, the evaluation harness, the
+observability work or the deployment. Whoever runs 4.5 should treat a failure as the plan's exit
+criteria require — stop, not soften.
 
 ---
 

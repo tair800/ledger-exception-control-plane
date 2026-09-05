@@ -795,9 +795,21 @@ The project is complete only when every one of these is true **and has been veri
 
 ### Kill tests
 
+Both come from `portfolio-control/PORTFOLIO_BLUEPRINT.md`, which states them as build preconditions
+("build only if—") and names no phase for either. `portfolio-control/PORTFOLIO_PROGRESS.md`, which
+this document is bound by, states both as "Gate before M*n*" and discharges each at a numbered
+increment **inside** that phase — "Increment 3.1 confirms—" — because a gate is *decided against
+working code rather than against an intention*. `IMPLEMENTATION_PLAN.md` assigns those increments.
+See ADR-053.
+
 Both are checked early; failing either changes the project rather than being worked around.
 
-- **Before M4:** if `naive/` cannot be made to double-post, the chaos suite is theatre and the
-  flagship claim collapses.
-- **Before M3:** if the treatment set does not genuinely close into an enum — if real cases require the
-  model to propose an amount — the containment claim is false and must be **dropped, not softened**.
+- **Before M4 — discharged at increment 4.5:** if `naive/` cannot be made to double-post, the chaos
+  suite is theatre and the flagship claim collapses. The comparison needs a working `main` —
+  dispatcher and adapter (4.2), bounded retry and DLQ (4.3), `UNKNOWN` handling and recovery (4.4) —
+  and the §19 suite to be decided against, so 4.5 is its earliest honest decision point. "Early" still
+  binds, and means before the console, evaluation, observability and deployment work a failure would
+  waste.
+- **Before M3 — discharged at increment 3.1:** if the treatment set does not genuinely close into an
+  enum — if real cases require the model to propose an amount — the containment claim is false and
+  must be **dropped, not softened**.

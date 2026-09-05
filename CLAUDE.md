@@ -166,13 +166,23 @@ commit → (push only when the remote exists and the branch is not knowingly bro
 
 ## Two gates that can kill this project
 
-Recorded in the portfolio blueprint and repeated here because both are cheap to check and expensive
-to discover late:
+Recorded in the portfolio blueprint as build preconditions — "build only if" — and repeated here
+because both are cheap to check and expensive to discover late. **The blueprint names no phase for
+either.** `portfolio-control/PORTFOLIO_PROGRESS.md` states them as "Gate before M*n*" and discharges
+each at a numbered increment inside that phase, because a gate is *decided against working code
+rather than against an intention*; `IMPLEMENTATION_PLAN.md` assigns the increments. See ADR-053.
 
-1. **Before M4:** the `naive/` branch must be demonstrated to actually double-post under the chaos
-   suite. If it cannot be made to fail, the chaos suite is theatre and the flagship claim collapses.
-2. **Before M3:** the treatment set must genuinely close into an enum. If real cases require the model
-   to propose an amount, the containment claim is false and must be **dropped, not softened**.
+1. **Before M4 — discharged at increment 4.5. NOT YET RUN.** The `naive/` branch must be
+   demonstrated to actually double-post under the chaos suite. If it cannot be made to fail, the chaos
+   suite is theatre and the flagship claim collapses. 4.5 is where it can first be decided against a
+   working `main`; deciding it earlier would decide it against an intention. **This placement accepts
+   a real cost:** 4.2, 4.3 and 4.4 are built before the flagship claim is proven, and a failed gate
+   discards them. "Early" bounds that exposure to three increments — the gate still precedes the
+   console, evaluation, observability and deployment work (M6—M10). Treat a failure as the plan's
+   exit criteria require: stop and reconsider, never soften.
+2. **Before M3 — discharged at increment 3.1. PASSED** (ADR-048). The treatment set must genuinely
+   close into an enum. If real cases require the model to propose an amount, the containment claim is
+   false and must be **dropped, not softened**.
 
 ---
 

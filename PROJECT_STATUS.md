@@ -1884,10 +1884,16 @@ Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 54 ADRs and 9 OPEN items. M4.1 recorded **ADR-052** and opened nothing; it
-also raised, without resolving, a **three-way disagreement about when the `naive/` kill-test gate
-runs** — `PROJECT_SPEC.md` §23 and `CLAUDE.md` say "before M4", `IMPLEMENTATION_PLAN.md` places it at
-4.5 and ADR-006 says 4.4. It does not block 4.1 and should be settled before 4.2. M3.4 recorded
+`DECISIONS.md` holds 55 ADRs and 9 OPEN items. M4.1 recorded **ADR-052** and opened nothing; it
+raised, without resolving, a **three-way disagreement about when the `naive/` kill-test gate runs**,
+and **ADR-053 has since closed it** — as a documentation correction, before M4.2 began and without
+inventing a placement. The authoritative chain already settled it: the portfolio blueprint states
+both gates as build preconditions naming no phase, `PORTFOLIO_PROGRESS.md` discharges such a gate at
+a numbered increment inside its phase (as it did for M3 at 3.1) because a gate is decided against
+working code rather than against an intention, and `IMPLEMENTATION_PLAN.md` is the only document that
+assigns increments. The gate is discharged at **4.5**; ADR-006's "4.4" was a stale number left behind
+when the side-effect-semantics correction inserted an increment. **The gate has not run and `naive/`
+does not exist.** M3.4 recorded
 **ADR-051** and opened nothing.
 OPEN-5 was resolved at M3.2 (ADR-049); M3.3 recorded ADR-050 and opened **OPEN-13** (per-proposal
 evidence pack) and **OPEN-14** (persisting the merchant memo), both of which are still open — the
