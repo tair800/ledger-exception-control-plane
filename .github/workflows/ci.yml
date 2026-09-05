@@ -151,6 +151,15 @@ jobs:
       - name: Verify residual classification against real PostgreSQL
         run: uv run pytest tests/test_classification_postgres.py -m integration --no-cov
 
+      # Claim locking and operation identity. Every property here is about concurrency and
+      # persisted state: that two workers cannot hold one residual, that the lock is released when
+      # a worker's transaction ends, and that the identifier reaches the database before anything
+      # could dispatch it. None of that is observable without a real server — the two-worker proof
+      # in particular needs two genuine sessions contending for one row. Reuses the PostgreSQL
+      # service already running above.
+      - name: Verify claim locking and operation identity against real PostgreSQL
+        run: uv run pytest tests/test_operations_postgres.py -m integration --no-cov
+
       # The authoritative coverage gate, and the only place it can be honest.
       #
       # The unit job cannot see `matching.service` or `classification.service` — their entire

@@ -687,9 +687,138 @@ def test_kill_an_aliased_proposal_write_is_detected(
     assert bool(_proposal_constructors(source)) is detected
 
 
+#: Concepts that would mean a later increment had started, matched at **any** depth and as either
+#: a module or a package: ``outbox``, ``outbox.py`` and ``operations/outbox.py`` are all the same
+#: arrival.
+LATER_MILESTONE_NAMES: Final = ("approval", "outbox", "dispatcher", "workers")
+
+
+def _later_milestone_paths(root: pathlib.Path) -> list[str]:
+    """Anything under ``root`` whose name says a later increment has arrived.
+
+    Two corrections, both forced by 4.1 and both strengthenings — nothing legitimate becomes
+    forbidden by either.
+
+    ``rglob`` rather than a root-level lookup: the first version checked ``PACKAGE_ROOT / name``
+    only, so the fence saw four paths in one directory, and 4.1 adds ``operations/`` — meaning 4.2
+    could have added ``operations/dispatcher.py`` with the fence still green.
+
+    Stems rather than literal names: the list originally mixed file names (``approval.py``) with
+    bare package names (``outbox``), and ``rglob("outbox")`` matches a directory but never
+    ``outbox.py``. A reviewer pointed out that the most likely shape of the thing the widening was
+    meant to catch — ``operations/outbox.py`` — was precisely the shape it could not see.
+    """
+    return sorted(
+        str(path.relative_to(root)).replace("\\", "/")
+        for path in root.rglob("*")
+        if path.stem in LATER_MILESTONE_NAMES and path.name != "__init__.py"
+    )
+
+
 def test_no_approval_posting_or_outbox_machinery_exists() -> None:
-    for name in ("approval.py", "outbox", "dispatcher.py", "workers"):
-        assert not (PACKAGE_ROOT / name).exists(), f"{name} belongs to a later milestone"
+    """4.1 delivers claim locking and an operation identifier. It delivers no dispatch path.
+
+    ``operations/`` exists as of 4.1 and is deliberately not on this list: it holds the claim query,
+    the identifier derivation and the one module that persists an identifier. What it must not grow
+    is a dispatcher, a worker loop, an outbox writer or an approval gate — 4.2, 4.3 and 5.1
+    respectively.
+    """
+    assert _later_milestone_paths(PACKAGE_ROOT) == []
+
+
+def test_kill_a_nested_dispatcher_is_detected(tmp_path: pathlib.Path) -> None:
+    """The hole the widening closes, demonstrated rather than described.
+
+    Under the root-only check this planted file was invisible, because it is not at the package
+    root — which is precisely where 4.2's dispatcher would naturally land now that ``operations/``
+    exists.
+    """
+    (tmp_path / "operations").mkdir()
+    (tmp_path / "operations" / "dispatcher.py").write_text("", encoding="utf-8")
+    (tmp_path / "operations" / "outbox.py").write_text("", encoding="utf-8")
+    (tmp_path / "workers").mkdir()
+
+    assert _later_milestone_paths(tmp_path) == [
+        "operations/dispatcher.py",
+        "operations/outbox.py",
+        "workers",
+    ]
+    assert not (tmp_path / "dispatcher.py").exists(), "the planted files are not at the root"
+
+
+@pytest.mark.parametrize(
+    "planted",
+    ["outbox.py", "dispatcher.py", "approval.py", "workers.py", "outbox/__init__.py"],
+)
+def test_kill_each_later_milestone_shape_is_detected(tmp_path: pathlib.Path, planted: str) -> None:
+    """Module *and* package, at depth. ``outbox.py`` was invisible to the first widened version."""
+    target = tmp_path / "operations" / planted
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("", encoding="utf-8")
+
+    assert _later_milestone_paths(tmp_path) != []
+
+
+def test_kill_a_vacuous_later_milestone_scan_is_detected(tmp_path: pathlib.Path) -> None:
+    """An empty tree passes the fence, so the real call must be pointed at a populated one."""
+    assert _later_milestone_paths(tmp_path) == []
+    assert any(PACKAGE_ROOT.rglob("*.py")), "the fence is being pointed at an empty package"
+
+
+#: The one module in ``operations/`` allowed to reach a database, mirroring the ``llm/`` fence.
+OPERATIONS_MODULES_THAT_MAY_REACH_A_DATABASE: Final = frozenset(
+    {"operations/claim.py", "operations/service.py"}
+)
+
+
+def test_nothing_in_the_operations_package_can_open_a_socket() -> None:
+    """``operations/__init__.py`` claims "nothing here opens a socket". Until now that was prose.
+
+    4.1 derives an identifier, claims a residual and writes a row. The thing it must not acquire is
+    the ability to *send* the identifier anywhere — the adapter and the dispatcher are 4.2's, and
+    the whole point of persisting the identifier before dispatch is that these two steps stay
+    separable. The ``llm/`` package has had exactly this fence since 3.2; the package that will
+    hold the dispatcher needs it more, not less.
+    """
+    inspected = 0
+    for name, source in _package_sources().items():
+        if not name.startswith("operations/"):
+            continue
+        inspected += 1
+        for module in _imports(source):
+            root = module.split(".")[0]
+            assert root not in {
+                "http",
+                "urllib",
+                "socket",
+                "requests",
+                "httpx",
+                "aiohttp",
+                "ssl",
+            }, f"{name} imports {module}: 4.1 identifies an operation, it does not dispatch one"
+
+    assert inspected >= 4, "the scan is not seeing the operations package"
+
+
+def test_only_the_two_named_operations_modules_reach_a_database() -> None:
+    """The derivation stays pure, so it can be tested — and copied — with no database at all.
+
+    ``identity.py`` is named in the plan as a reusable foundation three later repositories copy. A
+    dependency on a session would make that copy drag the schema with it, and would make the
+    identifier's own tests need a container.
+    """
+    inspected = 0
+    for name, source in _package_sources().items():
+        if not name.startswith("operations/"):
+            continue
+        if name in OPERATIONS_MODULES_THAT_MAY_REACH_A_DATABASE:
+            continue
+        inspected += 1
+        for module in _imports(source):
+            assert module.split(".")[0] not in {"asyncpg", "alembic"}, f"{name} imports {module}"
+        assert "AsyncSession" not in _code_identifiers(source), f"{name} reaches for a session"
+
+    assert inspected >= 2, "the scan is not seeing the pure half of the operations package"
 
 
 def test_no_transport_implementation_ships() -> None:

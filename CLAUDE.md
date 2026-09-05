@@ -23,17 +23,25 @@ calculator) are complete; **increment 3.1 — the treatment-enum closure gate �
 **3.2 delivered the provider port and the closed proposal contract**, with OPEN-5 resolved to
 Anthropic and OpenAI (ADR-049); **3.3 delivered deterministic evidence assembly, prompt construction
 and the proposal flow**, recording proposals with their model id, version and prompt hash (ADR-050);
-and **3.4 has delivered the cassette record/replay harness** — the whole corpus replays offline
-through both adapters, from a committed file, with no credential (ADR-051). **M4.1 is next.**
+**3.4 delivered the cassette record/replay harness** — the whole corpus replays offline through
+both adapters, from a committed file, with no credential (ADR-051); and **4.1 has delivered claim
+locking and the retry-independent operation identifier**, the first increment of the reliability
+phase (ADR-052). **M4.2 is next.**
 
 The model layer still makes **no live call**: no provider SDK is a dependency, nothing under `llm/`
 imports an HTTP client, and no transport that speaks HTTP exists — the flow is exercised entirely
 through injected fakes and recorded cassettes. The committed cassettes are **synthesised, not
 captured**; the format records which a file is and a test asserts it, because 6.3 will publish
 measurements produced from cassettes and the difference must never be lost. Nothing beyond that is
-implemented: no evaluation, no scorer, no approval workflow, no ledger adapter, no dispatcher, no
-console, and no `adjustment` is ever persisted. `PROJECT_STATUS.md` is the authority on exactly what
-exists.
+implemented: no evaluation, no scorer, no approval workflow, no ledger adapter, no dispatcher and
+no console.
+
+**An `adjustment` row is now written**, and that sentence used to say the opposite. 4.1 derives a
+retry-independent `operation_id`, binds it to the whole posting instruction, and persists it before
+anything could dispatch it — which is the increment's stated deliverable. Exactly one module may
+write that row and a guard test enforces it. What still does not exist is anything that *sends* one:
+no outbox row, no attempt record, no adapter, no socket. `PROJECT_STATUS.md` is the authority on
+exactly what exists.
 
 ---
 
@@ -226,6 +234,13 @@ make cassettes-check   # fail if the committed cassette has drifted from its bui
 make cassette-verify   # prove the corpus replays offline through both adapters
 ```
 
+Claim locking and operation identity (M4.1). The concurrency proof needs a real server — two
+genuine sessions contending for one row — so it lives with the integration suite:
+
+```bash
+make operations-verify   # two workers, one residual; and the identifier, persisted
+```
+
 Adding a dependency: `uv add <pkg>` for runtime, `uv add --dev <pkg>` for tooling. Both update
 `uv.lock`, which is committed. CI runs `--frozen`, so a dependency change that skipped the lockfile
 cannot reach `main`.
@@ -235,7 +250,9 @@ cannot reach `main`.
 ## Conventions
 
 - Python 3.12, typed throughout, Pydantic v2 for all boundary schemas.
-- `src/` layout: `domain`, `matching`, `llm`, `outbox`, `api`, `workers`.
+- `src/` layout: `db`, `fixtures`, `ingest`, `matching`, `classification`, `money`, `llm`,
+  `operations`, `demo`. The `outbox` and `workers` packages named in earlier drafts do not
+  exist and are forbidden by a guard test until the increment that owns them (4.2, 4.3).
 - `naive/` holds the RED baseline and is never imported by `src/`.
 - Migrations via Alembic; every migration applies and rolls back cleanly.
 - Conventional commit messages: `feat:`, `fix:`, `test:`, `chore:`, `docs:`, `refactor:`.

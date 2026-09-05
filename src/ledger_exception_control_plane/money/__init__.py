@@ -56,6 +56,8 @@ from ledger_exception_control_plane.money.policy import (
     AmbiguousAccountPolicyError,
     LedgerContext,
     account_policy,
+    is_account_code,
+    is_currency,
     is_period,
     period_of,
 )
@@ -90,6 +92,8 @@ __all__ = [
     "NonCalculable",
     "account_policy",
     "compute_adjustment",
+    "is_account_code",
+    "is_currency",
     "is_period",
     "period_of",
 ]

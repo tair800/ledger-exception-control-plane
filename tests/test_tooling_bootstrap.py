@@ -41,6 +41,7 @@ NEEDS_THE_DATABASE: Final = (
     "ingest-verify",
     "match-verify",
     "classify-verify",
+    "operations-verify",
 )
 
 
@@ -191,3 +192,91 @@ def test_destruction_is_never_hidden_inside_an_ordinary_target() -> None:
     assert "DESTRUCTIVE" in help_text.group(1), (
         "the destructive target must announce itself in `make help`"
     )
+
+
+# ======================================================================================
+# The Makefile has to parse — and once did not
+# ======================================================================================
+
+
+def _literal_escapes(source: str) -> list[str]:
+    """Non-recipe lines carrying a two-character ``\\n`` or ``\\t`` where a real one belongs.
+
+    Scoped to non-recipe lines, and that scoping was a correction: the first version banned the
+    sequence outright and immediately fired on the ``help`` target, whose awk format string
+    contains a perfectly legitimate ``\\n``. A recipe is shell text and may say whatever it likes;
+    a target line, a prerequisite list or a ``.PHONY`` continuation may not.
+    """
+    return [
+        f"{number}: {line.strip()[:70]!r}"
+        for number, line in enumerate(source.split("\n"), start=1)
+        if not line.startswith("\t") and ("\\n" in line or "\\t" in line)
+    ]
+
+
+def test_no_line_continuation_is_a_literal_escape_sequence() -> None:
+    """**A regression test for a defect this repository actually shipped.**
+
+    ``make`` is not a dependency of this project and CI drives every suite directly rather than
+    through a target, so nothing executed the Makefile between it being edited and this test being
+    written. A patch script emitted the two characters ``\\`` and ``n`` where a backslash and a
+    newline were intended, and the ``.PHONY`` continuation silently became one long line carrying a
+    target named ``\\n``. Harmless by luck rather than by design — the same slip one line lower,
+    inside a recipe, produces a command nobody can run.
+
+    Cheap to check, and the only thing standing between a text-edited Makefile and a broken one.
+    """
+    assert _literal_escapes(_makefile()) == []
+
+
+def test_kill_a_mangled_continuation_is_detected() -> None:
+    """The guard above, killed — with the exact text that was in this repository.
+
+    The second case is the control that forced the scoping: a recipe containing ``\\n`` inside a
+    shell string is correct and must not be reported, which is what the ``help`` target does.
+    """
+    mangled = ".PHONY: alpha beta \\n        gamma\n"
+    assert _literal_escapes(mangled) != []
+
+    legitimate = "help:\n\t@awk '{printf \"%s\\n\", $$1}'\n"
+    assert _literal_escapes(legitimate) == []
+
+
+def test_every_recipe_line_begins_with_a_tab() -> None:
+    """A recipe indented with spaces is not a recipe, and ``make`` says so at parse time."""
+    offenders = [
+        f"{number}: {line[:60]!r}"
+        for number, line in enumerate(_makefile().split("\n"), start=1)
+        if re.match(r"^ +(uv run|LECP_POSTGRES_DSN=|\$\(COMPOSE\)|@|db=)", line)
+    ]
+    assert offenders == [], f"recipe lines indented with spaces: {offenders}"
+
+
+def _declared_phony(source: str) -> set[str]:
+    """Every name on the ``.PHONY`` line, following its continuations."""
+    match = re.search(r"^\.PHONY:((?:[^\n]*\\\n)*[^\n]*)", source, re.M)
+    assert match, "the Makefile declares no .PHONY targets"
+    return set(match.group(1).replace("\\", " ").split())
+
+
+def _defined_targets(source: str) -> set[str]:
+    """Every target with a rule, excluding variable assignments and pattern rules."""
+    return {match.group(1) for match in re.finditer(r"^([a-z][a-z0-9-]*):(?!=)", source, re.M)}
+
+
+def test_every_declared_phony_target_actually_exists() -> None:
+    """A ``.PHONY`` entry naming nothing is dead text — and is what a mangled continuation leaves
+    behind, since the junk fragment lands in the list and no rule ever matches it."""
+    source = _makefile()
+    assert _declared_phony(source) - _defined_targets(source) == set()
+
+
+def test_every_target_is_declared_phony() -> None:
+    """None of these targets produces a file of its own name, so all of them are phony.
+
+    Stated as a rule rather than a convention: a target left out would still run today and would
+    stop running the moment a file appeared with its name — which for ``build``, ``test`` or
+    ``fixtures`` is not a remote possibility.
+    """
+    source = _makefile()
+    assert _defined_targets(source) - _declared_phony(source) == set()

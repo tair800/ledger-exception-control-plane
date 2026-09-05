@@ -43,7 +43,7 @@ import pathlib
 import pickle
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Final
 
 import pytest
@@ -995,30 +995,253 @@ def test_no_provider_sdk_is_a_dependency() -> None:
                 assert module.split(".")[0] not in providers, f"{path.name} imports {module}"
 
 
-def test_no_approval_or_adjustment_is_ever_written() -> None:
-    """``treatment_proposal`` is written at 3.3. Nothing past it is.
+def _package_sources() -> dict[str, str]:
+    """Every module in the package, keyed by its path relative to the package root."""
+    return {
+        str(path.relative_to(PACKAGE_ROOT)).replace("\\", "/"): path.read_text(encoding="utf-8")
+        for path in sorted(PACKAGE_ROOT.rglob("*.py"))
+    }
 
-    This fence has been narrowed twice, and both narrowings were forced by the increment that made
-    the previous wording false. It first said nothing constructs a ``TreatmentProposal`` — untrue
-    once M3.2 defined the response contract, which is constructed at the provider boundary by
-    design. It then said nothing persists one or builds its provenance — untrue once M3.3 recorded
-    a proposal with its model id, version and prompt hash, which is that increment's stated
-    deliverable.
 
-    What survives is the claim no increment so far has touched: **no approval exists and no
-    adjustment is ever written.** A proposal is a recommendation; FR-7 requires an explicit human
-    decision before any ledger write, and there is no code anywhere that could produce one.
+#: The one module allowed to create an ``adjustment`` row. Everything else stays out of the money
+#: path's persistence entirely.
+ADJUSTMENT_WRITER: Final = "operations/service.py"
 
-    ``rationale=`` is gone from this list for the same reason — 3.3 persists the model's rationale
-    as provenance, which is exactly what the column is for. The claim that replaced it is stronger
-    and lives in ``test_proposal_firewall.py``: the money path cannot name the rationale at all.
+
+#: The table each guarded ORM class maps to, for the raw-SQL half of the scan.
+WRITE_SIDE_TABLES: Final = {
+    "Approval": "approval",
+    "Adjustment": "adjustment",
+    "Outbox": "outbox",
+    "PostingAttempt": "posting_attempt",
+}
+
+#: Verbs that turn a mapped class into a write, matched as a substring of the callee's name.
+#:
+#: A substring rather than an exact match, because ``from sqlalchemy.dialects.postgresql import
+#: insert as pg_insert`` is the idiom this repository already uses, and an exact-name check missed
+#: it — the fence went green on ``pg_insert(Adjustment)`` in its first widened form too. Over-broad
+#: on purpose: a helper named ``reinsert`` is caught as well, and being caught costs one comment.
+_DML_CALLS: Final = frozenset({"insert", "update", "delete", "upsert", "merge"})
+
+_RAW_WRITE: Final = re.compile(
+    r"\b(insert\s+into|update|delete\s+from)\s+\"?("
+    + "|".join(WRITE_SIDE_TABLES.values())
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _written_entities(source: str) -> set[str]:
+    """Every guarded entity a module writes, by any route an adversarial review could find.
+
+    Four routes, and three of them were added after a reviewer demonstrated each one walking past
+    the first version of this fence — which had matched only the *callee* of a call node:
+
+    1. ``Adjustment(...)`` — direct construction.
+    2. ``y.Adjustment(...)`` — construction through an aliased import, the evasion that once kept a
+       fence in this repository green through the very increment it was watching.
+    3. ``insert(Adjustment)`` / ``pg_insert(Adjustment)`` / ``update(Adjustment)`` — the class in
+       *argument* position, which is the idiom four modules of this project already use and was
+       therefore the likeliest way for this fence to be defeated by accident rather than by intent.
+    4. ``text("INSERT INTO adjustment ...")`` and any other raw statement — matched on the table
+       name, because raw SQL names no Python object at all.
+
+    Reading is not writing: ``operations/service.py`` legitimately selects an ``Approval`` to check
+    what it authorised, and a fence that forbade the name outright would forbid the read too.
     """
-    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        constructed = {
-            node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-        }
-        for forbidden in ("Approval", "Adjustment", "Outbox", "PostingAttempt"):
-            assert forbidden not in constructed, f"{path.name} constructs {forbidden}"
+    tree = ast.parse(source)
+    written: set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            called = (
+                node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+            )
+            if called in WRITE_SIDE_TABLES:
+                written.add(called)
+            if any(verb in called.lower() for verb in _DML_CALLS):
+                for argument in node.args:
+                    name = (
+                        argument.id
+                        if isinstance(argument, ast.Name)
+                        else getattr(argument, "attr", "")
+                    )
+                    if name in WRITE_SIDE_TABLES:
+                        written.add(name)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            for match in _RAW_WRITE.finditer(node.value):
+                written.update(
+                    entity for entity, table in WRITE_SIDE_TABLES.items() if table == match.group(2)
+                )
+
+    return written
+
+
+def assert_only_one_module_writes_an_adjustment(sources: Mapping[str, str]) -> None:
+    """No approval is ever created, and exactly one module constructs an adjustment.
+
+    This fence has now been narrowed three times, and every narrowing was forced by the increment
+    that made the previous wording false. It first said nothing constructs a ``TreatmentProposal`` —
+    untrue once M3.2 defined the response contract, which is constructed at the provider boundary by
+    design. It then said nothing persists one or builds its provenance — untrue once M3.3 recorded a
+    proposal with its model id, version and prompt hash. It then said **no adjustment is ever
+    written**, which 4.1 makes false: persisting the operation identifier before dispatch is that
+    increment's stated deliverable, and ``adjustment.operation_id`` is the column that holds it.
+
+    The replacement is deliberately not a weaker version of the old claim. "Nothing writes one" was
+    unfalsifiable once one thing legitimately did; **"exactly one module writes one"** is checkable,
+    fails loudly if a second appears, and fails just as loudly if the first stops — which is what
+    keeps it from decaying into a comment.
+
+    ``Approval`` stays forbidden outright: FR-7 requires an explicit human decision before any
+    ledger write, the gate that records one is 5.1, and nothing at 4.1 may manufacture its own
+    authority. ``Outbox`` and ``PostingAttempt`` stay forbidden because dispatch intent and the
+    write-ahead attempt record are 4.2's, and an increment that quietly acquired them would make
+    the transactional boundary 4.2 has to prove untestable.
+    """
+    writers: set[str] = set()
+    for name, source in sources.items():
+        written = _written_entities(source)
+        for forbidden in ("Approval", "Outbox", "PostingAttempt"):
+            assert forbidden not in written, f"{name} writes {forbidden}"
+        if "Adjustment" in written:
+            writers.add(name)
+
+    assert sources, "the guard inspected nothing"
+    assert writers == {ADJUSTMENT_WRITER}, (
+        f"exactly {ADJUSTMENT_WRITER} may write an Adjustment; found {sorted(writers)}"
+    )
+
+
+def test_only_one_module_writes_an_adjustment() -> None:
+    assert_only_one_module_writes_an_adjustment(_package_sources())
+
+
+def test_kill_a_second_adjustment_writer_is_detected() -> None:
+    """The narrowing is only worth having if a second writer fails it."""
+    sources = dict(_package_sources())
+    sources["llm/service.py"] = sources["llm/service.py"] + "\n_rogue = Adjustment(amount=1)\n"
+
+    with pytest.raises(AssertionError, match="may write an Adjustment"):
+        assert_only_one_module_writes_an_adjustment(sources)
+
+
+def test_kill_an_aliased_adjustment_writer_is_detected() -> None:
+    """``import ... as`` then an attribute call is how the previous fence was evaded once."""
+    sources = dict(_package_sources())
+    sources["llm/service.py"] = (
+        sources["llm/service.py"] + "\nimport x as _y\n_rogue = _y.Adjustment(amount=1)\n"
+    )
+
+    with pytest.raises(AssertionError, match="may write an Adjustment"):
+        assert_only_one_module_writes_an_adjustment(sources)
+
+
+def test_kill_losing_the_only_adjustment_writer_is_detected() -> None:
+    """The other direction, and the one a narrowed fence usually forgets.
+
+    A guard that only notices *extra* writers passes happily when the deliverable it was narrowed
+    for disappears — the fence would then be asserting something about an empty set and reading as
+    though 4.1 were still intact.
+    """
+    sources = {
+        name: source for name, source in _package_sources().items() if name != ADJUSTMENT_WRITER
+    }
+
+    with pytest.raises(AssertionError, match="may write an Adjustment"):
+        assert_only_one_module_writes_an_adjustment(sources)
+
+
+def test_kill_an_approval_written_anywhere_is_detected() -> None:
+    """5.1's deliverable must not appear early, under any module."""
+    sources = dict(_package_sources())
+    sources["operations/service.py"] = (
+        sources["operations/service.py"] + "\n_rogue = Approval(principal='me')\n"
+    )
+
+    with pytest.raises(AssertionError, match="writes Approval"):
+        assert_only_one_module_writes_an_adjustment(sources)
+
+
+@pytest.mark.parametrize("forbidden", ["Outbox", "PostingAttempt"])
+def test_kill_dispatch_machinery_written_anywhere_is_detected(forbidden: str) -> None:
+    """4.2's deliverables, kept out of 4.1 by the same fence."""
+    sources = dict(_package_sources())
+    sources["operations/service.py"] = (
+        sources["operations/service.py"] + f"\n_rogue = {forbidden}(id=1)\n"
+    )
+
+    with pytest.raises(AssertionError, match=f"writes {forbidden}"):
+        assert_only_one_module_writes_an_adjustment(sources)
+
+
+@pytest.mark.parametrize(
+    ("label", "injection"),
+    [
+        ("a core insert", "_rogue = insert(Adjustment).values(amount=1)"),
+        ("a dialect insert", "_rogue = pg_insert(Adjustment).values(amount=1)"),
+        ("an update", "_rogue = update(Adjustment).values(amount=1)"),
+        ("a delete", "_rogue = delete(Adjustment)"),
+        ("raw sql", '_rogue = text("INSERT INTO adjustment (id) VALUES (1)")'),
+        (
+            "raw sql, lower case and quoted",
+            "_rogue = text('insert into \"adjustment\" (id) values (1)')",
+        ),
+        ("a raw update", '_rogue = text("UPDATE adjustment SET amount = 0")'),
+    ],
+)
+def test_kill_a_second_adjustment_writer_by_any_route_is_detected(
+    label: str, injection: str
+) -> None:
+    """**The four evasions an adversarial review demonstrated, plus their variants.**
+
+    Every one of these left the first version of this fence green. They are not hypothetical: the
+    Core-insert idiom is what four modules of this repository already use, so the fence would have
+    been defeated by an ordinary implementation choice rather than by anyone trying.
+    """
+    sources = dict(_package_sources())
+    sources["llm/service.py"] = sources["llm/service.py"] + "\n" + injection + "\n"
+
+    with pytest.raises(AssertionError, match="may write an Adjustment"):
+        assert_only_one_module_writes_an_adjustment(sources)
+
+
+@pytest.mark.parametrize(
+    ("label", "injection"),
+    [
+        ("a core insert", "_rogue = insert(Outbox).values(id=1)"),
+        ("a dialect insert", "_rogue = pg_insert(PostingAttempt).values(id=1)"),
+        ("raw sql", '_rogue = text("INSERT INTO posting_attempt (id) VALUES (1)")'),
+        ("a raw approval write", '_rogue = text("INSERT INTO approval (id) VALUES (1)")'),
+    ],
+)
+def test_kill_later_increment_machinery_by_any_route_is_detected(
+    label: str, injection: str
+) -> None:
+    """4.2's and 5.1's deliverables, kept out by the same widened scan."""
+    sources = dict(_package_sources())
+    sources["operations/service.py"] = sources["operations/service.py"] + "\n" + injection + "\n"
+
+    with pytest.raises(AssertionError, match=r"writes (?:Outbox|PostingAttempt|Approval)"):
+        assert_only_one_module_writes_an_adjustment(sources)
+
+
+def test_reading_a_guarded_entity_is_not_writing_it() -> None:
+    """The control that keeps the widened fence usable.
+
+    ``operations/service.py`` selects an ``Approval`` to check what it authorised, and must go on
+    doing so. A fence that could not tell a read from a write would forbid the check that FR-7
+    depends on.
+    """
+    reading = "rows = session.execute(select(Approval).where(Approval.id == x))"
+    assert _written_entities(reading) == set()
+
+    assert "Approval" in _package_sources()[ADJUSTMENT_WRITER], "the writer really does read one"
+    assert "Approval" not in _written_entities(_package_sources()[ADJUSTMENT_WRITER])
+
+
+def test_kill_a_vacuous_adjustment_writer_scan_is_detected() -> None:
+    """An empty source list makes every assertion above trivially true."""
+    with pytest.raises(AssertionError, match="inspected nothing"):
+        assert_only_one_module_writes_an_adjustment({})

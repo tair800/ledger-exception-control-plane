@@ -53,6 +53,9 @@ _ACCOUNT_CODE: Final = re.compile(r"^[0-9]{4}$")
 #: The shape ``adjustment.period`` accepts (``YYYY-MM``), mirrored from the column's own constraint.
 _PERIOD: Final = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 
+#: An ISO 4217 alphabetic code, mirrored from ``currency_format_constraint``.
+_CURRENCY: Final = re.compile(r"^[A-Z]{3}$")
+
 
 class AmbiguousAccountPolicyError(ValueError):
     """Two rules configured for one (classification, treatment) pair.
@@ -223,7 +226,7 @@ class LedgerContext:
     accounts: AccountPolicy
 
     def __post_init__(self) -> None:
-        if not re.fullmatch(r"^[A-Z]{3}$", self.functional_currency):
+        if not is_currency(self.functional_currency):
             raise ValueError(f"not an ISO 4217 code: {self.functional_currency!r}")
         if not _PERIOD.fullmatch(self.earliest_open_period):
             raise ValueError(f"not a YYYY-MM period: {self.earliest_open_period!r}")
@@ -238,6 +241,34 @@ class LedgerContext:
         boundary, because that is the comparison a reader is entitled to doubt.
         """
         return period >= self.earliest_open_period
+
+
+def is_currency(value: str) -> bool:
+    """Whether a string is a well-formed ISO 4217 alphabetic code.
+
+    Extracted from :class:`LedgerContext`'s own check rather than written afresh, so the rule keeps
+    exactly one declaration. 4.1 needs it at the persistence boundary: the ``adjustment`` column
+    does carry a currency-format constraint, but reaching it means an ``IntegrityError`` mid-flush,
+    which deactivates the caller's transaction — a refusal one step earlier is the same answer
+    without the collateral damage.
+    """
+    return bool(_CURRENCY.fullmatch(value))
+
+
+def is_account_code(value: str) -> bool:
+    """Whether a string is a well-formed ledger account code.
+
+    The companion to :func:`is_period`, and added for the same reason one increment later: the
+    ``adjustment`` column that stores an account code is a bare ``String(64)`` with **no check
+    constraint at all**, so unlike the period there is no database backstop. An adversarial review
+    of 4.1 walked an arbitrary 48-character string straight into a priced, identified, persisted
+    instruction.
+
+    The rule is stated once, here, beside the policy that enforces it on the way in — a second
+    declaration elsewhere would be free to drift from this one, which is the failure this project
+    keeps a single ``TreatmentCode`` declaration to avoid.
+    """
+    return bool(_ACCOUNT_CODE.fullmatch(value))
 
 
 def is_period(value: str) -> bool:

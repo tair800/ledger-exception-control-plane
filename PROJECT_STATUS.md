@@ -3,8 +3,8 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M3.4 complete — the cassette record/replay harness. The suite runs offline
-from cassettes with no credential and no network. **Next:** M4.1.
+**Current milestone:** M4.1 complete — claim locking and the retry-independent operation
+identifier, the first increment of the reliability phase. **Next:** M4.2.
 **The whole deterministic core exists.** A settlement file is ingested, normalised and either
 accepted or quarantined; its lines are matched deterministically against ledger entries with
 tolerance; every line that fails to match becomes exactly one classified exception; and an approved
@@ -32,7 +32,8 @@ and persists nothing.
 | **3.2 Provider port and closed response schema** | **DONE** | Five-field contract with no numeric anywhere; two adapters behind one port; OPEN-5 resolved |
 | **3.3 Evidence assembly and proposal flow** | **DONE** | Stable evidence ids, canonical prompt and hash, citation subset validation, proposals recorded |
 | **3.4 Cassette recording harness** | **DONE** | Whole-request fingerprint match, scrubbing, fail-closed capture; the corpus replays offline through both adapters |
-| 4.1 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **4.1 Claim locking and operation identifier** | **DONE** | `SKIP LOCKED` claim proven under forced concurrency; identifier retry-independent, instruction-bound, approver-independent, and persisted before dispatch |
+| 4.2 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -694,6 +695,85 @@ accept the clean copy:
 Mutations are applied to in-memory copies — a parsed AST, a throwaway enum — so a crashed test cannot
 leave one in the money path, and a further test asserts none reached disk. A previous increment had a
 reviewer leave a mutation behind; this one is built so it cannot.
+
+## What M4.1 delivered
+
+The first increment of the reliability phase, and the one every later guarantee rests on: *one
+residual, one worker, one operation identifier.* **No migration** — every column, constraint and
+index it needs has existed since M1.2, including the `(status, created_at)` index the claim reads.
+
+### The claim
+
+`SELECT … FOR UPDATE SKIP LOCKED` over open residuals, held for the life of the caller's
+transaction. No claim column, no lease, no reaper: a worker that dies loses its connection and
+PostgreSQL releases the row. A `claimed_by`/`claimed_at` column would have needed an expiry policy,
+and one that fires early hands a single residual to two workers — the exact failure being prevented.
+
+`SKIP LOCKED` where ADR-041 blocks, deliberately. Two deliveries of one settlement payload are the
+*same* work, so that loser should wait; two workers pulling residuals want *different* rows, and
+blocking would serialise the queue for no reason.
+
+**Stated at the strength it holds:** at most one holder, for as long as the transaction. The lock is
+released by commit as well as rollback, 4.1 writes no status, and the honest bound on crash recovery
+is written down — a frozen or partitioned host holds the lock until TCP keepalive or a server-side
+timeout expires, and this project configures neither.
+
+### The identifier
+
+```
+operation_id = SHA256( DOMAIN_TAG
+                     || len_prefixed(exception_id)
+                     || len_prefixed(resolution_version)
+                     || len_prefixed(instruction_payload_hash) )
+```
+
+Per §12.1 and ADR-004b, resolving a contradiction in the plan's own deliverables line against four
+documents that agree — including that line's own tests (ADR-052). The payload hash binds **every**
+field of the posting instruction, checked against the dataclass itself so a field added later cannot
+escape it. The approver is excluded, because §16 permits it to vary for one economic event.
+
+The amount is canonicalised by exact integer arithmetic on `as_tuple()` digits — never `quantize`,
+which is a context operation this repository has already been bitten by once. `Decimal("120.45")` and
+`Decimal("120.450000")` produce one identifier; a hostile `decimal.getcontext()` produces the same
+one.
+
+**The exact digests are pinned by literal.** Every other test compares two derivations and stays
+green if the derivation changes underneath both — a reviewer bumped the domain tag and all 68 tests
+passed.
+
+### The persistence boundary
+
+Exactly one module writes an `adjustment` row, and it refuses six things before deriving anything:
+an instruction priced for another exception, one priced for another treatment, an account code the
+policy would never issue, a zero amount, an escalated treatment, and a malformed period or currency.
+Three of those have no database constraint behind them at all; the others have one whose refusal
+would arrive as an `IntegrityError` and take the caller's whole transaction with it.
+
+### What this increment did not build
+
+No outbox, no dispatcher, no adapter, no capability declaration, no write-ahead attempt record, no
+retry, no DLQ, no `UNKNOWN` state, no reconciliation, no supersession interlock, no recovery queue,
+no naive baseline, no chaos suite, no approval gate, no audit event.
+
+**No duplicate-suppression claim is made.** §12.3: sending an identifier is a *request* for
+idempotent treatment. 4.1 supplies the third clause of §13.5's condition; the capability clauses are
+4.2's and the branching is 4.4's.
+
+## M4.1 verification
+
+```
+operations suite:     40 passed against real PostgreSQL (tests/test_operations_postgres.py)
+identity suite:       82 passed (tests/test_operation_identity.py, no database)
+mutation battery:     34/34 defects reintroduced and killed, then restored (14 unit, 20 integration)
+schema:               no migration; alembic reports no new upgrade operations
+```
+
+Both exit criteria were run, not asserted. **Two workers, one residual** is forced with an explicit
+handshake — the first worker holds its transaction open and the second provably runs while it does —
+because `asyncio.gather` on its own usually serialises and would have proved nothing. **Retry
+independence** is established by walking the syntax tree of every module that supplies a component,
+and **instruction binding** by mutating each of the nine instruction fields in turn against a list
+checked against the dataclass.
 
 ## What M3.4 delivered
 
@@ -1779,30 +1859,36 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-whole suite:  1268 passed against a real database (0 failed, 31m10s)
-default gate: 1093 passed, 179 deselected (no Docker required)
-coverage:     97.96% (gate 90%)
-ruff format:  88 files already formatted
+whole suite:  1425 passed against a real database (0 failed, 38m12s)
+default gate: 1210 passed, 219 deselected (no Docker required)
+coverage:     97.85% (gate 90%)
+ruff format:  94 files already formatted
 ruff check:   All checks passed!
-mypy:         Success: no issues found in 82 source files
+mypy:         Success: no issues found in 88 source files
 uv lock:      up to date (--check)
 alembic:      No new upgrade operations detected
 corpus:       matches the generator byte for byte
 demo snapshot: artifacts/m2-demo.html matches the pipeline byte for byte
 cassette:     tests/cassettes/canonical-corpus.json matches the builder byte for byte
-cassette harness:  98 passed (18 mutations shown failing, then restored)
-treatment closure: 79 passed (8 mutations shown failing, then restored)
-tooling bootstrap: 23 passed (14 mutations shown failing, then restored)
-proposal contract: 94 passed;   AI/money firewall: 47 passed
+operations (real PostgreSQL): 40 passed (20 mutations shown failing, then restored)
+operation identity:  82 passed (14 mutations shown failing, then restored)
+treatment closure:   98 passed;  AI/money firewall: 56 passed
+tooling bootstrap:   30 passed;  cassette harness:  98 passed
 ```
 
-`llm/cassette.py` measures 100% with 40 branches covered.
+`operations/claim.py` and `operations/service.py` measure 100%; `operations/identity.py` 92%, its
+uncovered lines being the two unreachable non-finite-exponent guards and the type refusals that only
+a future field of the wrong type could reach.
 
 Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-09-05.
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 53 ADRs and 9 OPEN items. M3.4 recorded **ADR-051** and opened nothing.
+`DECISIONS.md` holds 54 ADRs and 9 OPEN items. M4.1 recorded **ADR-052** and opened nothing; it
+also raised, without resolving, a **three-way disagreement about when the `naive/` kill-test gate
+runs** — `PROJECT_SPEC.md` §23 and `CLAUDE.md` say "before M4", `IMPLEMENTATION_PLAN.md` places it at
+4.5 and ADR-006 says 4.4. It does not block 4.1 and should be settled before 4.2. M3.4 recorded
+**ADR-051** and opened nothing.
 OPEN-5 was resolved at M3.2 (ADR-049); M3.3 recorded ADR-050 and opened **OPEN-13** (per-proposal
 evidence pack) and **OPEN-14** (persisting the merchant memo), both of which are still open — the
 harness did not force either, because replay matches on a request fingerprint rather than on stored

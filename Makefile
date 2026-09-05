@@ -1,9 +1,10 @@
 # Developer commands. `make help` lists them.
 .DEFAULT_GOAL := help
-.PHONY: help install fmt fmt-check lint types test gate coverage-gate up down down-volumes \
-        logs ps smoke build db-up test-db-init migrate migrate-down schema-verify \
-        fixtures fixtures-check fixtures-load fixtures-verify ingest-verify match-verify \
-        classify-verify money-verify m2-demo m2-demo-check cassettes cassettes-check \n        cassette-verify
+.PHONY: help install fmt fmt-check lint types test gate coverage-gate up down down-volumes logs \
+        ps smoke build db-up test-db-init migrate migrate-down schema-verify fixtures \
+        fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify \
+        money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
+        operations-verify
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -146,6 +147,11 @@ m2-demo: ## Render artifacts/m2-demo.html from real M2 pipeline output (no Docke
 
 m2-demo-check: ## Fail if the committed snapshot has drifted from the pipeline
 	uv run python -m ledger_exception_control_plane.demo verify
+
+# --- claim locking and operation identity (M4.1) ---
+
+operations-verify: test-db-init ## Prove the claim lock and the persisted identifier against real PostgreSQL
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_operations_postgres.py -m integration -p no:cacheprovider --no-cov
 
 # --- recorded cassettes (M3.4) ---
 #

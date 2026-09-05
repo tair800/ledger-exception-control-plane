@@ -2323,6 +2323,174 @@ unwritten column is more honest than a plumbed one nothing reads.
 
 ---
 
+## ADR-052 — One residual, one worker, one operation identifier (M4.1)
+
+**Status:** Accepted (M4.1). Implements ADR-004b rather than re-deciding it. Records how one
+contradiction in the plan was resolved, four derivation decisions the specification left open, and
+one contradiction that is **not** resolved and is raised rather than settled.
+
+### The plan contradicts itself, and the repository settles it
+
+`IMPLEMENTATION_PLAN.md` §4.1 states the derivation inputs as
+`(exception_id, resolution_version, treatment_code, approver_id)`. That clause is defective on two
+counts and was resolved against — not by preference, but on the repository's own evidence:
+
+- It **defers on its face**: the same sentence says *"per `PROJECT_SPEC.md` §12.1"*, so where it
+  diverges from §12.1 it contradicts its own citation.
+- **The same increment's Tests line demands the opposite.** It requires *"an assertion that mutating
+  any component of the posting instruction changes the identifier; and an assertion that changing
+  only `approver_id` does **not**."* A literal implementation of the tuple fails both.
+- Its **Exit criteria** say the identifier must be *"provably instruction-bound"*, which
+  `treatment_code` alone cannot be.
+- `PROJECT_SPEC.md` §12.1, ADR-004b and `CLAUDE.md` §3 all state the same three components and
+  exclude the approver, with the reason given: §16 permits the approver to vary for the same
+  economic event, so an identifier that varied with them would vary with a non-financial input —
+  the mirror image of the retry-dependence the rule exists to prevent, failing just as silently.
+
+The implementation follows §12.1 and ADR-004b. **No decision was invented**; four documents agree
+against one clause of one line.
+
+### The payload binds nine fields, not the specification's six
+
+§12.1 enumerates treatment, amount, currency, account, period and the ledger-context version. The
+implementation binds every field of `AdjustmentInstruction`, which is those six plus `exception_id`,
+`quantum` and `rounding`.
+
+That is strictly stronger and satisfies both documents: §12.1's rule is stated as a *principle* —
+"everything that determines the financial effect" — with the list as elaboration, and a change of
+quantisation or rounding mode is a change in how the amount was determined. The plan's test
+obligation is the deciding one: *any* component of the posting instruction must move the identifier,
+and a field left unbound would fail it.
+
+The binding is checked against `dataclasses.fields(AdjustmentInstruction)` rather than against a
+hand-maintained list, so a field added to the instruction in a later increment cannot silently escape
+the hash. The mutation sweep is checked the same way, so a new field fails twice: once for not being
+hashed, once for not being tested.
+
+### The claim is the transaction, and there is no claim column
+
+§13.1's Guarantee 1 is delivered by `SELECT … FOR UPDATE SKIP LOCKED` over `exception`, holding for
+the life of the caller's transaction. No `claimed_by`, no `claimed_at`, no lease table, no reaper —
+and no migration: every column, constraint and index this increment needs has existed since M1.2,
+including the `(status, created_at)` index that supports the claim.
+
+A claim column would have been the obvious design and would have been worse. It survives the process
+that wrote it, so it needs an expiry policy, and an expiry policy that fires early hands one residual
+to two workers — the exact thing being prevented.
+
+**`SKIP LOCKED`, where ADR-041 blocks.** That contrast is deliberate. ADR-041 claims a settlement
+batch with a plain `FOR UPDATE` because two deliveries of one payload are the *same* work, so the
+loser should wait and then observe a finished batch. A residual queue is the opposite: the second
+worker wants a *different* row, and blocking would serialise the queue behind the first worker for
+no reason. The rationale does not transfer, so the module carries its own.
+
+**What the transaction-scoped lock does not cover, stated rather than implied.** §14 asks that
+*"claimed work times out and returns"*, and this delivers it whenever the server learns the client is
+gone — a crash, a kill, a closed socket. It does **not** cover a frozen or partitioned host, where no
+FIN arrives and the lock is held until TCP keepalive or a server-side timeout expires; this project
+configures neither. The first draft of that docstring said the design "needs no mechanism beyond
+that", which was an overstatement two reviewers caught independently. Choosing
+`idle_in_transaction_session_timeout` is a deployment decision belonging with the dispatcher that
+will hold these claims for real work (4.2).
+
+The lock is also released by **commit**, not only by rollback, and 4.1 writes no status — so a claim
+is exclusive while held and the residual is claimable again immediately afterwards. The guarantee is
+**at most one holder**, never exactly one, and the module says so.
+
+### The persistence boundary refuses what the database cannot
+
+`record_operation` is the only module in the package that writes an `adjustment` row, and it refuses
+six things before deriving anything. Three of those refusals exist because no constraint can make
+them, and three because reaching the constraint costs the caller their transaction — a failed flush
+deactivates the SQLAlchemy session, so a refusal arriving as an `IntegrityError` takes the whole unit
+of work with it.
+
+| Refusal | Why it cannot be left to the database |
+|---|---|
+| The instruction prices a different exception | `adjustment` has **no `exception_id` column** — it reaches the exception only through the approval — so nothing downstream would notice exception A's amount posted under exception B's authorisation |
+| The instruction prices a different treatment | The composite foreign key keeps the *column* honest and cannot see that the amount was computed for another decision |
+| The account code is not a ledger account | `adjustment.account_code` is a bare `String(64)` with **no check constraint at all**. The money policy's four-digit rule was the only definition, and nothing on this path consulted it |
+| A zero amount | Refused by the calculator (§7: an instruction to do nothing carrying the full weight of an approved financial instruction) and by no constraint |
+| An escalated treatment | §6.2 makes it a contradiction. The constraint exists; reaching it aborts the transaction |
+| A malformed period or currency | Constraints exist; same reason |
+
+`AdjustmentInstruction` is a plain frozen dataclass that validates nothing, so *"it came from the
+calculator"* was a convention rather than a fact. `money.is_account_code` and `money.is_currency`
+were added beside the existing `is_period` so each rule keeps exactly one declaration.
+
+### The canonical amount is integer arithmetic, never `quantize`
+
+An identifier that varied with how a `Decimal` happened to be spelled would defeat idempotency
+silently: `Decimal("120.45")` and `Decimal("120.450000")` are the same amount, compare equal, and
+render differently. `db/base.py` already quantises on read and names this exact hazard; a value that
+never went through a read would otherwise defeat the other half.
+
+`quantize` is not used, and that is not a style choice. It is a **context operation** — it raises
+above `decimal.getcontext().prec` and rounds by the ambient mode — so the answer would depend on what
+an unrelated caller set the context to. This repository has already been bitten once by a context
+operation, when `scaleb` accepted an amount with 29 decimal places by rounding the evidence away
+before inspecting it. The derivation reads `as_tuple()` digits and shifts by integer exponentiation:
+exact, total, and provably unaffected by a hostile precision, which is asserted rather than argued.
+
+Two domain tags, not one. `operation_id` and `instruction_payload_hash` are both 64 hex characters
+and both satisfy the same column check, so without separation a payload digest stored in the
+identifier column would be indistinguishable from a real identifier — storable, wrong, and
+undetectable afterwards.
+
+### What review changed
+
+Six reviewers produced roughly forty findings, twenty-six distinct. Every one was reproduced before
+being accepted. The corrections worth recording:
+
+| Finding | What was wrong | Evidence |
+|---|---|---|
+| Nothing pinned the derivation to a **value** | Every test asserted a *property* — that two derivations agree, that a mutation changes the answer — and both sides of every comparison moved together | A reviewer bumped the domain tag, altered the framing and reordered components: all 68 tests passed each time. An `operation_id` is persisted, is what the unique constraint enforces, and is what a provider will deduplicate on. Golden vectors now pin it |
+| `ClaimedResidual.classification` | Annotated as an enum, always a plain `str` — the column has no type decorator | **Found by four reviewers independently**, forty lines from where the sibling module had already fixed the same thing. A `StrEnum` compares *and hashes* equal to its value, so `==` and `in` keep working while `is` fails and `.value` raises. 4.2's dispatcher is the consumer |
+| The refusal path itself crashed | The treatment was compared with `is not`, so a bare-string treatment took the refusal branch and then raised `AttributeError` on `.value` | The same `StrEnum` asymmetry, on the code whose only job is to refuse cleanly |
+| `canonical_amount` did unbounded work | Every spelling of zero passes both the scale and magnitude checks, so `0E+400000` reached `10**400004` | Measured: 42 ms for a ten-character input, 3.5 s for `0E-5000000`, growing without limit. Zero is the only value that can reach a large shift, so short-circuiting it bounds the function — now 0.1 ms |
+| The instruction was trusted, not checked | Only two of nine fields were validated | A 48-character account code carrying SQL punctuation reached a priced, identified, persisted instruction |
+| `FOR UPDATE` took the row without its data | An `Approval` already in the identity map keeps its in-memory values; the ORM returns the cached instance | SQLAlchemy documents `populate_existing` for exactly this construct. `resolution_version` is the value at risk: it feeds the identifier and no column on `adjustment` re-checks it |
+| The idempotent path compared one digest | `operation_id` and `instruction_payload_hash` are independent columns; a row right in one and wrong in the other read as agreement | The payload hash is the one that says *what* was priced |
+| The narrowed adjustment fence was evaded | It matched only a call's *callee*, so `insert(Adjustment)`, `pg_insert(Adjustment)` and `text("INSERT INTO adjustment …")` all walked past | Demonstrated, not theorised — and the Core-insert idiom is one four modules of this repository already use, so the fence would have been defeated by an ordinary implementation choice rather than by intent |
+| The widened milestone fence could not see `outbox.py` | The list mixed file names with bare package names, and `rglob("outbox")` never matches `outbox.py` | The most likely shape of the thing the widening was for |
+| The concurrent-record test forced nothing | `asyncio.gather` usually runs the two calls in sequence, and every assertion held under sequential execution | It passed with the row lock removed entirely. It now uses the `pg_stat_activity` handshake |
+| The retry-independence fence watched one file | `service.py` supplies two of the identifier's three components | `resolution_version + int(time.time()) % 2` left the whole default suite green |
+| The `.PHONY` line was broken | A patch script emitted a literal `\n` where a continuation belonged, in the M3.4 commit | `make` is not a dependency and CI drives every suite directly, so nothing had executed the Makefile since. Found while extending it, fixed, and now guarded |
+
+Thirty-four mutants — fourteen unit, twenty integration — are held by a battery that reintroduces each
+defect mechanically and requires the suite to turn red. All thirty-four do.
+
+### What 4.1 deliberately did not build
+
+No outbox, no dispatcher, no adapter, no capability declaration, no write-ahead attempt record, no
+retry, no DLQ, no `UNKNOWN` state, no reconciliation, no supersession interlock, no recovery queue,
+no naive baseline, no chaos suite, no approval gate and no audit event. No migration, and no table:
+the schema has been ready since M1.2.
+
+**Nothing here claims an effectively-once financial side effect.** §12.3 is explicit that sending an
+operation identifier does not make anything idempotent — it is a *request* for idempotent treatment,
+honoured only if the provider implements one. What 4.1 supplies is the third clause of §13.5's
+condition: a stable, retry-independent identifier. The capability clauses are 4.2's and the branching
+is 4.4's, and until both exist the claim may not be made.
+
+### Not resolved: when the naive kill-test gate runs
+
+`PROJECT_SPEC.md` §23 and `CLAUDE.md` both say **"Before M4:"** the `naive/` branch must be shown to
+double-post, or the chaos suite is theatre and the flagship claim collapses. `IMPLEMENTATION_PLAN.md`
+places that work at **4.5**, the *last* increment of M4, and ADR-006 says **4.4**. Three documents,
+three answers.
+
+The M3 kill test was 3.1 — the *first* increment of its phase — which is the reading that makes
+"checked early" mean anything, and it is the precedent that makes the plan's placement look wrong.
+
+This does not block 4.1: no document lists the naive baseline among 4.1's deliverables, and 4.1's own
+exit criteria are self-contained. It is recorded here rather than resolved, because deciding when a
+project-killing gate runs is not an implementation detail and the repository does not settle it.
+**It should be settled before 4.2 begins**, since every increment built on top of an unproven gate is
+work that a failed gate would discard.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.
