@@ -73,6 +73,28 @@ class Settings(BaseSettings):
     #: closed, and OPEN-8 explicitly rules out inventing an identity provider here.
     principals: str = ""
 
+    # -- Ambiguous-outcome reconciliation and recovery (M4.4, §13.5) --------------------
+    #
+    # §13.5 requires a negative answer to be corroborated across "N consecutive queries" and
+    # requires reconciliation to be bounded, and names neither number. **Declared project
+    # decisions, not empirical findings** (ADR-057); the reasoning for each is on
+    # `ReconciliationPolicy`, and the bounds below are what stops a deployment configuring them
+    # into something unsafe.
+
+    #: N. At least 2, because a single answer corroborating itself is not corroboration and the
+    #: whole purpose of the count is to survive one stale read.
+    reconcile_consecutive_not_found: int = Field(default=3, ge=2, le=20)
+
+    #: How many reconciliation passes an operation gets before an operator takes it. Capped,
+    #: because an unbounded query loop against a ledger is a retry loop that stopped calling
+    #: itself one — which §13.5 forbids in as many words.
+    reconcile_max_queries: int = Field(default=10, ge=2, le=100)
+
+    #: How long an operator has before a recovery item becomes an alertable condition (§13.5).
+    #: Bounded above at two weeks: an SLA longer than a period close would let an ambiguous
+    #: posting cross the boundary silently, which §13.5 explicitly escalates instead.
+    recovery_sla_hours: int = Field(default=24, ge=1, le=336)
+
     # -- Bounded retry (M4.3, §15) ------------------------------------------------------
     #
     # `PROJECT_SPEC.md` §15 says "base delay, multiplier and cap are configuration" and gives no

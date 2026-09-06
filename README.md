@@ -72,16 +72,48 @@ double-post against a RED baseline that does.
 > proves it applies exactly one posting reads the count off the simulated ledger rather than out of
 > our own records.
 >
-> **What does not exist: anything that decides, approves, or resolves an ambiguity.** No approval is
-> obtained by any workflow — approvals are seeded directly in tests, and the gate that records one is
-> M5.1. Inside the reliability phase there is still no `UNKNOWN` reconciliation workflow, no
-> idempotency-window enforcement, no supersession interlock and no recovery queue (M4.4); **no naive
-> baseline and no chaos suite — the kill-test gate is at 4.5 and has not run**; and no audit
-> emission, console, evaluation or deployment.
+> And as of M5.1 — **the human approval gate**. A principal presents a bearer token; the registry
+> holds only its SHA-256, the comparison is constant-time across every entry, and an empty registry
+> refuses everybody. Three roles with two separations: an operator holds no approval right, and no
+> approval role may work the operations queues. The countersignature rule for an edited treatment and
+> the single use of an approval token are **database constraints**, and the gate's exit criterion is
+> a composite foreign key — an adjustment referencing a *rejection* has nothing to point at, so
+> PostgreSQL refuses the write with no application check involved.
+>
+> And as of M4.4 — **`UNKNOWN` semantics, bounded reconciliation and manual recovery**: §13.5's
+> capability branch executed rather than described. Where the adapter can be queried, reconciliation
+> **asks before it sends** — a query is a read that can be wrong for free and a re-send is an
+> irreversible write that cannot. A `NotFound` resolves to `REJECTED` only after N consecutive
+> negatives **and** both declared windows have elapsed; an `Indeterminate` never counts and breaks
+> the run. Where the adapter can only suppress, a re-send is permitted **only** inside the declared
+> idempotency window and a scope proven against the endpoint the original send recorded — an
+> unrecorded endpoint is *unproven*, not *matching*. Where it can do neither, the automatic path
+> stops and an operator takes it.
+>
+> **The count that justifies a negative resolution is derived, not stored.** Every query is appended
+> to an append-only table with the windows it was judged against, and "N consecutive" is read back
+> off those rows — because the number deciding whether an ambiguous financial write may be declared
+> un-applied must not be a column somebody can set. `UNKNOWN` is never overwritten in place: the
+> attempt row that saw the ambiguity keeps its outcome forever, `CONFIRMED → anything` is refused,
+> and both rules are database triggers rather than conventions.
+>
+> **The operator queue is a control, not a to-do list.** Each item carries the evidence procedure —
+> which artefact to inspect and what would be sufficient for each permitted resolution — an SLA that
+> makes a stale item alertable, and a segregation of duties the database enforces: the principal who
+> approved an adjustment may not judge what happened to it. `RESOLVED_UNVERIFIED` **settles nothing**
+> and is recorded as an abstention, because there is no terminal outcome meaning "a human judged
+> without evidence" and inventing one would be the coercion the design forbids under a new name.
+>
+> **What does not exist:** no audit emission at *every* state transition yet — 4.4 emits for its own
+> attempts, ambiguities, query results and operator decisions, and 5.2 extends that; **no naive
+> baseline and no chaos suite — the kill-test gate is at 4.5 and has not run**; and no console,
+> evaluation or deployment.
 >
 > **An `UNKNOWN` is still never retried.** The retry path cannot see one: an operation whose last
 > outcome is ambiguous, or which carries an unresolved in-flight attempt from a crash mid-send, is
-> excluded by the due-work query itself rather than filtered out after being chosen.
+> excluded by the due-work query itself rather than filtered out after being chosen. What 4.4 added
+> is not a retry — it is a query, a bounded re-send under a proven and unexpired suppression
+> guarantee, or a human.
 >
 > **No unconditional duplicate-suppression claim is made.** Sending an operation identifier to a
 > ledger does not make anything idempotent — it is a *request* for idempotent treatment, honoured
@@ -164,12 +196,18 @@ settlement file
       │                          ├── NOT_SENT  → bounded retry → DLQ
       │                          │              (allowlisted transport errors only,
       │                          │               no byte written)
-      │                          └── UNKNOWN   → capability branch:
-      │                                          enforced key → re-send, within window+scope
-      │                                          queryable    → reconcile, bounded
+      │                          └── UNKNOWN   → capability branch, in this order:
+      │                                          queryable    → reconcile, bounded — asking is a
+      │                                                         read, so it goes first
+      │                                          enforced key → re-send, only within the declared
+      │                                                         window AND a proven scope
       │                                          neither      → manual recovery, no re-send
       ▼
 [9] audit event + correlation id
+
+    An UNKNOWN never leaves this branch by inference. A NotFound resolves to REJECTED only
+    after N consecutive negatives and both declared windows; every query is appended as
+    evidence; and the resolution is an appended transition, never an edit to what a send saw.
 ```
 
 Backend Python 3.12 / FastAPI / Pydantic v2 / SQLAlchemy + Alembic, PostgreSQL, Redis with arq
@@ -340,6 +378,20 @@ that declares neither and **the claim is withdrawn, not reworded** — the syste
 `UNKNOWN`, refuses to re-send an irreversible write automatically, and routes it to manual recovery.
 The chaos suite runs that weak-adapter configuration too, because degrading correctly is part of the
 demonstration.
+
+**Guarantee 5 is bounded twice over, and both bounds are enforced (M4.4).** Declaring `ENFORCES_KEY`
+is necessary and not sufficient: a re-send is permitted only while the provider's declared
+idempotency window has not elapsed *and* the target endpoint can be shown to lie inside its declared
+scope. Outside either bound the re-send would be an ordinary duplicate write wearing an idempotency
+header, so it does not happen — the operation goes to an operator instead. An endpoint that was
+never recorded counts as *unproven*, not as matching.
+
+Where the adapter can be queried, the system asks before it sends, and a negative answer is not
+believed on its own: `NotFound` means "not visible to this query yet", so it resolves to `REJECTED`
+only after N consecutive negatives **and** both the declared visibility bound and in-flight window
+have elapsed. `Indeterminate` never counts and breaks the run. The evidence is append-only and the
+count is derived from it, because the number that justifies declaring an ambiguous financial write
+un-applied must not be a column somebody can set.
 
 Note the phrasing throughout: *effectively-once effect*, never "exactly-once" — and even that only
 where the capability table permits it. The mechanism is a retry-independent operation identifier, a

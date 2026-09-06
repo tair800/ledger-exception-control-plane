@@ -1174,6 +1174,52 @@ def test_wrapping_an_adapter_for_attribution_preserves_its_proven_capabilities()
     assert wrapped.suppresses_duplicates is True
 
 
+def test_wrapping_an_adapter_preserves_its_declared_endpoint_and_its_absence() -> None:
+    """**The same defect as above, in a new place, found the same way — by a test, not a review.**
+
+    4.4 bounds a re-send by the endpoint the *original* send recorded, and the dispatcher records
+    ``declared_endpoint(adapter)`` on the write-ahead attempt row. The proxy forwarded ``name`` and
+    ``capabilities`` and swallowed this one, so every send made through it recorded no endpoint at
+    all — and the bound then refused a re-send this adapter's *verified* ``ENFORCES_KEY`` permits.
+    A silent withdrawal of a permitted branch, exactly as before, surfaced by a replay test failing.
+
+    **Both directions matter, and the second is the one an implementation gets wrong.** Forwarding
+    a declared endpoint is the obvious half. Preserving its *absence* is not: a property that raised
+    ``AttributeError`` looked correct and was not, because Python 3.12 resolves runtime protocol
+    checks with ``inspect.getattr_static`` — so the wrapper satisfied
+    :class:`EndpointDeclaringAdapter` while being unable to answer, which is a worse state than
+    either honest one.
+    """
+    from ledger_exception_control_plane.ledger.port import (
+        EndpointDeclaringAdapter,
+        declared_endpoint,
+    )
+    from ledger_exception_control_plane.ledger.transport import AttributedAdapter
+
+    class _DeclaresNoEndpoint:
+        name = "silent"
+
+        def capabilities(self) -> LedgerAdapterCapabilities:
+            return LedgerAdapterCapabilities()
+
+        async def post(
+            self, operation_id: str, instruction: PostingInstruction
+        ) -> PostingOutcome:  # pragma: no cover - never called
+            return Confirmed(posting_ref="unused")
+
+    inner = SimulatedLedger(endpoint="sim://somewhere/postings")
+    wrapped = AttributedAdapter(inner)
+    assert declared_endpoint(wrapped) == "sim://somewhere/postings" == declared_endpoint(inner)
+    assert isinstance(wrapped, EndpointDeclaringAdapter)
+
+    silent = AttributedAdapter(_DeclaresNoEndpoint())
+    assert declared_endpoint(silent) is None
+    assert not isinstance(silent, EndpointDeclaringAdapter), (
+        "the wrapper must be invisible to the question, not merely usually invisible"
+    )
+    assert not hasattr(silent, "endpoint")
+
+
 def test_only_that_exact_wrapper_is_unwrapped_and_a_subclass_is_not() -> None:
     """**The unwrapping is an exact type check, and this is why.**
 

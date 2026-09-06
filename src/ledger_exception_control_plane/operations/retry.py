@@ -50,10 +50,16 @@ from collections.abc import Sequence
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from ledger_exception_control_plane.audit import (
+    correlation_for_adjustment,
+    emit,
+    posting_audit_outcome,
+)
 from ledger_exception_control_plane.config import Settings
 from ledger_exception_control_plane.db.control import (
     Adjustment,
     AttemptState,
+    AuditTool,
     DeadLetter,
     DispatchState,
     Outbox,
@@ -73,6 +79,7 @@ from ledger_exception_control_plane.ledger.transport import (
     classify_transport_failure,
 )
 from ledger_exception_control_plane.operations.dispatcher import (
+    POST_SCOPE,
     DispatchRefusedError,
     dispatch_once,
     outcome_code,
@@ -536,6 +543,18 @@ async def _resolve_not_sent(engine: AsyncEngine, *, adjustment_id: uuid.UUID) ->
         ).scalar_one()
         intent.last_outcome = OutcomeCode.NOT_SENT
         intent.attempt_count = max(intent.attempt_count, attempt.attempt_no)
+
+        # The dispatcher appended an event when this attempt was recorded and never reached its
+        # third transaction, so without this the trail would show a send with no ending. 4.4
+        # requires an event for *every* attempt, and an attempt that failed in transport is one.
+        await emit(
+            session,
+            tool=AuditTool.POST,
+            outcome=posting_audit_outcome(OutcomeCode.NOT_SENT),
+            correlation_id=await correlation_for_adjustment(session, adjustment_id),
+            occurred_at=attempt.sent_at,
+            scope_granted=POST_SCOPE,
+        )
         return int(attempt.attempt_no)
 
 

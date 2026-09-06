@@ -50,9 +50,16 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from ledger_exception_control_plane.audit import (
+    correlation_for_adjustment,
+    emit,
+    posting_audit_outcome,
+)
 from ledger_exception_control_plane.db.control import (
     Adjustment,
     AttemptState,
+    AuditOutcome,
+    AuditTool,
     DispatchState,
     Outbox,
     PostingAttempt,
@@ -61,6 +68,8 @@ from ledger_exception_control_plane.db.control import PostingOutcome as OutcomeC
 from ledger_exception_control_plane.ledger.conformance import capabilities_for
 from ledger_exception_control_plane.ledger.port import (
     Confirmed,
+    IdempotencyMode,
+    IdempotencyScope,
     LedgerAdapter,
     LedgerAdapterCapabilities,
     PartiallyApplied,
@@ -69,18 +78,30 @@ from ledger_exception_control_plane.ledger.port import (
     QueryableLedgerAdapter,
     Rejected,
     Throttled,
+    Unbounded,
     Unknown,
+    declared_endpoint,
 )
 
 __all__ = [
+    "POST_SCOPE",
     "DispatchRefusedError",
     "DispatchResult",
+    "ResendBound",
     "ResendDecision",
     "dispatch_once",
     "outcome_code",
     "reconciliation_is_available",
     "resend_decision",
+    "resend_is_within_bounds",
 ]
+
+#: §11's *"authorisation under which the action ran"* for a dispatch.
+#:
+#: Not a role: no human authorises an individual send. The human decision is the approval, which is
+#: recorded on its own event with its own principal, and this names the internal capability the
+#: deterministic path ran under. Written once so the trail stays filterable.
+POST_SCOPE = "ledger:post"
 
 #: Outcomes that end a dispatch. §13.3: the dispatcher will not initiate a second send for an
 #: operation already in a **known terminal state**, and these two are that state — the only two the
@@ -132,6 +153,60 @@ def resend_decision(capabilities: LedgerAdapterCapabilities) -> ResendDecision:
     if capabilities.queryable_by_operation_id:
         return ResendDecision.RECONCILE_FIRST
     return ResendDecision.MANUAL_RECOVERY
+
+
+class ResendBound(enum.StrEnum):
+    """Why a re-send was or was not permitted. §13.5 clause 3's two bounds, plus the base case."""
+
+    #: Inside the declared window, and inside the declared scope.
+    PERMITTED = "permitted"
+
+    #: ``now - first_send >= idempotency_window``. The provider may have forgotten the key.
+    WINDOW_EXPIRED = "window_expired"
+
+    #: The target cannot be shown to be inside the scope the original send was made under —
+    #: including because the original endpoint was never recorded. Unproven is not proven.
+    SCOPE_UNPROVEN = "scope_unproven"
+
+    #: The adapter does not enforce a key at all, so there is no bound to be inside.
+    NOT_ENFORCED = "not_enforced"
+
+
+def resend_is_within_bounds(
+    *,
+    capabilities: LedgerAdapterCapabilities,
+    first_sent_at: dt.datetime | None,
+    now: dt.datetime,
+    original_endpoint: str | None,
+    target_endpoint: str | None,
+) -> ResendBound:
+    """§13.5 clause 3's two bounds on a permitted re-send, evaluated together.
+
+    ``ENFORCES_KEY`` is necessary and **not sufficient**. The window is how long the provider
+    retains the key; outside it the header means nothing. The scope is where that key is honoured;
+    a key enforced per-endpoint says nothing about a different endpoint.
+
+    ``PER_ACCOUNT`` needs no comparison and that is a property of §12.1 rather than an omission: the
+    operation identifier binds the instruction payload, of which the account is part, so a re-send
+    to a different account would be a **different operation** and could not reach this function
+    carrying this identifier.
+
+    ``first_sent_at`` of ``None`` means nothing was ever sent, so there is nothing to re-send and no
+    window to be inside — reported as ``NOT_ENFORCED``, because a caller arriving here with no
+    attempt on record has a different problem than a spent bound.
+    """
+    if capabilities.idempotency is not IdempotencyMode.ENFORCES_KEY or first_sent_at is None:
+        return ResendBound.NOT_ENFORCED
+
+    if capabilities.idempotency_scope is IdempotencyScope.PER_ENDPOINT and (
+        original_endpoint is None or original_endpoint != target_endpoint
+    ):
+        return ResendBound.SCOPE_UNPROVEN
+
+    window = capabilities.idempotency_window
+    if isinstance(window, Unbounded):
+        return ResendBound.PERMITTED
+    return ResendBound.PERMITTED if now - first_sent_at < window else ResendBound.WINDOW_EXPIRED
 
 
 class DispatchRefusedError(Exception):
@@ -276,16 +351,45 @@ async def dispatch_once(
             if decision is not ResendDecision.PERMITTED:
                 why = (
                     "the adapter can be queried by operation identifier, so the answer is a "
-                    "reconciliation rather than another send (4.4)"
+                    "reconciliation rather than another send"
                     if decision is ResendDecision.RECONCILE_FIRST
                     else "the adapter can neither suppress nor detect a duplicate, so this routes "
-                    "to manual recovery (4.4)"
+                    "to manual recovery"
                 )
                 raise DispatchRefusedError(
                     f"operation {short}… is in an undetermined state and a further send is "
                     f"refused: {why}. §13.5 permits an automatic re-send only under ENFORCES_KEY."
                 )
 
+            # **ENFORCES_KEY is necessary and not sufficient**, and 4.4 moved this check here
+            # rather than leaving it to the caller. The bounds guard an irreversible write, so
+            # they belong in front of the socket rather than in whichever module happened to
+            # decide a re-send was worth attempting — a future caller that forgot to ask would
+            # otherwise get an unbounded duplicate under a header the provider may have forgotten.
+            first_sent_at, original_endpoint = (
+                await session.execute(
+                    select(PostingAttempt.sent_at, PostingAttempt.endpoint)
+                    .where(PostingAttempt.adjustment_id == adjustment_id)
+                    .order_by(PostingAttempt.attempt_no)
+                    .limit(1)
+                )
+            ).one()
+            bound = resend_is_within_bounds(
+                capabilities=capabilities,
+                first_sent_at=first_sent_at,
+                now=sent_at,
+                original_endpoint=original_endpoint,
+                target_endpoint=declared_endpoint(adapter),
+            )
+            if bound is not ResendBound.PERMITTED:
+                raise DispatchRefusedError(
+                    f"operation {short}… is in an undetermined state and a re-send is outside "
+                    f"its declared bounds ({bound.value}); §13.5 permits one only while "
+                    "now - first_send < idempotency_window and the target is inside the declared "
+                    "idempotency_scope. Outside either, this routes to manual recovery."
+                )
+
+        correlation_id = await correlation_for_adjustment(session, adjustment_id)
         operation_id = adjustment.operation_id
         instruction = PostingInstruction(
             adjustment_id=adjustment.id,
@@ -328,8 +432,24 @@ async def dispatch_once(
                     operation_id=operation_id,
                     attempt_no=attempt_no,
                     sent_at=sent_at,
+                    # Evidence about *this* send, for 4.4's scope bound. `None` where the adapter
+                    # declares no endpoint, which 4.4 reads as "not recorded" rather than "matches".
+                    endpoint=declared_endpoint(adapter),
                     state=AttemptState.IN_FLIGHT,
                 )
+            )
+            # The send is now a fact even if the response never arrives, so the trail says so
+            # before the socket write rather than after it. `QUARANTINED` is the honest reading at
+            # this moment: recorded, undetermined, awaiting an answer. Transaction 3 appends the
+            # answer; a crash in between leaves this event and the in-flight row, which together
+            # are exactly the `UNKNOWN` §12.1.1 defines.
+            await emit(
+                session,
+                tool=AuditTool.POST,
+                outcome=AuditOutcome.QUARANTINED,
+                correlation_id=correlation_id,
+                occurred_at=sent_at,
+                scope_granted=POST_SCOPE,
             )
     except IntegrityError as exc:
         raise DispatchRefusedError(
@@ -378,6 +498,16 @@ async def dispatch_once(
                 await session.execute(select(Adjustment).where(Adjustment.id == adjustment_id))
             ).scalar_one()
             applied.posting_ref = outcome.posting_ref
+
+        # Same transaction as the state change it describes, so the two cannot disagree.
+        await emit(
+            session,
+            tool=AuditTool.POST,
+            outcome=posting_audit_outcome(code),
+            correlation_id=correlation_id,
+            occurred_at=sent_at,
+            scope_granted=POST_SCOPE,
+        )
 
     return DispatchResult(
         adjustment_id=adjustment_id,

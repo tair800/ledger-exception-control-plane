@@ -1,7 +1,8 @@
-"""Operation identity, claim locking and dispatch — `PROJECT_SPEC.md` §12 and §13 (4.1, 4.2).
+"""Operation identity, claim locking, dispatch and recovery — §12 and §13 (4.1—4.4).
 
 One sentence from the plan holds 4.1: *one residual, one worker, one operation identifier.* 4.2 adds
-the sending of it, and nothing more.
+the sending of it. 4.3 adds the way back from a failure that provably never left the client. 4.4
+adds the only thing that can be done about a send whose outcome nobody knows.
 
 - :mod:`~.claim` takes an exclusive, transaction-scoped claim on open residuals with
   ``SELECT … FOR UPDATE SKIP LOCKED``, so two workers cannot hold one residual.
@@ -13,6 +14,15 @@ the sending of it, and nothing more.
 - :mod:`~.dispatcher` sends one already-persisted operation to a
   :mod:`~ledger_exception_control_plane.ledger` adapter, committing a write-ahead attempt record in
   its own transaction before the call, and settles that record with what came back.
+- :mod:`~.retry` retries **only** an allowlisted transport failure, under two independent bounds,
+  then dead-letters with the envelope its replay command re-reads.
+- :mod:`~.reconcile` walks §13.5's capability branch for an operation whose outcome is undetermined:
+  query where the adapter can be queried, re-send only inside the declared window *and* scope, and
+  otherwise stop. Every query it asks is appended as evidence, and the count of consecutive negative
+  answers is derived from those rows rather than stored.
+- :mod:`~.recovery` is where the automatic path stops — an operator queue carrying the evidence
+  procedure, an SLA, a segregation-of-duties rule the database enforces, and the
+  ``RESOLVED_UNVERIFIED`` outcome that makes an unverifiable judgement visible as one.
 
 **The guarantees, at the strength each actually holds**, kept separate because collapsing them is
 the failure this project exists to prevent:
@@ -34,11 +44,11 @@ the failure this project exists to prevent:
    idempotent treatment, honoured only if the provider implements it.
 
 **Deliberately absent, and owned by later increments:** the dispatcher *loop* — this package
-dispatches one operation when asked and schedules nothing — bounded retry, backoff, the dead-letter
-queue and replay (4.3); the ``UNKNOWN`` reconciliation workflow, the idempotency-window and
-inflight-window bounds, the supersession interlock and the manual-recovery queue (4.4) — 4.2 names
-the branch that routes to each and walks neither; the naive baseline and the chaos suite (4.5); the
-approval gate (5.1) and audit-event emission (5.2).
+dispatches and reconciles one operation when asked and schedules nothing; what drives either is a
+deployment decision (10.1), not this package's — the naive baseline and the chaos suite (4.5); and
+the extension of audit-event emission to *every* state transition (5.2). 4.4 emits for its own —
+every attempt, every ``UNKNOWN``, every query result and every operator decision — which is what its
+deliverables name and no more.
 """
 
 from __future__ import annotations
@@ -68,6 +78,25 @@ from ledger_exception_control_plane.operations.identity import (
     instruction_payload_hash,
     operation_id,
 )
+from ledger_exception_control_plane.operations.reconcile import (
+    ReconciliationPolicy,
+    ReconciliationReport,
+    ResendBound,
+    Resolution,
+    reconcile_once,
+    resend_is_within_bounds,
+)
+from ledger_exception_control_plane.operations.recovery import (
+    EvidenceProcedure,
+    RecoveryReason,
+    RecoveryRefusal,
+    RecoveryRefusedError,
+    RecoveryView,
+    evidence_procedure_for,
+    open_items,
+    resolve_item,
+    stale_items,
+)
 from ledger_exception_control_plane.operations.service import (
     IdentifierContradictionError,
     OperationRecord,
@@ -85,20 +114,35 @@ __all__ = [
     "ClaimedResidual",
     "DispatchRefusedError",
     "DispatchResult",
+    "EvidenceProcedure",
     "IdentifierContradictionError",
     "OperationIdentity",
     "OperationRecord",
+    "ReconciliationPolicy",
+    "ReconciliationReport",
     "RecordingRefusedError",
+    "RecoveryReason",
+    "RecoveryRefusal",
+    "RecoveryRefusedError",
+    "RecoveryView",
+    "ResendBound",
     "ResendDecision",
+    "Resolution",
     "canonical_amount",
     "claim_residuals",
     "derive_identity",
     "dispatch_once",
     "enqueue_posting",
+    "evidence_procedure_for",
     "instruction_payload_hash",
+    "open_items",
     "operation_id",
     "outcome_code",
+    "reconcile_once",
     "reconciliation_is_available",
     "record_operation",
     "resend_decision",
+    "resend_is_within_bounds",
+    "resolve_item",
+    "stale_items",
 ]

@@ -617,6 +617,15 @@ DERIVATION_EXEMPT: Final = {
         "and a wall-clock budget, so it needs every name and module this fence bans — and "
         "contributes no component to the derivation, which is asserted separately below"
     ),
+    "reconcile.py": (
+        "4.4. Resolves an ambiguous outcome for a persisted identifier. Both §13.5 windows are "
+        "measured against a clock, so it needs one — and it contributes no component to the "
+        "derivation, which is asserted separately below"
+    ),
+    "recovery.py": (
+        "4.4. The operator queue stamps an item with when it opened and when its SLA falls due, "
+        "and a resolution with when it was taken; it derives no identifier"
+    ),
     "__main__.py": (
         "the replay command line. Reads a dead letter, reads the persisted identifier and hands "
         "both to the dispatcher; it stamps a replay with the current time and derives nothing"

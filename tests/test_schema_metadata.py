@@ -89,8 +89,18 @@ M1_2_TABLES = {
     "audit_event",
 }
 
-#: The complete set of tables the schema is allowed to define at M1.2.
-EXPECTED_TABLES = M1_1_TABLES | M1_2_TABLES
+#: The one table M4.4 adds, and the only table added since M1.2.
+#:
+#: M1.2 sized the schema for the whole design and every later increment has written into columns it
+#: already had — which is why this set stayed frozen through 4.1, 4.2 and 4.3, and why the exception
+#: is worth naming. §13.5 requires resolving an ``UNKNOWN`` to ``REJECTED`` to rest on *"N
+#: consecutive queries"*, and the only faithful way to hold that count is append-only rows rather
+#: than a column somebody can set. A counter would have fitted the existing schema and would have
+#: been the wrong answer.
+M4_4_TABLES = {"reconciliation_query"}
+
+#: The complete set of tables the schema is allowed to define.
+EXPECTED_TABLES = M1_1_TABLES | M1_2_TABLES | M4_4_TABLES
 
 #: Pure link tables. They legitimately have neither a surrogate primary key nor a creation
 #: timestamp of their own, so the two "every table" invariants below exempt them. The
@@ -361,6 +371,11 @@ def test_required_foreign_keys_exist_with_intended_delete_behaviour() -> None:
         ("adjustment", "approving_principal", "approval", "RESTRICT"),
         ("posting_attempt", "adjustment_id", "adjustment", "RESTRICT"),
         ("posting_attempt", "operation_id", "adjustment", "RESTRICT"),
+        # 4.4, and composite for exactly the reason ``posting_attempt`` is: this row is evidence
+        # about one operation, and a query recorded against the wrong one would look well-formed
+        # while being about something else.
+        ("reconciliation_query", "adjustment_id", "adjustment", "RESTRICT"),
+        ("reconciliation_query", "operation_id", "adjustment", "RESTRICT"),
         ("recovery_queue", "adjustment_id", "adjustment", "RESTRICT"),
         ("recovery_queue", "approving_principal", "adjustment", "RESTRICT"),
         ("treatment_proposal_evidence", "evidence_id", "evidence", "RESTRICT"),
@@ -407,6 +422,9 @@ def test_required_unique_constraints_are_declared() -> None:
         ("adjustment", ("approval_id",)),
         ("outbox", ("adjustment_id",)),
         ("posting_attempt", ("adjustment_id", "attempt_no")),
+        # 4.4: two rows claiming to be the same question would break the ordering the
+        # consecutive-NotFound count reads.
+        ("reconciliation_query", ("adjustment_id", "query_no")),
         ("dlq", ("outbox_id",)),
     }
     actual = {
@@ -485,6 +503,14 @@ def test_required_check_constraints_are_declared() -> None:
         "ck_outbox_attempt_count_non_negative",
         "ck_posting_attempt_attempt_no_positive",
         "ck_dlq_attempts_non_negative",
+        # 4.4. The first is the one that matters: written as an equality of two booleans rather
+        # than as an implication, because the implication form permits a ``found`` row carrying no
+        # reference — a resolution to CONFIRMED with no evidence behind it.
+        "ck_reconciliation_query_posting_ref_iff_found",
+        "ck_reconciliation_query_answer_valid",
+        "ck_reconciliation_query_operation_id_is_sha256_hex",
+        "ck_reconciliation_query_query_no_positive",
+        "ck_reconciliation_query_windows_non_negative",
     }
     actual: set[str] = {
         str(constraint.name)
@@ -552,6 +578,17 @@ def test_not_null_rules_on_financially_significant_columns() -> None:
             "sla_due_at",
             "approving_principal",
         ],
+        # 4.4. Both windows are NOT NULL because a query row that cannot say what it was judged
+        # against is not evidence — it is a timestamp with an opinion.
+        "reconciliation_query": [
+            "adjustment_id",
+            "operation_id",
+            "query_no",
+            "queried_at",
+            "answer",
+            "visibility_bound",
+            "max_inflight_window",
+        ],
         "audit_event": [
             "occurred_at",
             "principal",
@@ -580,6 +617,7 @@ def test_only_intended_indexes_exist() -> None:
         ("treatment_proposal", ("exception_id",)),
         ("outbox", ("next_attempt_at",)),
         ("posting_attempt", ("sent_at",)),
+        ("reconciliation_query", ("adjustment_id", "query_no")),
         ("dlq", ("created_at",)),
         ("recovery_queue", ("sla_due_at",)),
         ("recovery_queue", ("adjustment_id",)),

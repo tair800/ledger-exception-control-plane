@@ -34,6 +34,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    Interval,
     String,
     Text,
     UniqueConstraint,
@@ -220,6 +221,21 @@ class AttemptState(enum.StrEnum):
     RESOLVED = "resolved"
 
 
+class QueryAnswer(enum.StrEnum):
+    """The **persisted** vocabulary for one reconciliation query (§13.5 clause 4, M4.4).
+
+    Three values, exactly the adapter's ``QueryOutcome`` union, and the third is the reason this is
+    not ``bool | None``: an answer that failed to arrive is not a negative answer, and §13.5 is
+    explicit that ``Indeterminate`` *"never counts toward the consecutive-`NotFound` requirement"*.
+    Collapsing it into ``NOT_FOUND`` would make a run of failed queries look like mounting evidence
+    that nothing was posted, which is the reasoning that ends in a double-post.
+    """
+
+    FOUND = "found"
+    NOT_FOUND = "not_found"
+    INDETERMINATE = "indeterminate"
+
+
 class ReplayState(enum.StrEnum):
     PENDING = "pending"
     REPLAYED = "replayed"
@@ -254,6 +270,18 @@ class AuditTool(enum.StrEnum):
     RETRY = "retry"
     DLQ = "dlq"
     REPLAY = "replay"
+
+    #: 4.4. A reconciliation query against the ledger and the answer it gave. §13.5 requires the
+    #: windows used, the query results observed and the resolution reached to be recorded, *"so an
+    #: auditor can reconstruct why a resolution was considered safe"* — which is a different
+    #: question from ``post`` and needs its own verb.
+    RECONCILE = "reconcile"
+
+    #: 4.4. An operator's decision on a recovery item, including ``RESOLVED_UNVERIFIED``. Kept
+    #: distinct from ``approve``: authorising a posting and judging what happened to one that was
+    #: already sent are different acts by different roles, and collapsing them would make the
+    #: segregation of duties unreadable in the trail.
+    RECOVER = "recover"
 
 
 class AuditApprovalDecision(enum.StrEnum):
@@ -753,6 +781,17 @@ class PostingAttempt(Base):
 
     sent_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
+    #: Where this attempt was sent, as the adapter declared it (M4.4).
+    #:
+    #: §13.5 permits a re-send under ``ENFORCES_KEY`` only while *"the target endpoint matches the
+    #: original ``idempotency_scope``"*, and under ``PER_ENDPOINT`` that comparison is against the
+    #: endpoint **this** send used — a fact about the past, not about today's configuration.
+    #:
+    #: Nullable, and NULL means *not recorded* rather than *matches*: an adapter that declares no
+    #: endpoint leaves nothing to compare, and 4.4 refuses the bounded re-send rather than assuming
+    #: the scope was satisfied. Same direction §10.1 takes with an unverified capability.
+    endpoint: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
     state: Mapped[AttemptState] = mapped_column(
         String(16), nullable=False, default=AttemptState.IN_FLIGHT
     )
@@ -812,6 +851,99 @@ class PostingAttempt(Base):
             "sent_at",
             postgresql_where=text("state = 'in_flight'"),
         ),
+    )
+
+
+class ReconciliationQuery(Base):
+    """One question put to the ledger about an ambiguous operation, and the answer (§13.5, M4.4).
+
+    **Append-only, and enforced by the same trigger shape as ``audit_event``.** §13.5 requires that
+    *"the windows used, the query results observed and the resolution reached"* be recorded *"so an
+    auditor can reconstruct why a resolution was considered safe"*. That reconstruction is only
+    possible if the observations cannot be edited afterwards — a mutable counter of consecutive
+    negative answers is a number somebody can set, and the whole safety argument for resolving an
+    ``UNKNOWN`` to ``REJECTED`` rests on that count.
+
+    So there is no counter. ``N consecutive NotFound`` is **derived** by reading the trailing rows
+    of this table in query order, which means the evidence and the conclusion cannot disagree.
+
+    The two window columns are recorded per query rather than looked up at resolution time, because
+    they are the adapter's declarations *at the moment the question was asked*. If a provider's
+    documented visibility bound is revised later, the trail still shows which bound each observation
+    was judged against — and the alternative, re-reading today's value, would silently restate
+    yesterday's reasoning in today's terms.
+
+    Nothing here is a state machine. A row is an observation; the state it moves lives on
+    ``outbox``.
+    """
+
+    __tablename__ = "reconciliation_query"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+
+    #: Composite foreign key at table level — see ``fk_reconciliation_query_adjustment``.
+    adjustment_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+
+    #: Duplicated from ``adjustment`` and verified by the composite key, for the reason
+    #: ``posting_attempt`` duplicates it: this row is evidence about a specific operation, and a
+    #: query recorded against the wrong one would look entirely well-formed while being about
+    #: something else.
+    operation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    #: Monotonic per adjustment, starting at 1. Ordering is by this rather than by ``queried_at``,
+    #: because "consecutive" is a statement about the sequence of questions asked, and two queries
+    #: sharing a clock reading would make a timestamp ordering ambiguous exactly when the count
+    #: matters.
+    query_no: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    queried_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    answer: Mapped[QueryAnswer] = mapped_column(String(16), nullable=False)
+
+    #: Present exactly on ``found`` — it is the evidence, not an annotation.
+    posting_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    #: Why an answer was indeterminate. Free text for a human; nothing branches on it.
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    #: The declared ``visibility_bound`` in force for this query, or zero under LINEARIZABLE.
+    visibility_bound: Mapped[dt.timedelta] = mapped_column(Interval, nullable=False)
+
+    #: The declared ``max_inflight_window`` in force for this query.
+    max_inflight_window: Mapped[dt.timedelta] = mapped_column(Interval, nullable=False)
+
+    created_at: Mapped[dt.datetime] = created_at_column()
+
+    adjustment: Mapped[Adjustment] = relationship()
+
+    __table_args__ = (
+        # RESTRICT and composite, exactly as ``posting_attempt`` — this is the same kind of
+        # evidence about the same kind of decision.
+        ForeignKeyConstraint(
+            ["adjustment_id", "operation_id"],
+            ["adjustment.id", "adjustment.operation_id"],
+            ondelete="RESTRICT",
+            name="fk_reconciliation_query_adjustment",
+        ),
+        # Two rows claiming to be the same question would break the ordering the count reads.
+        UniqueConstraint("adjustment_id", "query_no", name="uq_reconciliation_query_no"),
+        CheckConstraint("query_no >= 1", name="query_no_positive"),
+        CheckConstraint(f"operation_id ~ '{SHA256_HEX}'", name="operation_id_is_sha256_hex"),
+        CheckConstraint(_closed("answer", QueryAnswer), name="answer_valid"),
+        # A positive hit carries its reference and nothing else may. Written as an equality of
+        # two booleans rather than as an implication, because the implication form permits a
+        # ``found`` row with no reference — a resolution to CONFIRMED with no evidence behind it.
+        CheckConstraint(
+            "(answer = 'found') = (posting_ref IS NOT NULL)",
+            name="posting_ref_iff_found",
+        ),
+        # A negative duration would make either window vacuously elapsed.
+        CheckConstraint(
+            "visibility_bound >= interval '0' AND max_inflight_window >= interval '0'",
+            name="windows_non_negative",
+        ),
+        # The count reads the trailing rows for one adjustment in query order.
+        Index("ix_reconciliation_query_adjustment_no", "adjustment_id", "query_no"),
     )
 
 

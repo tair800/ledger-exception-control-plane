@@ -158,6 +158,17 @@ async def _wipe() -> None:
     """
     connection = await asyncpg.connect(DSN)
     try:
+        # Cleared with its append-only trigger suspended, because a dispatch now emits events and
+        # the fence below counts the ones a single attempt produces. The harness is the one caller
+        # entitled to do this: `assert_target_is_disposable` has already refused to run against
+        # anything but a throwaway database.
+        await connection.execute(
+            "ALTER TABLE audit_event DISABLE TRIGGER audit_event_append_only_row"
+        )
+        await connection.execute("DELETE FROM audit_event")
+        await connection.execute(
+            "ALTER TABLE audit_event ENABLE TRIGGER audit_event_append_only_row"
+        )
         for table in (
             "dlq",
             "posting_attempt",
@@ -218,12 +229,16 @@ async def _seed_approval(exception_id: uuid.UUID, *, resolution_version: int = 1
     connection = await asyncpg.connect(DSN)
     try:
         await connection.execute(
+            # M5.1 made `approval_token` NOT NULL and unique. These seeds predate it, so each
+            # carries the approval's own id: unique by construction, and recognisably not a
+            # token anybody issued.
             "INSERT INTO approval (id, exception_id, resolution_version, decision,"
-            " approved_treatment, principal, decided_at)"
-            " VALUES ($1, $2, $3, 'approved', 'rebook', 'controller-a', $4)",
+            " approved_treatment, principal, approval_token, decided_at)"
+            " VALUES ($1, $2, $3, 'approved', 'rebook', 'controller-a', $4, $5)",
             approval_id,
             exception_id,
             resolution_version,
+            str(approval_id),
             EPOCH,
         )
     finally:
@@ -1243,8 +1258,15 @@ async def test_replaying_an_ambiguous_operation_under_a_proven_key_applies_it_on
 
     This is the case my first version of the test got backwards: it expected a refusal, and the
     refusal it expected would have been this increment quietly overruling the capability branch that
-    4.2 built and §13.5 specifies. The *bounds* on that permission — the idempotency window and
-    scope — remain 4.4's, and are not enforced here or anywhere yet.
+    4.2 built and §13.5 specifies.
+
+    **The bounds on that permission are enforced as of 4.4, and they run in this path too** — the
+    dispatcher's gate evaluates the window and the scope in front of the socket, whichever module
+    asked for the send. The replay is one hour after the original against a one-day window, and the
+    lossy wrapper declares the endpoint of the ledger it wraps, so both bounds are satisfied and the
+    send proceeds. Take that declaration away and this replay is refused as ``scope_unproven``: an
+    endpoint that was never recorded is *unproven*, not *matching*, which is the direction that
+    cannot double-post. The unit suite pins that case directly.
     """
     adjustment_id, operation_id = await _enqueued(engine, marker="ambiguousproven")
 
@@ -1261,6 +1283,18 @@ async def test_replaying_an_ambiguous_operation_under_a_proven_key_applies_it_on
 
         def capabilities(self) -> LedgerAdapterCapabilities:
             return ledger.capabilities()
+
+        @property
+        def endpoint(self) -> str:
+            """The endpoint of the ledger it wraps, because that is where the send goes.
+
+            Declared rather than omitted: this class stands in for a client that lost a response
+            from *this* ledger, so the truthful answer is the same endpoint. Omitting it would make
+            the replay below refuse on ``scope_unproven`` — correctly, since 4.4 treats an
+            unrecorded endpoint as unproven — and the test would then be measuring the fake's
+            silence rather than the ledger's suppression.
+            """
+            return ledger.endpoint
 
         async def post(self, op: str, instruction: PostingInstruction) -> PostingOutcome:
             self.sends += 1
@@ -1387,10 +1421,17 @@ async def test_two_runners_over_one_queue_apply_each_operation_once(
 async def test_the_retry_path_writes_no_row_a_later_increment_owns(
     engine: AsyncEngine,
 ) -> None:
-    """4.3 retries, dead-letters and replays. It does not reconcile, recover or audit.
+    """4.3 retries, dead-letters and replays. It does not reconcile and it does not recover.
 
-    ``recovery_queue`` is 4.4's and ``audit_event`` is 5.2's, and every branch of this increment is
-    exercised above without either being touched.
+    **Narrowed at 4.4.** This used to assert that ``audit_event`` was untouched too, which was right
+    while nothing was entitled to write an event. 4.4's deliverables name *"audit events for every
+    attempt"*, and a transport failure is an attempt: the dispatcher records the send before the
+    socket write, and the retry path records the ``not_sent`` verdict that closed it. Without the
+    second, the trail would show a send with no ending.
+
+    So the claim moved from "must be empty" to **"must hold exactly those two"**, which still fails
+    if the emission disappears — a fence that had simply dropped the table from its list would not.
+    ``recovery_queue`` and ``reconciliation_query`` remain empty: retrying is not recovering.
     """
     adjustment_id, _ = await _enqueued(engine, marker="scope")
     await attempt_one(
@@ -1404,9 +1445,15 @@ async def test_the_retry_path_writes_no_row_a_later_increment_owns(
 
     connection = await asyncpg.connect(DSN)
     try:
-        for table in ("recovery_queue", "audit_event"):
+        for table in ("recovery_queue", "reconciliation_query"):
             count = await connection.fetchval(f"SELECT count(*) FROM {table}")
-            assert count == 0, f"4.3 wrote to {table}, which belongs to a later increment"
+            assert count == 0, f"the retry path wrote to {table}, which it must never touch"
+
+        events = await connection.fetch("SELECT tool, outcome FROM audit_event ORDER BY created_at")
+        assert [(row["tool"], row["outcome"]) for row in events] == [
+            ("post", "quarantined"),
+            ("post", "failure"),
+        ], "the send was recorded before the socket write, and the not_sent verdict closed it"
     finally:
         await connection.close()
 

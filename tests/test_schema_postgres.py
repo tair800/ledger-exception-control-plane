@@ -54,7 +54,13 @@ M1_2_TABLES = {
     "recovery_queue",
     "audit_event",
 }
-EXPECTED_TABLES = M1_1_TABLES | M1_2_TABLES
+#: The one table added since M1.2, and the only one. §13.5 requires resolving an ``UNKNOWN`` to
+#: ``REJECTED`` to rest on "N consecutive queries", and the only faithful way to hold that count is
+#: append-only rows rather than a column somebody can set — see the metadata suite for the full
+#: reasoning. A counter would have fitted the existing schema and been the wrong answer.
+M4_4_TABLES = {"reconciliation_query"}
+
+EXPECTED_TABLES = M1_1_TABLES | M1_2_TABLES | M4_4_TABLES
 
 #: Indicative names from later increments. See the metadata suite for why this is a smoke
 #: alarm rather than a contract.
@@ -780,12 +786,15 @@ async def _build_chain(connection: asyncpg.Connection, seed: str = "chain") -> _
         """
         INSERT INTO approval
             (id, exception_id, resolution_version, treatment_proposal_id, decision,
-             approved_treatment, principal, decided_at)
-        VALUES ($1, $2, 1, $3, 'approved', 'rebook', 'controller-a', now())
+             approved_treatment, principal, approval_token, decided_at)
+        VALUES ($1, $2, 1, $3, 'approved', 'rebook', 'controller-a', $4, now())
         """,
         approval_id,
         exception_id,
         proposal_id,
+        # M5.1 made `approval_token` NOT NULL and unique. The row's own id is unique by
+        # construction and recognisably not a token anybody issued.
+        str(approval_id),
     )
     operation_id = _hex(seed + "op")
     await connection.execute(
@@ -1600,14 +1609,15 @@ async def _approval_only(
         """
         INSERT INTO approval
             (id, exception_id, resolution_version, decision, approved_treatment,
-             principal, decided_at)
-        VALUES ($1, $2, 1, $3, $4, $5, now())
+             principal, approval_token, decided_at)
+        VALUES ($1, $2, 1, $3, $4, $5, $6, now())
         """,
         approval_id,
         exception_id,
         decision,
         approved_treatment,
         principal,
+        str(approval_id),
     )
     return approval_id
 

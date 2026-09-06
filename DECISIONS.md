@@ -3051,6 +3051,155 @@ observability and deployment work"* — M6 through M10. That still holds: 4.5 la
 buys: every §19 scenario has a committed test when the gate is decided, which is the entire point of
 the gate.
 
+
+## ADR-057 — What may be concluded about a send whose outcome nobody knows (M4.4)
+
+**Status:** Accepted. Records the numbers §13.5 leaves to the project, the placement of each
+monotonicity control, the one schema addition since M1.2, and the limit of what the manual branch
+can honestly claim. Resolves no OPEN item; narrows **OPEN-11** by making the capability branch
+executable rather than described.
+
+### 1. Query before re-send, always
+
+An adapter may declare both `ENFORCES_KEY` and `BY_OPERATION_ID`. §13.5 does not say which branch
+wins, and the ordering is a safety property rather than a preference: a query is a read that can be
+wrong for free, a re-send is an irreversible financial write that cannot. **So reconciliation asks
+first and sends only where it cannot ask.** An implementation that preferred the re-send would post
+again in every case a query would have answered — under a proven `ENFORCES_KEY` that is usually
+harmless, and "usually harmless" is not the standard this branch is held to.
+
+### 2. Three numbers §13.5 leaves to the project
+
+§13.5 requires *"N consecutive queries"* and requires reconciliation to be *"bounded"*, and names
+neither figure. These are **declared project decisions, not empirical findings** — the same status
+ADR-042's tolerance bands and ADR-055's backoff constants carry, and stated the same way so nobody
+later reads them as measured.
+
+| Setting | Value | Why this one |
+|---|---|---|
+| `reconcile_consecutive_not_found` | 3 | One answer can be a stale read; two can be a replica that has not caught up; three spread across the declared visibility window is where "not visible yet" stops being a plausible description of a live write. Refused below 2 at startup: a single answer corroborating itself is not corroboration. |
+| `reconcile_max_queries` | 10 | Reconciliation must terminate. An unbounded query loop against a ledger is a retry loop that has stopped calling itself one. |
+| `recovery_sla_hours` | 24 | An operator's working day. Capped at two weeks, because an SLA longer than a period close would let an ambiguous posting cross the boundary silently — which §13.5 escalates instead. |
+
+The count they gate is **derived, never stored**. Every query is appended to `reconciliation_query`
+and "N consecutive" is read back off those rows, because the number that decides whether an
+ambiguous financial write may be declared un-applied cannot be a column somebody can set.
+
+### 3. Where each monotonicity rule lives
+
+§13.5 clause 6 — *"`UNKNOWN` is never overwritten in place; resolution is an appended transition"* —
+resolves against this schema into three rules, each a trigger rather than an intention:
+
+- **`posting_attempt.outcome` is immutable once recorded.** The row that saw the ambiguity keeps it
+  forever. Neither `reconcile.py` nor `recovery.py` writes to that table at all, which also removes
+  a race: a slow dispatcher returning after a reconciliation would otherwise have its real answer
+  refused by the trigger, losing information. Evidence about a send belongs to that send.
+- **`outbox.last_outcome` may not move off a terminal value, and a settled row may not un-settle.**
+  It is the current-state pointer, so it moves — forward only. `CONFIRMED → anything` is refused.
+- **`reconciliation_query` is append-only**, by the same trigger shape `audit_event` uses.
+
+`reconciliation_query` is the only table added since M1.2, and the exception is worth naming: M1.2
+sized the schema for the whole design and 4.1, 4.2 and 4.3 each wrote into columns it already had. A
+counter would have fitted the existing schema and would have been the wrong answer.
+
+### 4. The scope bound needed a recorded fact, so one is now recorded
+
+§13.5 permits a re-send *"only while … the target endpoint matches the original
+`idempotency_scope`"*. Under `PER_ENDPOINT` that is a comparison against the endpoint the
+**original** send used — a fact about the past, not about today's configuration — and nothing
+recorded it. Two additions:
+
+- `EndpointDeclaringAdapter`, the same typed-absence shape `QueryableLedgerAdapter` already uses. An
+  adapter that cannot say where it posts is not asked and then assumed to have answered.
+- `posting_attempt.endpoint`, nullable. **NULL means *not recorded*, never *matches***, and a
+  re-send whose scope cannot be proven is refused. A backfilled placeholder would have been a
+  fiction the comparison then treated as evidence. This is §10.1's direction for an unverified
+  capability, applied to an unverified scope.
+
+`PER_ACCOUNT` needs no comparison, and that is a consequence of §12.1 rather than an omission: the
+operation identifier binds the instruction payload, of which the account is part, so a re-send to a
+different account is a different operation and cannot carry this identifier.
+
+### 5. The supersession interlock releases on adjudication, and that is a trade
+
+§12.1 blocks a new `resolution_version` while a prior operation on the same exception is
+`IN_FLIGHT`, `UNKNOWN` or open in recovery. Enforced by a trigger, because the rule spans four
+tables and a CHECK cannot reach across one — and because the failure it prevents is two live
+resolutions for one exception, each able to post money.
+
+**It releases once an operator has adjudicated**, including after `RESOLVED_UNVERIFIED`. A permanent
+block would leave every unresolvable ambiguity as a dead end with no route forward. The cost is
+real and is stated rather than hedged: after an unverified resolution the original may in fact have
+applied, so superseding can still double-post. **The design makes that judgement recorded,
+attributable and reportable — not correct.** Claiming otherwise would be the unconditional guarantee
+§13.5 exists to forbid, and a test pins both halves rather than only the reassuring one.
+
+### 6. `RESOLVED_UNVERIFIED` settles nothing
+
+`settled_requires_terminal_outcome` admits only `confirmed` and `rejected`. There is no third
+terminal value meaning "a human judged without evidence", and inventing one would be the coercion
+§13.5 forbids wearing a new name. So an unverified resolution closes the *item* and leaves the
+*operation* ambiguous — permanently closed to every automatic path, with a name and a timestamp
+against the judgement. In the audit trail it is `ABSTAINED`, which is why four audit outcomes exist:
+it is neither a success nor a failure, and §13.5 requires it to stay distinguishable from both.
+
+### 7. What the audit trail says about an ambiguity
+
+An `UNKNOWN` is recorded as `QUARANTINED` — held aside for a decision rather than decided. Recording
+it as `FAILURE` would put "the posting did not happen" into the one record an auditor reads to check
+that we never concluded that. The mapping is total over the outcome enum and raises rather than
+defaulting, because the default direction for an unclassified outcome is the unsafe one.
+
+Two events per attempt, not one: the first is committed **before** the socket write, so a crash
+between them leaves an event for a send with no ending — which, with the in-flight attempt row, is
+exactly the `UNKNOWN` §12.1.1 defines.
+
+### 8. The bounds live in the gate, not in the caller
+
+`ResendBound` and `resend_is_within_bounds` are defined in `operations/dispatcher.py` and
+re-exported from `operations/reconcile.py`, which reads backwards until you ask *what they protect*.
+They guard an irreversible financial write, so they are evaluated in the gate immediately in front
+of the socket rather than in whichever module decided a re-send was worth attempting.
+
+The first version put them only in the reconciler. Every behavioural test passed, because the
+reconciler is the only caller today — and that is exactly the shape of a guarantee that holds by
+coincidence. `dispatch_once` already refuses a further send after an ambiguous outcome unless
+capability permits one; permitting it *without* the window and scope check meant any future caller —
+a worker, a replay path, a console button — would have got an unbounded duplicate under a header the
+provider may already have forgotten. The bounds are now evaluated twice, by two modules, and a unit
+test pins the placement so a later refactor cannot quietly move them back.
+
+### 9. Two corrections this increment had to make first
+
+**M5.1 skipped its database gate.** It added two controls to `approval` and broke **five**
+integration suites with them — `test_dispatch_postgres`, `test_retry_postgres`,
+`test_replay_cli_postgres`, `test_operations_postgres` and `test_schema_postgres`. `approval_token
+NOT NULL` broke all five, and `requested_by_iff_edited` broke a sixth test in the fourth: an `edited`
+decision now has to name the principal who asked for it. Every one failed on the first real-database
+run here, which means the full gate was not run before that commit; `CLAUDE.md` §6 requires it and
+the milestone report claimed it. The seeds are fixed, and the fix for the second one is itself
+instructive — §16's countersignature rule means the requester must be a *different* principal, so a
+seeded edit cannot name its own approver. Recorded rather than quietly repaired: a process rule that
+is documented and skipped is worse than one never written down, and the fix is worth less than the
+admission.
+
+**`AttributedAdapter` swallowed a second declaration.** 4.3's attribution proxy forwards `name` and
+`capabilities`, and its docstring already records having been corrected once for exactly this —
+wrapping the reference ledger produced an unrecognised implementation class, every proven capability
+was downgraded to `NONE`, and a permitted re-send was refused. 4.4 gave adapters a third declaration
+to forward, `endpoint`, and the proxy swallowed that one too: every send made through it recorded no
+endpoint, so the new scope bound refused a re-send the adapter's *verified* `ENFORCES_KEY` permits.
+
+The forwarding has one non-obvious requirement. Preserving a declared endpoint is the easy half;
+preserving its **absence** is not. A property raising `AttributeError` looks right and is not,
+because Python 3.12 resolves runtime protocol checks with `inspect.getattr_static` — the wrapper
+then satisfies `EndpointDeclaringAdapter` while being unable to answer, which is worse than either
+honest state. The attribute is therefore set in `__init__` only when there is one to forward, and a
+test asserts both directions.
+
+Both were found by tests failing, not by review, which is the argument for the tests being what they
+are.
+
 ---
 
 # Open decisions

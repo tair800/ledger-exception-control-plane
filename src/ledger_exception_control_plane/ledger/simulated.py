@@ -51,7 +51,13 @@ from ledger_exception_control_plane.ledger.port import (
     ReversalMode,
 )
 
-__all__ = ["AppliedPosting", "Responder", "SimulatedLedger"]
+__all__ = [
+    "AppliedPosting",
+    "NonIdempotentLedger",
+    "QueryResponder",
+    "Responder",
+    "SimulatedLedger",
+]
 
 #: What a test may substitute for the ledger's ordinary behaviour.
 #:
@@ -60,6 +66,19 @@ __all__ = ["AppliedPosting", "Responder", "SimulatedLedger"]
 #: This is the same shape M3.2 used for its transport — the behaviour under test is injected, and
 #: the default is the honest one.
 Responder = Callable[[str, PostingInstruction], PostingOutcome | None]
+
+#: What a test may substitute for the ledger's ordinary *answer about* a posting (4.4).
+#:
+#: Symmetric with :data:`Responder`, and needed for the same reason the ``QueryOutcome`` union has
+#: three members: this ledger declares ``LINEARIZABLE``, so its own answer is never
+#: ``Indeterminate`` — and §13.5 has a rule specifically about ``Indeterminate``, which nothing
+#: could exercise otherwise. `port.py` already says an adapter declaring ``EVENTUAL`` *"would have
+#: to be able to say `Indeterminate`, and the union exists so that it can"*; this is the seam that
+#: lets one.
+#:
+#: Returning ``None`` falls through to the honest answer, so an injected script can cover the first
+#: few queries and let the ledger speak for itself afterwards.
+QueryResponder = Callable[[str], "QueryOutcome | None"]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -88,11 +107,15 @@ class SimulatedLedger:
         self,
         *,
         name: str = "simulated-ledger",
+        endpoint: str = "sim://ledger/postings",
         responder: Responder | None = None,
+        query_responder: QueryResponder | None = None,
         capabilities: LedgerAdapterCapabilities | None = None,
     ) -> None:
         self._name = name
+        self._endpoint = endpoint
         self._responder = responder
+        self._query_responder = query_responder
         self._applied: dict[str, AppliedPosting] = {}
         #: How many times each identifier has actually been *applied to the books*.
         #:
@@ -120,6 +143,16 @@ class SimulatedLedger:
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def endpoint(self) -> str:
+        """Where this ledger accepts postings (4.4).
+
+        Configurable so a test can construct the case §13.5 clause 3 cares about: the same operation
+        re-sent to a *different* endpoint under ``PER_ENDPOINT`` retention, which is a duplicate
+        write wearing an idempotency header rather than a suppressed re-send.
+        """
+        return self._endpoint
 
     def capabilities(self) -> LedgerAdapterCapabilities:
         """Declared data. Note this says nothing about whether the claim has been *proven* — that
@@ -170,6 +203,11 @@ class SimulatedLedger:
         declaring ``EVENTUAL`` would have to be able to say `Indeterminate`, and the union exists so
         that it can.
         """
+        if self._query_responder is not None:
+            injected = self._query_responder(operation_id)
+            if injected is not None:
+                return injected
+
         applied = self._applied.get(operation_id)
         return Found(posting_ref=applied.posting_ref) if applied is not None else NotFound()
 
@@ -198,3 +236,99 @@ class SimulatedLedger:
 
     def applied(self, operation_id: str) -> AppliedPosting | None:
         return self._applied.get(operation_id)
+
+
+class NonIdempotentLedger:
+    """A ledger that declares nothing and suppresses nothing (increment 4.4).
+
+    `IMPLEMENTATION_PLAN.md` §4.4 requires *"a second simulated adapter configured
+    `idempotency=NONE, posting_identity_query=NONE`"*, and §13.6 explains what it is for: the chaos
+    suite runs every scenario against three capability configurations, because *"a suite that tests
+    only the strong adapter proves only the easy case"*.
+
+    **It really does apply the same operation twice**, and that is the whole point. Configuring
+    :class:`SimulatedLedger` with weak capabilities would produce an adapter that *declares* nothing
+    while still suppressing internally — so a duplicate send would be absorbed by the test double
+    and the branch would look safe for a reason that has nothing to do with the system under test.
+    Here the applied-count rises with every post.
+
+    That inversion is what makes the ``NONE``/``NONE`` assertions meaningful. When §19.1 requires
+    the applied-count to stay at 1 in this branch, it is measuring **our restraint** — no automatic
+    re-send occurs at all — rather than the ledger's forgiveness. Under this adapter, a system that
+    retried would visibly double-post, which is exactly what 4.5's naive baseline must demonstrate.
+
+    It is not queryable: :meth:`get_by_operation_id` does not exist, so the type itself says the
+    reconciliation branch is unavailable rather than a method saying so at runtime.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str = "non-idempotent-ledger",
+        endpoint: str = "sim://weak/postings",
+        responder: Responder | None = None,
+    ) -> None:
+        self._name = name
+        self._endpoint = endpoint
+        self._responder = responder
+        self._applications: dict[str, int] = {}
+        self._posts_received = 0
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def endpoint(self) -> str:
+        """Declared, and it changes nothing. Recording where a send went is not a capability, and
+        under ``idempotency=NONE`` there is no bounded re-send for a scope to bound."""
+        return self._endpoint
+
+    def capabilities(self) -> LedgerAdapterCapabilities:
+        """The weakest honest record: it enforces no key and answers no query.
+
+        Every other field is left at its default, which §10.1 requires to be the weakest value —
+        and which 4.2 had to correct once, because two of the duration defaults were the *strongest*
+        claim rather than the weakest.
+        """
+        return LedgerAdapterCapabilities()
+
+    async def post(self, operation_id: str, instruction: PostingInstruction) -> PostingOutcome:
+        """Apply unconditionally, then answer. **The responder runs after the books move.**
+
+        A real ledger without an idempotency mechanism behaves exactly this way: it is handed a
+        posting instruction and it posts it. Sending twice books twice.
+
+        **The responder ordering is the opposite of :class:`SimulatedLedger`'s, and deliberately
+        so.** There, an injected outcome short-circuits before anything is applied, because that
+        adapter's job is to prove *suppression* and an injected `Unknown` must be a genuine
+        ambiguity with nothing on the books. Here the adapter's job is to be the weakest honest
+        ledger, and the scenario that matters against it is §19.1 — *the posting is applied and the
+        response is lost*. Consulting the responder first would make an injected `Unknown` mean
+        "nothing happened", which is the one reading that cannot double-post and therefore the one
+        that would make every assertion against this adapter vacuous.
+
+        So the books always move, and the responder decides only what the client is told.
+        """
+        self._posts_received += 1
+        self._applications[operation_id] = self._applications.get(operation_id, 0) + 1
+        reference = f"NON-{uuid.uuid4().hex[:16]}"
+
+        if self._responder is not None:
+            injected = self._responder(operation_id, instruction)
+            if injected is not None:
+                return injected
+        return Confirmed(posting_ref=reference)
+
+    def applied_count(self, operation_id: str) -> int:
+        """How many postings this ledger has committed for one identifier.
+
+        Unlike the reference adapter's, this one **can and will exceed 1** — which is the property
+        that makes every "applied-count == 1" assertion against it a statement about the system
+        rather than about the double.
+        """
+        return self._applications.get(operation_id, 0)
+
+    @property
+    def posts_received(self) -> int:
+        return self._posts_received

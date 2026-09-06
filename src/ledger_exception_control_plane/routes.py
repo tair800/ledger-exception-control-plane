@@ -1,4 +1,6 @@
-"""The `/api/v1` surface: the human gate, and the reads the console needs (increment 5.1).
+"""The `/api/v1` surface: the human gate, the recovery queue, and the reads the console needs.
+
+Increments 5.1 (the gate) and 4.4 (`/recovery`).
 
 `PROJECT_SPEC.md` §10 sketches the surface; this module implements the part M5.1 owns:
 
@@ -14,6 +16,11 @@ be recording a claim rather than a fact, and the audit trail would be worthless.
 **The gate refuses; it does not compute.** No route here calculates an amount, derives an operation
 identifier, or writes an ``adjustment``. Approving authorises a *treatment code*; M2.4 turns that
 into money afterwards, deterministically. Guard tests hold both properties.
+
+**No route posts to a ledger.** ``/recovery`` records what an operator *found*, never what the
+system should now do about it: there is no re-send endpoint, and adding one would put an
+operator-shaped hole in the ambiguity gate. §13.5's manual branch is where the automatic path
+*stops*, and the HTTP surface has to mean that too.
 """
 
 from __future__ import annotations
@@ -28,21 +35,35 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger_exception_control_plane.audit import UNRECORDED_CORRELATION_ID, emit
 from ledger_exception_control_plane.db.control import (
     Adjustment,
     Approval,
     ApprovalDecision,
+    AuditOutcome,
+    AuditTool,
     ExceptionRecord,
     Outbox,
     PostingAttempt,
+    RecoveryItem,
+    RecoveryResolution,
     TreatmentCode,
     TreatmentProposal,
 )
 from ledger_exception_control_plane.db.models import SettlementLine
 from ledger_exception_control_plane.operations.approval import (
+    APPROVAL_SCOPE,
     ApprovalRefusedError,
     RefusalReason,
     record_decision,
+)
+from ledger_exception_control_plane.operations.recovery import (
+    RECOVERY_SCOPE,
+    RecoveryRefusal,
+    RecoveryRefusedError,
+    open_items,
+    resolve_item,
+    stale_items,
 )
 from ledger_exception_control_plane.security import Principal, PrincipalRegistry
 
@@ -60,6 +81,19 @@ _REFUSAL_STATUS: Final[dict[RefusalReason, int]] = {
     RefusalReason.ALREADY_DECIDED: status.HTTP_409_CONFLICT,
     RefusalReason.TREATMENT_INCONSISTENT_WITH_DECISION: status.HTTP_422_UNPROCESSABLE_ENTITY,
     RefusalReason.UNKNOWN_SUBJECT: status.HTTP_404_NOT_FOUND,
+    RefusalReason.SUPERSESSION_BLOCKED: status.HTTP_409_CONFLICT,
+}
+
+#: The same mapping for the recovery queue's refusals. Kept separate rather than merged: the two
+#: vocabularies belong to different increments and different roles, and one dictionary keyed by two
+#: enums would make a missing entry silently fall through to whichever default a merge introduced.
+_RECOVERY_STATUS: Final[dict[RecoveryRefusal, int]] = {
+    RecoveryRefusal.ROLE_MAY_NOT_RECOVER: status.HTTP_403_FORBIDDEN,
+    RecoveryRefusal.APPROVER_MAY_NOT_RESOLVE: status.HTTP_403_FORBIDDEN,
+    RecoveryRefusal.ALREADY_RESOLVED: status.HTTP_409_CONFLICT,
+    RecoveryRefusal.CONFIRMED_WITHOUT_REFERENCE: status.HTTP_422_UNPROCESSABLE_ENTITY,
+    RecoveryRefusal.REFERENCE_WITHOUT_CONFIRMATION: status.HTTP_422_UNPROCESSABLE_ENTITY,
+    RecoveryRefusal.UNKNOWN_ITEM: status.HTTP_404_NOT_FOUND,
 }
 
 
@@ -165,7 +199,49 @@ class ExceptionDetail(BaseModel):
     attempts: list[PostingAttemptView]
 
 
+async def _audit_refusal(
+    request: Request,
+    *,
+    tool: AuditTool,
+    scope_granted: str,
+    principal: Principal,
+    correlation_id: str,
+) -> None:
+    """Record that the system refused, in a transaction of its own.
+
+    §14 requires a refused action to leave a trace — *"Rejected; audit event recorded"* — and the
+    service that refuses cannot write one: it raises inside the caller's transaction, and that
+    transaction is rolled back precisely because the action did not happen. An event written there
+    would roll back with it.
+
+    So the refusal is recorded **here**, at the boundary that owns an engine of its own, after the
+    rollback and before the response. The limit is worth stating plainly: a future caller reaching
+    the service directly — a worker, a command line — would refuse without this event, and would
+    have to record its own. There is one boundary today and this is it.
+    """
+    async with AsyncSession(request.app.state.engine) as audit_session, audit_session.begin():
+        await emit(
+            audit_session,
+            tool=tool,
+            outcome=AuditOutcome.FAILURE,
+            correlation_id=correlation_id,
+            occurred_at=dt.datetime.now(tz=dt.UTC),
+            scope_granted=scope_granted,
+            principal=principal.id,
+        )
+
+
+async def _correlation_of(session: AsyncSession, exception_id: uuid.UUID) -> str:
+    found = (
+        await session.execute(
+            select(ExceptionRecord.correlation_id).where(ExceptionRecord.id == exception_id)
+        )
+    ).scalar_one_or_none()
+    return found or UNRECORDED_CORRELATION_ID
+
+
 async def _decide(
+    request: Request,
     session: AsyncSession,
     *,
     exception_id: uuid.UUID,
@@ -188,6 +264,13 @@ async def _decide(
         )
     except ApprovalRefusedError as refusal:
         await session.rollback()
+        await _audit_refusal(
+            request,
+            tool=AuditTool.APPROVE,
+            scope_granted=f"{APPROVAL_SCOPE}:{principal.role.value}",
+            principal=principal,
+            correlation_id=await _correlation_of(session, exception_id),
+        )
         raise HTTPException(
             status_code=_REFUSAL_STATUS[refusal.reason],
             detail={"reason": refusal.reason.value},
@@ -211,11 +294,13 @@ async def _decide(
 async def approve(
     exception_id: uuid.UUID,
     body: DecisionRequest,
+    request: Request,
     principal: Annotated[Principal, Depends(current_principal)],
     session: Annotated[AsyncSession, Depends(_session)],
 ) -> DecisionResponse:
     """Authorise the proposed treatment. An edit is a different verb, below."""
     return await _decide(
+        request,
         session,
         exception_id=exception_id,
         body=body,
@@ -228,6 +313,7 @@ async def approve(
 async def edit(
     exception_id: uuid.UUID,
     body: DecisionRequest,
+    request: Request,
     principal: Annotated[Principal, Depends(current_principal)],
     session: Annotated[AsyncSession, Depends(_session)],
 ) -> DecisionResponse:
@@ -238,6 +324,7 @@ async def edit(
     stricter path reachable by forgetting to set it.
     """
     return await _decide(
+        request,
         session,
         exception_id=exception_id,
         body=body,
@@ -250,11 +337,13 @@ async def edit(
 async def reject(
     exception_id: uuid.UUID,
     body: DecisionRequest,
+    request: Request,
     principal: Annotated[Principal, Depends(current_principal)],
     session: Annotated[AsyncSession, Depends(_session)],
 ) -> DecisionResponse:
     """Decline. Authorises nothing, and must not name a treatment."""
     return await _decide(
+        request,
         session,
         exception_id=exception_id,
         body=body,
@@ -460,4 +549,135 @@ async def exception_detail(
             else None
         ),
         attempts=attempts,
+    )
+
+
+# ======================================================================================
+# /recovery — where the automatic path stopped (increment 4.4, §13.5 clause 5)
+# ======================================================================================
+
+
+class RecoveryItemView(BaseModel):
+    """One queue entry, with the procedure attached rather than referenced.
+
+    ``evidence_procedure`` is returned in full because §13.5's point is that the operator is told
+    what to inspect and what would be sufficient. A queue that returned a reason code and expected
+    the operator to look the procedure up somewhere is the "queue is not a control" failure with an
+    extra step.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    adjustment_id: uuid.UUID
+    operation_id: str
+    reason: str
+    evidence_procedure: str
+    opened_at: dt.datetime
+    sla_due_at: dt.datetime
+    approving_principal: str
+    #: §13.5: *"a stale `UNKNOWN` is an alertable condition"*.
+    overdue: bool
+
+
+class ResolveRequest(BaseModel):
+    """An operator's judgement. Note what is absent: the principal, and any instruction to re-send.
+
+    ``posting_ref`` is required by ``confirmed_by_evidence`` and refused by everything else — it is
+    the evidence, not a note. The service enforces that; this model does not, because a 422 from
+    Pydantic would not say *why* and this refusal is one an operator has to understand.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution: RecoveryResolution
+    posting_ref: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+@router.get("/recovery", response_model=list[RecoveryItemView])
+async def list_recovery(
+    principal: Annotated[Principal, Depends(current_principal)],
+    session: Annotated[AsyncSession, Depends(_session)],
+    stale: bool = False,
+    limit: int = 50,
+) -> list[RecoveryItemView]:
+    """The operator queue, most urgent first. ``?stale=true`` returns only items past their SLA.
+
+    Readable by every configured role, like the exception queue: seeing that an operation is stuck
+    is not the same authority as judging what happened to it, and an analyst who cannot see it
+    cannot escalate it either.
+    """
+    now = dt.datetime.now(tz=dt.UTC)
+    query = stale_items if stale else open_items
+    return [
+        RecoveryItemView(
+            id=item.id,
+            adjustment_id=item.adjustment_id,
+            operation_id=item.operation_id,
+            reason=item.reason,
+            evidence_procedure=item.evidence_procedure,
+            opened_at=item.opened_at,
+            sla_due_at=item.sla_due_at,
+            approving_principal=item.approving_principal,
+            overdue=item.overdue,
+        )
+        for item in await query(session, now=now, limit=min(limit, 200))
+    ]
+
+
+@router.post("/recovery/{recovery_id}/resolve", response_model=RecoveryItemView)
+async def resolve_recovery(
+    recovery_id: uuid.UUID,
+    body: ResolveRequest,
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> RecoveryItemView:
+    """Record what the operator found. **This never causes a posting.**
+
+    Takes the engine rather than the request-scoped session because the service opens its own
+    transaction — it locks the queue row, settles the dispatch and appends the audit event
+    together, and a handler-owned session would let the route commit half of that.
+    """
+    try:
+        item = await resolve_item(
+            request.app.state.engine,
+            recovery_id=recovery_id,
+            principal=principal,
+            resolution=body.resolution,
+            now=dt.datetime.now(tz=dt.UTC),
+            posting_ref=body.posting_ref,
+        )
+    except RecoveryRefusedError as refusal:
+        async with AsyncSession(request.app.state.engine) as lookup:
+            item_correlation = (
+                await lookup.execute(
+                    select(ExceptionRecord.correlation_id)
+                    .join(Approval, Approval.exception_id == ExceptionRecord.id)
+                    .join(Adjustment, Adjustment.approval_id == Approval.id)
+                    .join(RecoveryItem, RecoveryItem.adjustment_id == Adjustment.id)
+                    .where(RecoveryItem.id == recovery_id)
+                )
+            ).scalar_one_or_none() or UNRECORDED_CORRELATION_ID
+        await _audit_refusal(
+            request,
+            tool=AuditTool.RECOVER,
+            scope_granted=RECOVERY_SCOPE,
+            principal=principal,
+            correlation_id=item_correlation,
+        )
+        raise HTTPException(
+            status_code=_RECOVERY_STATUS[refusal.refusal],
+            detail={"reason": refusal.refusal.value, "message": str(refusal)},
+        ) from refusal
+
+    return RecoveryItemView(
+        id=item.id,
+        adjustment_id=item.adjustment_id,
+        operation_id=item.operation_id,
+        reason=item.reason,
+        evidence_procedure=item.evidence_procedure,
+        opened_at=item.opened_at,
+        sla_due_at=item.sla_due_at,
+        approving_principal=item.approving_principal,
+        overdue=item.overdue,
     )

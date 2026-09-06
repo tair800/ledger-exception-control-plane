@@ -4,7 +4,8 @@
         ps smoke build db-up test-db-init migrate migrate-down schema-verify fixtures \
         fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify \
         money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
-        operations-verify dispatch-verify ledger-verify retry-verify approval-verify
+        operations-verify dispatch-verify ledger-verify retry-verify approval-verify \
+        reconcile-verify
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -177,6 +178,16 @@ approval-verify: test-db-init ## Prove the approval gate, roles and single use a
 
 retry-verify: test-db-init ## Prove bounded retry, the DLQ and replay against real PostgreSQL
 	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_retry_postgres.py tests/test_replay_cli_postgres.py -m integration -p no:cacheprovider --no-cov
+
+# --- ambiguous outcomes, reconciliation and manual recovery (M4.4) ---
+#
+# The bounds and the windows are pure functions and run in the default suite. Everything else here
+# is database behaviour: the transitions are rows, the monotonicity is triggers, the count of
+# consecutive negative answers is derived from appended evidence, and the supersession interlock
+# spans four tables.
+
+reconcile-verify: test-db-init ## Prove the UNKNOWN branch, reconciliation and recovery against real PostgreSQL
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_reconcile.py tests/test_reconcile_postgres.py -m "integration or not integration" -p no:cacheprovider --no-cov
 
 # --- recorded cassettes (M3.4) ---
 #

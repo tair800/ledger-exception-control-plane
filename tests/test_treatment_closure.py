@@ -1123,6 +1123,17 @@ ENTITY_MUTATORS: Final = {
         "writes next_attempt_at, resolves a not_sent attempt, marks a row dead-lettered and "
         "closes a replayed dead letter"
     ),
+    "operations/reconcile.py": (
+        "4.4. Settles the outbox on a resolved UNKNOWN and records the posting reference a "
+        "positive query returned. It writes to no other guarded table by design: the attempt row "
+        "that saw the ambiguity keeps its outcome forever, which is what makes the transition "
+        "appended rather than an edit, and a database trigger enforces that independently"
+    ),
+    "operations/recovery.py": (
+        "4.4. Settles the outbox on a verified operator resolution and records the reference the "
+        "operator found. It never causes a posting; RESOLVED_UNVERIFIED settles nothing, because "
+        "the outbox has no terminal value meaning 'a human judged without evidence'"
+    ),
 }
 
 #: Every mapped column of every guarded entity, read off the ORM rather than typed out here.

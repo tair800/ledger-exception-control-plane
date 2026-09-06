@@ -259,10 +259,42 @@ class AttributedAdapter:
     that overrode ``post`` could not use it to inherit an inner adapter's evidence. And the
     delegation is real — the calls genuinely reach the wrapped adapter, so its record genuinely
     applies.
+
+    **``endpoint`` is forwarded for the same reason, and it had to be added at 4.4 — the same
+    defect in a new place.** §13.5 bounds a re-send by the endpoint the original send recorded, and
+    a wrapper that swallowed the declaration made every send through it record no endpoint at all;
+    the bound then refused a re-send this adapter's verified ``ENFORCES_KEY`` permits, which is the
+    silent withdrawal described above wearing different clothes. It surfaced as a replay test
+    failing, not as a review comment.
+
+    The forwarding preserves the *typed absence*: where the wrapped adapter declares no endpoint,
+    the wrapper has no ``endpoint`` attribute either and is not an
+    :class:`~.port.EndpointDeclaringAdapter`. A wrapper that answered ``None`` would be declaring an
+    endpoint of "nothing", which is a different and worse claim than declaring none.
     """
 
     def __init__(self, adapter: LedgerAdapter) -> None:
+        # Imported here rather than at module scope, which is this module's standing arrangement
+        # with `port`: the import above is TYPE_CHECKING-only so nothing in the classification path
+        # can drag the port in. One definition of "declares an endpoint" is worth the local import.
+        from ledger_exception_control_plane.ledger.port import declared_endpoint
+
         self.wrapped = adapter
+
+        # **Set only when there is one to forward**, and that shape is forced by how runtime
+        # protocol checks work rather than chosen for elegance. Python 3.12 resolves them with
+        # ``inspect.getattr_static``, so a property that raises ``AttributeError`` still *looks*
+        # present and the wrapper would satisfy ``EndpointDeclaringAdapter`` while being unable to
+        # answer. An instance attribute that is simply absent is the only form that makes the
+        # wrapper genuinely invisible to the question — which is what "changes nothing else" has to
+        # mean here.
+        # ``setattr`` rather than ``self.endpoint = …``, and deliberately no class-level
+        # annotation: the attribute is *conditionally* present, which Python's type system cannot
+        # state. Annotating it would tell a reader — and the type checker — that every wrapper has
+        # an endpoint, which is the claim this whole arrangement exists to avoid making.
+        endpoint = declared_endpoint(adapter)
+        if endpoint is not None:
+            setattr(self, "endpoint", endpoint)  # noqa: B010
 
     @property
     def name(self) -> str:

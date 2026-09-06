@@ -29,10 +29,17 @@ locking and the retry-independent operation identifier**, the first increment of
 phase (ADR-052); **4.2 delivered the transactional outbox and the capability-declaring
 ledger adapter** — the intent written in the state change's own transaction, a write-ahead attempt
 record before every send, and a port whose guarantees are declared as data, proven by a conformance
-run and branched on rather than assumed (ADR-054); and **4.3 has delivered bounded retry, the
+run and branched on rather than assumed (ADR-054); **4.3 delivered bounded retry, the
 dead-letter queue and the replay CLI** — an enumerated transport classifier whose default is
 `UNKNOWN`, two independent bounds on every retry, and a replay that re-reads the persisted
-instruction rather than rebuilding one (ADR-055). **M4.4 is next.**
+instruction rather than rebuilding one (ADR-055); **5.1 delivered the human approval gate with role
+separation**, resolving OPEN-8 with a registry of hashed bearer tokens and moving the
+countersignature and single-use rules into database constraints (ADR-056); and **4.4 has delivered
+`UNKNOWN` semantics, bounded reconciliation and manual recovery** — the capability branch of §13.5
+executed rather than described, with both re-send bounds enforced, a negative answer trusted only
+after N consecutive observations and both declared windows, monotonic transitions held by triggers,
+the supersession interlock, and an operator queue that carries its own evidence procedure (ADR-057).
+**M5.2 is next**, then the 4.5 kill-test gate.
 
 The model layer still makes **no live call**: no provider SDK is a dependency, nothing under `llm/`
 imports an HTTP client, and no transport that speaks HTTP exists — the flow is exercised entirely
@@ -40,12 +47,14 @@ through injected fakes and recorded cassettes. The committed cassettes are **syn
 captured**; the format records which a file is and a test asserts it, because 6.3 will publish
 measurements produced from cassettes and the difference must never be lost.
 
-**Nor does the ledger side open a socket.** The reference adapter is an in-process simulated ledger,
-which is what lets the whole reliability layer be proven offline and in CI; a real adapter would
-need its capability profile established from a vendor's documentation rather than assumed, which is
-OPEN-11. The transport classifier added at 4.3 is exercised by handing it exceptions directly, for
-the same reason. Still not implemented: no evaluation, no scorer, no approval workflow, no `UNKNOWN`
-recovery workflow, no chaos suite and no console.
+**Nor does the ledger side open a socket.** There are now two reference adapters, both in-process,
+which is what lets the whole reliability layer be proven offline and in CI. The second — required by
+§4.4 and configured `idempotency=NONE, posting_identity_query=NONE` — **genuinely double-books**, so
+every "applied exactly once" assertion against it measures our restraint rather than the double's
+forgiveness. A real adapter would need its capability profile established from a vendor's
+documentation rather than assumed, which is OPEN-11. The transport classifier added at 4.3 is
+exercised by handing it exceptions directly, for the same reason. Still not implemented: no
+evaluation, no scorer, no chaos suite and no console.
 
 **An `adjustment` row is now written and can now be dispatched**, and both sentences used to say
 the opposite. 4.1 derives a retry-independent `operation_id`, binds it to the whole posting
@@ -62,10 +71,17 @@ command. **Everything else defaults to `UNKNOWN` and is never retried**; an oper
 outcome is ambiguous, or which has an unresolved in-flight attempt, is not merely skipped by the
 retry path but invisible to it.
 
-What still does not exist is anything that *resolves* an ambiguity: no reconciliation, no
-posting-identity query workflow, no idempotency-window enforcement, no supersession interlock and no
-recovery queue. A second send after an ambiguous outcome is **refused** unless the adapter's verified
-capability permits it. `PROJECT_STATUS.md` is the authority on exactly what exists.
+4.4 added the only thing that can be done about a send whose outcome nobody knows. Where the adapter
+can be queried, reconciliation asks — bounded, scheduled, and never resolving a `NotFound` to
+`REJECTED` before N consecutive negatives and both declared windows. Where it can only suppress, a
+re-send is permitted **only** inside the declared window and a scope proven against the endpoint the
+original send recorded. Where it can do neither, the automatic path stops and an operator takes it.
+Every query is appended as evidence, `UNKNOWN` is never overwritten in place, and the transitions are
+held by database triggers rather than by application discipline.
+
+What still does not exist is the audit contract extended to *every* state transition (5.2), the
+`naive/` baseline and the chaos suite (4.5), and everything from M6 onwards.
+`PROJECT_STATUS.md` is the authority on exactly what exists.
 
 ---
 
@@ -292,6 +308,14 @@ uv run python -m ledger_exception_control_plane.operations list
 uv run python -m ledger_exception_control_plane.operations replay --id <uuid>
 ```
 
+The human gate (M5.1) and the ambiguous-outcome branch (M4.4). The gate's exit criterion is a
+composite foreign key refusing a write, and 4.4's transitions are triggers, so both need a server:
+
+```bash
+make approval-verify   # roles, countersignature, single use, and the gate blocking the write
+make reconcile-verify  # the UNKNOWN branch across all three capability configurations
+```
+
 Adding a dependency: `uv add <pkg>` for runtime, `uv add --dev <pkg>` for tooling. Both update
 `uv.lock`, which is committed. CI runs `--frozen`, so a dependency change that skipped the lockfile
 cannot reach `main`.
@@ -303,12 +327,14 @@ cannot reach `main`.
 - Python 3.12, typed throughout, Pydantic v2 for all boundary schemas.
 - `src/` layout: `db`, `fixtures`, `ingest`, `matching`, `classification`, `money`, `llm`,
   `operations`, `ledger`, `demo`. `ledger/` arrived at 4.2 and holds the adapter port, the
-  conformance suite, the reference simulated ledger and the transport classifier. A module or
-  package named `outbox`, `approval` or `workers` remains forbidden by a guard test at any depth:
-  the outbox row is written by the module that already owns adjustment writes, so a file under that
-  name would mean a second dispatch path had appeared without review; `approval` belongs to 5.1;
-  and **`workers` stayed forbidden through 4.3**, which needed no background process — the retry
-  runner does a bounded pass and returns, and what drives it is not this increment's decision.
+  conformance suite, the two reference simulated ledgers and the transport classifier. A module or
+  package named `outbox` or `workers` remains forbidden by a guard test at any depth: the outbox row
+  is written by the module that already owns adjustment writes, so a file under that name would mean
+  a second dispatch path had appeared without review; and **`workers` stays forbidden** — neither the
+  retry runner nor the reconciliation pass is a background process, each does one bounded pass and
+  returns, and what drives them is a deployment decision (10.1). `operations/approval.py` arrived at
+  5.1 and is the only module permitted to record a human decision; `operations/reconcile.py` and
+  `operations/recovery.py` arrived at 4.4.
 - `naive/` holds the RED baseline and is never imported by `src/`.
 - Migrations via Alembic; every migration applies and rolls back cleanly.
 - Conventional commit messages: `feat:`, `fix:`, `test:`, `chore:`, `docs:`, `refactor:`.

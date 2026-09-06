@@ -43,21 +43,48 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger_exception_control_plane.audit import emit
 from ledger_exception_control_plane.db.control import (
+    Adjustment,
     Approval,
     ApprovalDecision,
+    AttemptState,
+    AuditApprovalDecision,
+    AuditOutcome,
+    AuditTool,
     ExceptionRecord,
+    Outbox,
+    PostingAttempt,
+    RecoveryItem,
+    RecoveryState,
     TreatmentCode,
     TreatmentProposal,
 )
+from ledger_exception_control_plane.db.control import PostingOutcome as OutcomeCode
 from ledger_exception_control_plane.security import Principal, Role
 
 __all__ = [
+    "APPROVAL_SCOPE",
     "ApprovalRecord",
     "ApprovalRefusedError",
     "RefusalReason",
     "record_decision",
+    "supersession_is_blocked",
 ]
+
+#: §11's *"authorisation under which the action ran"* for a human decision.
+#:
+#: The role, not a capability name: this is the one place in the system where a *person* is the
+#: authority, and the trail has to say which kind of person. Rendered as ``approval:<role>``.
+APPROVAL_SCOPE = "approval"
+
+#: How an approval decision reads in the audit trail. Total over the enum by construction — the
+#: fourth audit value, ``n_a``, is for events that are not decisions at all.
+_DECISION_AUDIT: dict[ApprovalDecision, AuditApprovalDecision] = {
+    ApprovalDecision.APPROVED: AuditApprovalDecision.APPROVED,
+    ApprovalDecision.REJECTED: AuditApprovalDecision.REJECTED,
+    ApprovalDecision.EDITED: AuditApprovalDecision.EDITED,
+}
 
 
 class RefusalReason(enum.StrEnum):
@@ -87,6 +114,11 @@ class RefusalReason(enum.StrEnum):
 
     #: The exception does not exist, or the proposal does not belong to it.
     UNKNOWN_SUBJECT = "unknown_subject"
+
+    #: §12.1's supersession interlock (M4.4): a prior operation on this exception is in flight,
+    #: ambiguous, or open in an operator's recovery queue. One exception must never have two live
+    #: resolutions, because both could post.
+    SUPERSESSION_BLOCKED = "supersession_blocked"
 
 
 class ApprovalRefusedError(Exception):
@@ -120,6 +152,73 @@ def _requires_treatment(decision: ApprovalDecision) -> bool:
     exactly the row the ``adjustment`` foreign key is designed to make unreferenceable.
     """
     return decision in (ApprovalDecision.APPROVED, ApprovalDecision.EDITED)
+
+
+async def supersession_is_blocked(
+    session: AsyncSession, *, exception_id: uuid.UUID, resolution_version: int
+) -> str | None:
+    """The operation blocking a new resolution version, or ``None``.
+
+    **§12.1's supersession interlock**, and the database enforces it too — the
+    ``approval_supersession_interlock`` trigger runs the same query on every insert. This is the
+    half that produces a usable refusal; the trigger is the half that holds when a future code path
+    forgets to ask. A test writes the violation straight at the table to prove which is which.
+
+    Three conditions block, and they are not the same condition seen three ways:
+
+    - an **in-flight attempt** — a send was recorded and never answered, which §12.1.1 defines as
+      ``UNKNOWN`` regardless of what any other column says;
+    - an **open recovery item** — an operator holds the question and has not answered it;
+    - an **ambiguous recorded outcome that has never been to recovery** — the automatic path has
+      stopped and nobody has picked it up.
+
+    The third is bounded by "never been to recovery" on purpose. Once an operator has adjudicated,
+    the prior resolution is no longer *live*, and a permanent block would leave every unverifiable
+    ambiguity as a dead end with no route forward. That is a deliberate trade, and it is not free:
+    after a ``RESOLVED_UNVERIFIED`` the original may in fact have applied, so superseding can still
+    double-post. What the design guarantees is that the judgement is recorded, attributable and
+    reportable — not that it is correct. Claiming otherwise would be exactly the unconditional
+    guarantee §13.5 forbids.
+    """
+    in_flight = (
+        select(PostingAttempt.adjustment_id)
+        .where(
+            PostingAttempt.adjustment_id == Adjustment.id,
+            PostingAttempt.state == AttemptState.IN_FLIGHT,
+        )
+        .exists()
+    )
+    open_recovery = (
+        select(RecoveryItem.adjustment_id)
+        .where(
+            RecoveryItem.adjustment_id == Adjustment.id,
+            RecoveryItem.state == RecoveryState.OPEN,
+        )
+        .exists()
+    )
+    any_recovery = (
+        select(RecoveryItem.adjustment_id)
+        .where(RecoveryItem.adjustment_id == Adjustment.id)
+        .exists()
+    )
+    unadjudicated = (
+        Outbox.last_outcome.in_([OutcomeCode.UNKNOWN, OutcomeCode.PARTIALLY_APPLIED])
+        & ~any_recovery
+    )
+
+    return (
+        await session.execute(
+            select(Adjustment.operation_id)
+            .join(Approval, Adjustment.approval_id == Approval.id)
+            .outerjoin(Outbox, Outbox.adjustment_id == Adjustment.id)
+            .where(
+                Approval.exception_id == exception_id,
+                Approval.resolution_version < resolution_version,
+                in_flight | open_recovery | unadjudicated,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 async def record_decision(
@@ -185,6 +284,16 @@ async def record_decision(
                 "the proposal does not belong to this exception",
             )
 
+    blocking = await supersession_is_blocked(
+        session, exception_id=exception_id, resolution_version=resolution_version
+    )
+    if blocking is not None:
+        raise ApprovalRefusedError(
+            RefusalReason.SUPERSESSION_BLOCKED,
+            f"operation {blocking[:12]}… on this exception is in flight, ambiguous or open in "
+            "recovery; one exception must never have two live resolutions (§12.1)",
+        )
+
     # §16's countersignature rule, checked here for a clear refusal and enforced again by the
     # `approver_is_not_the_requester` check constraint, which is the control that actually holds:
     # an application check is one refactor from being skipped, and this one guards the boundary
@@ -240,7 +349,28 @@ async def record_decision(
                 RefusalReason.ALREADY_DECIDED,
                 "this exception already has a decision at this resolution version",
             ) from error
+        # The interlock trigger. Reached when a prior operation became ambiguous between the check
+        # above and this insert — which is a race the check cannot close and the trigger can,
+        # because it runs inside the same statement as the write.
+        if "supersession" in message or "in flight, ambiguous or open in recovery" in message:
+            raise ApprovalRefusedError(
+                RefusalReason.SUPERSESSION_BLOCKED,
+                "a prior operation on this exception became live while this decision was being "
+                "recorded (§12.1)",
+            ) from error
         raise
+
+    await emit(
+        session,
+        tool=AuditTool.APPROVE,
+        outcome=AuditOutcome.SUCCESS,
+        correlation_id=exception_row.correlation_id,
+        occurred_at=now,
+        scope_granted=f"{APPROVAL_SCOPE}:{principal.role.value}",
+        principal=principal.id,
+        approval_decision=_DECISION_AUDIT[decision],
+        approver=principal.id,
+    )
 
     return ApprovalRecord(
         approval_id=row.id,

@@ -177,11 +177,15 @@ async def _seed(marker: str) -> uuid.UUID:
         )
         approval_id = uuid.uuid4()
         await connection.execute(
+            # M5.1 made `approval_token` NOT NULL and unique. These seeds predate it, so each
+            # carries the approval's own id: unique by construction, and recognisably not a
+            # token anybody issued.
             "INSERT INTO approval (id, exception_id, resolution_version, decision,"
-            " approved_treatment, principal, decided_at)"
-            " VALUES ($1, $2, 1, 'approved', 'rebook', 'controller-a', $3)",
+            " approved_treatment, principal, approval_token, decided_at)"
+            " VALUES ($1, $2, 1, 'approved', 'rebook', 'controller-a', $3, $4)",
             approval_id,
             exception_id,
+            str(approval_id),
             EPOCH,
         )
     finally:

@@ -49,6 +49,7 @@ __all__ = [
     "UNBOUNDED",
     "Atomicity",
     "Confirmed",
+    "EndpointDeclaringAdapter",
     "Eventual",
     "Found",
     "IdempotencyMode",
@@ -72,6 +73,7 @@ __all__ = [
     "Unbounded",
     "Unknown",
     "VerifiedCapabilities",
+    "declared_endpoint",
     "effective_capabilities",
 ]
 
@@ -478,6 +480,40 @@ class LedgerAdapter(Protocol):
         ...
 
     async def post(self, operation_id: str, instruction: PostingInstruction) -> PostingOutcome: ...
+
+
+@runtime_checkable
+class EndpointDeclaringAdapter(LedgerAdapter, Protocol):
+    """An adapter that can say **where** it posts (increment 4.4, §13.5 clause 3).
+
+    The same typed-absence shape as :class:`QueryableLedgerAdapter`, added for the same reason: an
+    adapter that cannot say where it sends must not be *asked* and then be assumed to have answered.
+
+    §13.5 permits a re-send under ``ENFORCES_KEY`` *"only while … the target endpoint matches the
+    original ``idempotency_scope``"*. Under ``PER_ENDPOINT`` that comparison needs the endpoint the
+    **original** send used, which is a fact about a past attempt rather than about today's
+    configuration — so the dispatcher records it on the write-ahead attempt row, and 4.4 compares
+    the recorded value against the one a re-send would use.
+
+    Optional, and absence is not a failure: an adapter with no declared endpoint records nothing,
+    and a comparison against nothing is a mismatch rather than a match. That is the same direction
+    §10.1 takes with an unverified capability, and it is the only safe one — proving a re-send is
+    inside its scope is our obligation, not the provider's.
+    """
+
+    @property
+    def endpoint(self) -> str:
+        """Where this adapter posts. Recorded as evidence, never used to choose behaviour."""
+        ...
+
+
+def declared_endpoint(adapter: LedgerAdapter) -> str | None:
+    """The adapter's declared endpoint, or ``None`` where it declares none.
+
+    A function rather than a ``getattr`` at each call site, so the absent case has one meaning in
+    one place. ``None`` reads as "not recorded", never as "matches".
+    """
+    return adapter.endpoint if isinstance(adapter, EndpointDeclaringAdapter) else None
 
 
 @runtime_checkable

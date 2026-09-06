@@ -213,18 +213,28 @@ async def _seed_approval(
     """
     approval_id = uuid.uuid4()
     approved = None if decision == "rejected" else treatment
+    # M5.1's `requested_by_iff_edited`: an edited treatment carries the principal who *asked* for
+    # it, and nothing else does. §16's countersignature rule is then a check constraint comparing
+    # the two columns, so the requester has to be a different principal — an edit seeded with the
+    # approver's own name would be refused, which is the control working rather than a nuisance.
+    requested_by = "analyst-a" if decision == "edited" else None
     connection = await asyncpg.connect(DSN)
     try:
         await connection.execute(
+            # M5.1 made `approval_token` NOT NULL and unique. These seeds predate it, so each
+            # carries the approval's own id: unique by construction, and recognisably not a
+            # token anybody issued.
             "INSERT INTO approval (id, exception_id, resolution_version, decision,"
-            " approved_treatment, principal, decided_at)"
-            " VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            " approved_treatment, principal, requested_by, approval_token, decided_at)"
+            " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             approval_id,
             exception_id,
             resolution_version,
             decision,
             approved,
             principal,
+            requested_by,
+            str(approval_id),
             EPOCH,
         )
     finally:

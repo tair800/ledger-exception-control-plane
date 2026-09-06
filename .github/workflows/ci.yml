@@ -191,6 +191,14 @@ jobs:
       - name: Verify the approval gate and role separation against real PostgreSQL
         run: uv run pytest tests/test_approval_postgres.py tests/test_approval_api_postgres.py -m integration --no-cov
 
+      # The ambiguous-outcome branch. Every rule §13.5 states is a condition on data somebody
+      # declared, and every transition it makes is held by a trigger — the immutability of a
+      # recorded attempt outcome, the refusal to move off a terminal one, the append-only query
+      # record, and the supersession interlock. None of those is a property of the application, so
+      # like the approval gate above they are proven against a real server rather than asserted.
+      - name: Verify UNKNOWN semantics, reconciliation and recovery against real PostgreSQL
+        run: uv run pytest tests/test_reconcile_postgres.py -m integration --no-cov
+
       # The authoritative coverage gate, and the only place it can be honest.
       #
       # The unit job cannot see `matching.service` or `classification.service` — their entire

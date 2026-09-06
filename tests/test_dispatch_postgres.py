@@ -128,10 +128,26 @@ async def clean_slate() -> AsyncIterator[None]:
 
 
 async def _wipe() -> None:
-    """Deepest first: every one of these foreign keys is RESTRICT."""
+    """Deepest first: every one of these foreign keys is RESTRICT.
+
+    ``audit_event`` and ``reconciliation_query`` need their append-only triggers suspended to be
+    cleared at all, which is the harness explicitly overriding a control it also tests — see
+    ``test_dispatch_creates_no_row_in_any_later_increment_table``, which asserts the exact events
+    one dispatch produces and could not do so if earlier tests' events accumulated here.
+    ``assert_target_is_disposable`` has already refused to run against anything but a throwaway
+    database.
+    """
     connection = await asyncpg.connect(DSN)
     try:
+        for table, trigger in (
+            ("audit_event", "audit_event_append_only_row"),
+            ("reconciliation_query", "reconciliation_query_append_only_row"),
+        ):
+            await connection.execute(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}")
+            await connection.execute(f"DELETE FROM {table}")
+            await connection.execute(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}")
         for table in (
+            "recovery_queue",
             "posting_attempt",
             "outbox",
             "adjustment",
@@ -190,12 +206,16 @@ async def _seed_approval(exception_id: uuid.UUID, *, resolution_version: int = 1
     connection = await asyncpg.connect(DSN)
     try:
         await connection.execute(
+            # M5.1 made `approval_token` NOT NULL and unique. These seeds predate it, so each
+            # carries the approval's own id: unique by construction, and recognisably not a
+            # token anybody issued.
             "INSERT INTO approval (id, exception_id, resolution_version, decision,"
-            " approved_treatment, principal, decided_at)"
-            " VALUES ($1, $2, $3, 'approved', 'rebook', 'controller-a', $4)",
+            " approved_treatment, principal, approval_token, decided_at)"
+            " VALUES ($1, $2, $3, 'approved', 'rebook', 'controller-a', $4, $5)",
             approval_id,
             exception_id,
             resolution_version,
+            str(approval_id),
             EPOCH,
         )
     finally:
@@ -1117,8 +1137,20 @@ async def test_the_verified_reference_adapter_offers_a_reconciliation_route(
 
 @pytest.mark.asyncio
 async def test_dispatch_creates_no_row_in_any_later_increment_table(engine: AsyncEngine) -> None:
-    """4.2 dispatches once and records the outcome. It does not retry, dead-letter, recover or
-    audit."""
+    """A dispatch retries nothing, dead-letters nothing and recovers nothing — and audits.
+
+    **Narrowed at 4.4, and the narrowing is the honest kind rather than the accommodating kind.**
+    This asserted that a dispatch wrote to no ``dlq``, ``recovery_queue`` *or* ``audit_event`` row,
+    which was right while nothing was entitled to write an event. 4.4's deliverables name *"audit
+    events for every attempt"*, so the third table moved from "must be empty" to **"must hold
+    exactly the two events one attempt produces"** — one when the send was recorded and one when it
+    resolved. A test that had simply dropped ``audit_event`` from the list would have stopped
+    watching it; this one now fails if the events disappear, which is the property that matters.
+
+    The two-event shape is itself the point. The first is committed *before* the socket write, so a
+    crash between the two leaves an event for a send with no ending — which, together with the
+    in-flight attempt row, is exactly the ``UNKNOWN`` §12.1.1 defines and 4.4 resolves.
+    """
     adjustment_id, _ = await _enqueued(engine, marker="scope")
     await dispatch_once(
         engine, adjustment_id=adjustment_id, adapter=SimulatedLedger(), sent_at=EPOCH
@@ -1126,11 +1158,25 @@ async def test_dispatch_creates_no_row_in_any_later_increment_table(engine: Asyn
 
     connection = await asyncpg.connect(DSN)
     try:
-        for table in ("dlq", "recovery_queue", "audit_event"):
+        for table in ("dlq", "recovery_queue", "reconciliation_query"):
             count = await connection.fetchval(f"SELECT count(*) FROM {table}")
-            assert count == 0, f"4.2 wrote to {table}, which belongs to a later increment"
+            assert count == 0, f"a dispatch wrote to {table}, which it must never touch"
         assert await connection.fetchval("SELECT count(*) FROM posting_attempt") == 1
         assert await connection.fetchval("SELECT count(*) FROM outbox") == 1
+
+        events = await connection.fetch(
+            "SELECT tool, outcome, scope_granted, principal, correlation_id"
+            " FROM audit_event ORDER BY created_at"
+        )
+        assert [(row["tool"], row["outcome"]) for row in events] == [
+            ("post", "quarantined"),
+            ("post", "success"),
+        ], "one attempt owes exactly two events: the send recorded, then the answer"
+        assert {row["scope_granted"] for row in events} == {"ledger:post"}
+        assert {row["principal"] for row in events} == {"system"}
+        assert {row["correlation_id"] for row in events} == {"lecp:scope"}, (
+            "the correlation id must span ingestion to posting, so it is the exception's own"
+        )
     finally:
         await connection.close()
 

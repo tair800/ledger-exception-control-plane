@@ -3,9 +3,10 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M5.1 complete — the human approval gate with role separation.
-**Next:** M4.4 (`UNKNOWN` reconciliation, window enforcement and manual recovery), which needs
-5.1's authenticated principals for its `/recovery` endpoints. See ADR-056 for the build order.
+**Current milestone:** M4.4 complete — `UNKNOWN` semantics, bounded reconciliation and manual
+recovery. M5.1 (the human approval gate) landed immediately before it.
+**Next:** M5.2 (audit-event contract v1 at every state transition), then the **4.5 kill-test gate**.
+See ADR-056 for the build order and ADR-057 for what 4.4 decided.
 **The whole deterministic core exists.** A settlement file is ingested, normalised and either
 accepted or quarantined; its lines are matched deterministically against ledger entries with
 tolerance; every line that fails to match becomes exactly one classified exception; and an approved
@@ -17,10 +18,17 @@ and posts through a ledger port whose guarantees are *declared and proven* rathe
 retries an allowlisted transport failure under two independent bounds, dead-letters what is left,
 and replays it on an operator's command.
 
-What still does not exist: anything that decides a treatment or approves one — there is no approval
-workflow and no console — and, inside the reliability phase, nothing that *resolves* an ambiguity:
-no reconciliation, no window enforcement, no supersession interlock, no manual-recovery queue and
-no chaos suite.
+**A human now authorises every write, and an ambiguous one has somewhere to go.** 5.1 records the
+decision behind database constraints and proves the gate blocks the write with a composite foreign
+key. 4.4 executes §13.5's capability branch: reconciliation queries before it re-sends, a `NotFound`
+resolves to `REJECTED` only after N consecutive negatives and both declared windows, a re-send is
+bounded by the declared idempotency window *and* a scope proven against the endpoint the original
+send recorded, and where the adapter offers neither suppression nor a query the automatic path stops
+and an operator takes it with an evidence procedure in hand.
+
+What still does not exist: the audit contract extended to *every* state transition (5.2); the
+`naive/` baseline and the chaos suite — **the 4.5 kill-test gate has not run**; and no console,
+evaluation, observability or deployment.
 
 ---
 
@@ -45,7 +53,8 @@ no chaos suite.
 | **4.2 Transactional outbox and ledger adapter** | **DONE** | Outbox written in the state change's transaction; write-ahead attempt record before every send; three-valued `PostingOutcome` and `QueryOutcome`; capability declared, proven by a conformance run, and branched on |
 | **4.3 Bounded retry, DLQ and replay CLI** | **DONE** | Enumerated transport classifier defaulting to `UNKNOWN`; full-jitter backoff under an attempt ceiling *and* a wall-clock budget; dead-letter queue with a money-free envelope; replay proven to apply exactly one posting, measured at the ledger |
 | **5.1 Approval gate with role separation** | **DONE** | OPEN-8 resolved; hashed bearer tokens, three roles, countersignature and single use enforced by database constraints; the gate proven to block the write |
-| 4.4, 4.5, 5.2 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **4.4 `UNKNOWN` semantics, reconciliation and recovery** | **DONE** | §13.5's capability branch executed across all three configurations; query before re-send; both re-send bounds enforced; the consecutive-negative count derived from an append-only table; monotonic transitions and the supersession interlock held by triggers; operator queue with evidence procedure, SLA and segregation of duties; `/recovery` endpoints |
+| 4.5, 5.2 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -707,6 +716,171 @@ accept the clean copy:
 Mutations are applied to in-memory copies — a parsed AST, a throwaway enum — so a crashed test cannot
 leave one in the money path, and a further test asserts none reached disk. A previous increment had a
 reviewer leave a mutation behind; this one is built so it cannot.
+
+## What M5.1 delivered
+
+*"No ledger write without a recorded human decision."* Recorded here because the milestone's own
+section was never written — see the correction under M4.4 below, which found the same commit had
+skipped its database gate.
+
+- **OPEN-8 resolved without inventing an identity provider.** `LECP_PRINCIPALS` maps a principal id
+  to a role and a **SHA-256 of** its bearer token, so the configuration carries no usable
+  credential. Authentication compares in constant time across the whole registry and does not stop
+  at the first match. Empty means nobody: a control plane with no configured humans refuses every
+  approval.
+- **Three roles, two separations.** An operator holds no approval right, and no approval role may
+  work the operations queues. A role is a single value; there is no RBAC engine.
+- **Two controls moved into the database.** `approver_is_not_the_requester` enforces §16's
+  countersignature rule, with `requested_by_iff_edited` stopping it being vacuous; `uq_approval_token`
+  makes a replayed approval token lose to a unique index rather than to an application check.
+- **The exit criterion is enforced by a key that already existed.** M1.2's composite foreign key from
+  `adjustment` to `approval (id, approved_treatment, principal)` means an adjustment referencing a
+  *rejection* has nothing to point at. The test posts money against a rejected decision and watches
+  PostgreSQL refuse it.
+
+Recorded as **ADR-056**, which also set the build order 5.1 → 4.4 → 5.2 → 4.5 and why.
+
+## What M4.4 delivered
+
+*"Make the conditional nature of the side-effect guarantee real in code, not just in prose."*
+4.2 built the refusal half of §13.5's capability branch and named the routes; 4.3 kept `UNKNOWN` out
+of the retry path entirely. This is the half that acts — and every action it takes is bounded by a
+declaration somebody made rather than by an assumption this code makes.
+
+**One migration**, and it is the only schema addition since M1.2: a table, a column, four triggers
+and two audit verbs.
+
+### Query before re-send, always
+
+An adapter can declare both `ENFORCES_KEY` and `BY_OPERATION_ID`. Where it does, reconciliation
+**asks** rather than sends. A query is a read that can be wrong for free; a re-send is an
+irreversible financial write that cannot. An implementation preferring the re-send would post again
+in every case a query would have answered.
+
+### The bounds are the deliverable
+
+§13.5 permits a re-send *"only while `now - first_send < idempotency_window` **and** the target
+endpoint matches the original `idempotency_scope`"*. Both are enforced:
+
+- the window is a **strict** inequality, so the boundary itself is outside it — at hour 24 of a
+  24-hour retention the provider has either forgotten the key or not, and we cannot tell which;
+- the scope needed a recorded fact, so one is now recorded. `posting_attempt.endpoint` carries where
+  each send went, and **NULL means *not recorded*, never *matches*** — a re-send whose scope cannot
+  be proven is refused. A backfilled placeholder would have been a fiction the comparison then
+  treated as evidence.
+
+`PER_ACCOUNT` needs no comparison, and that is a consequence of §12.1 rather than an omission: the
+operation identifier binds the instruction payload, of which the account is part.
+
+### `NotFound` is not "no", and the count is derived from evidence
+
+A negative answer resolves to `REJECTED` only after **N consecutive** negatives **and both** declared
+windows have elapsed. `Indeterminate` never counts and breaks the run. The count is **not stored**:
+every query is appended to the new `reconciliation_query` table — append-only by trigger — and "N
+consecutive" is read back off those rows, because the number that decides whether an ambiguous
+financial write may be declared un-applied cannot be a column somebody can set. Each row carries the
+windows it was judged against, so a later revision to a provider's documented bound cannot silently
+restate yesterday's reasoning in today's terms.
+
+### Monotonic, enforced by triggers rather than intended
+
+- `posting_attempt.outcome` is **immutable once recorded**. The row that saw the ambiguity keeps it
+  forever; neither reconciliation nor recovery writes to that table at all.
+- `outbox.last_outcome` may not move off a terminal value, and a settled row may not un-settle.
+  `CONFIRMED → anything` is refused by the database.
+- `reconciliation_query` and `audit_event` both refuse `UPDATE`, `DELETE` and `TRUNCATE`.
+
+### The supersession interlock spans four tables, so it is a trigger
+
+A new `resolution_version` is refused while a prior operation on the same exception has an in-flight
+attempt, an open recovery item, or an ambiguous outcome nobody has adjudicated. A `CHECK` cannot
+reach across a table and this rule reaches across four. The service refuses first with a usable
+message; a test writes the violation straight at the table to prove which of the two is the control.
+
+### The manual branch, and the limit of what it can claim
+
+The recovery queue carries the **evidence procedure** — which artefact to inspect and what would be
+sufficient for each permitted resolution — an SLA that makes a stale item alertable, and a
+segregation-of-duties rule the database enforces. `RESOLVED_UNVERIFIED` **settles nothing**: there is
+no terminal outcome meaning "a human judged without evidence", and inventing one would be the
+coercion §13.5 forbids wearing a new name. In the audit trail it is `ABSTAINED` — neither a success
+nor a failure, which is exactly what §13.5 asks that resolution to preserve.
+
+The interlock **releases** once an operator has adjudicated, including after an unverified
+resolution. That is a deliberate trade and it is not free: the original may in fact have applied, so
+superseding can still double-post. The design makes the judgement recorded, attributable and
+reportable — **not correct**. A test pins both halves rather than only the reassuring one.
+
+### `NONE`/`NONE` is proven against a ledger that really double-books
+
+`NonIdempotentLedger` applies every posting it receives and its applied-count rises each time; its
+responder runs **after** the books move, so an injected `Unknown` models §19.1 — the posting applied,
+the response lost. An applied-count of 1 after ten reconciliation passes is therefore a measurement
+of **our restraint**, not of the double's forgiveness. A system that retried the ambiguous write
+would read 2.
+
+### The bounds are enforced in front of the socket
+
+`resend_is_within_bounds` lives in the dispatcher and is re-exported from the reconciler, not the
+other way round. The first version put it only in the reconciler and every test passed — because the
+reconciler is the only caller today, which is the shape of a guarantee that holds by coincidence.
+The gate that admits a further send after an ambiguous outcome now evaluates the window and the
+scope itself, and a unit test pins the placement so a refactor cannot move it back.
+
+### Two corrections this increment had to make first
+
+**M5.1 skipped its database gate.** It added two controls to `approval` — `approval_token NOT
+NULL` and `requested_by_iff_edited` — and broke **five** integration suites with them. Every one
+failed on the first real-database run here, which means the full gate was not run before that
+commit; `CLAUDE.md` §6 requires it. The seeds are fixed and the fact is recorded rather than quietly
+repaired: a process rule that is documented and skipped is worse than one never written down.
+
+**4.3's attribution proxy swallowed the new declaration.** `AttributedAdapter` forwards `name` and
+`capabilities`, and had already been corrected once for dropping the conformance identity. It
+dropped `endpoint` in the same way, so sends made through it recorded none and the new scope bound
+refused a re-send the verified `ENFORCES_KEY` permits. Preserving the *absence* of an endpoint turned
+out to be the hard half: a property raising `AttributeError` still satisfies the protocol under
+Python 3.12's `getattr_static`, so the attribute is set only when there is one to forward.
+
+Both are recorded in ADR-057 §9, and both were found by tests failing rather than by review.
+
+## M4.4 verification
+
+```
+reconciliation suite:  42 passed, no database (tests/test_reconcile.py)
+reconciliation + recovery, real PostgreSQL: 51 passed (tests/test_reconcile_postgres.py)
+combined 4.4 run:      93 passed in 20m00s
+schema:                one migration; upgrade, downgrade and re-upgrade all exercised live
+```
+
+The three capability configurations each drive their own branch, and the assertions differ by
+configuration because the correct behaviour does:
+
+| Configuration | Branch taken | Measured at the ledger |
+|---|---|---|
+| `ENFORCES_KEY` + `BY_OPERATION_ID` | query, bounded; `Found` to CONFIRMED, N x `NotFound` + both windows to REJECTED | applied-count 1 where the posting landed, 0 where it never did |
+| `ENFORCES_KEY`, no query | re-send **only** inside window and proven scope; outside either, recovery | applied-count 1 after a suppressed re-send; **no send at all** when a bound is spent |
+| `NONE` / `NONE` | manual recovery, no re-send, no query | applied-count **1** after ten reconciliation passes, against a ledger that books every post it receives |
+
+The last row is the one worth reading. `NonIdempotentLedger` genuinely double-books and its responder
+runs *after* the books move, so the scenario is §19.1 exactly — the posting applied and the response
+was lost. An applied-count of 1 is therefore a measurement of restraint, not of the double's
+forgiveness; a system that retried the ambiguous write would read 2.
+
+Four defects were found by these tests rather than by review — two in this increment's own code,
+two inherited:
+
+- **the reconciliation bound did not apply to `Indeterminate`.** That arm returned before the
+  exhaustion check, so an adapter whose query API was down — the one answer that can repeat
+  forever — would have been queried without limit. §13.5 requires reconciliation to be *"bounded and
+  scheduled, never an unbounded retry loop"*, and it was not. Fixed, and the test that found it is
+  the regression test.
+- **the migration's downgrade re-narrowed the audit vocabulary against rows it could not
+  represent.** It now refuses with a message naming what it found, because `audit_event` is
+  append-only and the alternative would be a migration deciding to destroy history.
+- **five integration suites had been broken since M5.1** and nobody had run them (see below).
+- **4.3's attribution proxy swallowed the new `endpoint` declaration**, silently withdrawing a
+  permitted re-send (see below).
 
 ## What M4.3 delivered
 
@@ -2063,14 +2237,14 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-whole suite:  1425 passed against a real database (0 failed, 38m12s)
-default gate: 1210 passed, 219 deselected (no Docker required)
-coverage:     97.85% (gate 90%)
-ruff format:  94 files already formatted
+whole suite:  1833 passed against a real database (0 failed, 1h48m11s)
+default gate: 1454 passed, 383 deselected (no Docker required)
+coverage:     96.84% (gate 90%, whole suite against the real database)
+ruff format:  121 files already formatted
 ruff check:   All checks passed!
-mypy:         Success: no issues found in 88 source files
+mypy:         Success: no issues found in 112 source files
 uv lock:      up to date (--check)
-alembic:      No new upgrade operations detected
+alembic:      No new upgrade operations detected; upgrade, downgrade and re-upgrade all exercised
 corpus:       matches the generator byte for byte
 demo snapshot: artifacts/m2-demo.html matches the pipeline byte for byte
 cassette:     tests/cassettes/canonical-corpus.json matches the builder byte for byte
@@ -2080,16 +2254,33 @@ treatment closure:   98 passed;  AI/money firewall: 56 passed
 tooling bootstrap:   30 passed;  cassette harness:  98 passed
 ```
 
-`operations/claim.py` and `operations/service.py` measure 100%; `operations/identity.py` 92%, its
-uncovered lines being the two unreachable non-finite-exponent guards and the type refusals that only
-a future field of the wrong type could reach.
+`operations/claim.py` and `operations/service.py` measure 100%; `operations/reconcile.py` 97% and
+`operations/recovery.py` 95%, their uncovered lines being refusal paths that only a malformed
+adapter answer or a lost race could reach; `operations/identity.py` 92%, its uncovered lines being
+the two unreachable non-finite-exponent guards and the type refusals that only a future field of the
+wrong type could reach. `routes.py` is the lowest at 85%, and every uncovered line is in the two
+`/exceptions/{id}` read views the console will exercise at M7.
 
-Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-09-05.
+The whole-suite run is now nearly three times its M4.3 duration. 4.4's own module accounts for most
+of it — 51 integration tests, each seeding a residual, an approval and a dispatch against a real
+server — and the two modules that clear the schema with `alembic downgrade base` pay for that twice.
+Worth recording rather than absorbing: the gate is the thing that catches what review does not, and
+a gate nobody runs because it takes two hours is the failure mode this increment already found once.
+
+Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2026-09-06.
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 55 ADRs and 9 OPEN items. M4.1 recorded **ADR-052** and opened nothing; it
-raised, without resolving, a **three-way disagreement about when the `naive/` kill-test gate runs**,
+`DECISIONS.md` holds 59 ADR entries (001-057, plus 004a and 004b) and 9 OPEN items.
+**OPEN-8** (authentication for the console) was resolved at M5.1 as **ADR-056**, which also
+corrected the build order to 5.1 → 4.4 → 5.2 → 4.5 and said why: §4.4's `/recovery` endpoints need authenticated principals, and §19's chaos list includes
+a replayed approval token, so running 4.4 first would have meant deciding the 4.5 kill-test gate on
+five of seven scenarios. **ADR-057** records what M4.4 decided — the three numbers §13.5 leaves to
+the project, where each monotonicity control lives, why the scope bound needed a recorded endpoint,
+and the limit of what the manual branch can honestly claim. It opens nothing and narrows **OPEN-11**
+by making the capability branch executable rather than described.
+
+M4.1 recorded **ADR-052** and opened nothing; it raised, without resolving, a **three-way disagreement about when the `naive/` kill-test gate runs**,
 and **ADR-053 has since closed it** — as a documentation correction, before M4.2 began and without
 inventing a placement. The authoritative chain already settled it: the portfolio blueprint states
 both gates as build preconditions naming no phase, `PORTFOLIO_PROGRESS.md` discharges such a gate at

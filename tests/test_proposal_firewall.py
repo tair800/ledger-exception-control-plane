@@ -885,8 +885,23 @@ OPERATIONS_MODULES_THAT_MAY_REACH_A_DATABASE: Final = frozenset(
         "operations/retry.py",
         "operations/__main__.py",
         "operations/approval.py",
+        # 4.4. Reconciliation reads persisted attempts and appends query rows; recovery reads and
+        # closes queue items. Both are database workflows in their entirety — there is no version
+        # of either that could be pure, which is exactly why the fence below stopped being a floor.
+        "operations/reconcile.py",
+        "operations/recovery.py",
     }
 )
+
+#: What is left when the allowlist is removed — asserted by name rather than by count.
+#:
+#: At 4.3 this fence asserted ``inspected >= 2`` and its own comment said the next widening must
+#: "either raise a justification or admit that the fence has stopped watching anything". 4.4 is that
+#: widening, and neither option was quite right: the honest answer is that the pure half was never a
+#: quantity, it was **one module and its package docstring**. So the claim is now the exact set. It
+#: fails if a module leaves it, which is the old floor, and it also fails if one is quietly *added*
+#: to the allowlist that should have stayed pure — which counting never could.
+PURE_OPERATIONS_MODULES: Final = frozenset({"operations/__init__.py", "operations/identity.py"})
 
 
 def test_nothing_in_the_operations_package_can_open_a_socket() -> None:
@@ -926,23 +941,24 @@ def test_only_the_named_operations_modules_reach_a_database() -> None:
     identifier's own tests need a container.
     """
     inspected = 0
+    scanned: set[str] = set()
     for name, source in _package_sources().items():
         if not name.startswith("operations/"):
             continue
         if name in OPERATIONS_MODULES_THAT_MAY_REACH_A_DATABASE:
             continue
         inspected += 1
+        scanned.add(name)
         for module in _imports(source):
             assert module.split(".")[0] not in {"asyncpg", "alembic"}, f"{name} imports {module}"
         assert "AsyncSession" not in _code_identifiers(source), f"{name} reaches for a session"
 
-    # The floor is re-checked whenever the allowlist grows, because widening it shrinks the pure
-    # half and a scan with nothing left to inspect would pass for the worst possible reason. At 4.3
-    # the allowlist took two more modules and the pure half is now exactly at this floor — which is
-    # the point at which the next widening must either raise a justification or admit that the
-    # fence has stopped watching anything. A reviewer noticed the comment claimed a re-check the
-    # 4.3 diff had not actually performed; it has now been performed, and this is the number.
-    assert inspected >= 2, "the scan is not seeing the pure half of the operations package"
+    # Exact, not a floor. See PURE_OPERATIONS_MODULES for why the count was the wrong instrument.
+    assert scanned == PURE_OPERATIONS_MODULES, (
+        f"the pure half of the operations package is {sorted(PURE_OPERATIONS_MODULES)}; "
+        f"found {sorted(scanned)}"
+    )
+    assert inspected == len(PURE_OPERATIONS_MODULES)
     assert "operations/identity.py" not in OPERATIONS_MODULES_THAT_MAY_REACH_A_DATABASE, (
         "the derivation must stay pure; it is copied into three later repositories"
     )
