@@ -57,6 +57,7 @@ from ledger_exception_control_plane.classification import (
 from ledger_exception_control_plane.db.control import (
     Adjustment,
     Approval,
+    DeadLetter,
     ExceptionClassification,
     Outbox,
     PostingAttempt,
@@ -1019,6 +1020,11 @@ ENTITY_WRITERS: Final = {
     "Adjustment": "operations/service.py",
     "Outbox": "operations/service.py",
     "PostingAttempt": "operations/dispatcher.py",
+    #: 4.3. A dead letter is written when a bounded retry runs out or when the ledger declines, and
+    #: both decisions belong to the module that owns the retry policy. ``uq_dlq_outbox_id`` already
+    #: makes a second dead letter for one outbox row impossible at the database; this makes a second
+    #: *writer* impossible in the code, which is the half a constraint cannot cover.
+    "DeadLetter": "operations/retry.py",
 }
 
 #: Kept as its own name because several tests and their kill tests read it directly.
@@ -1031,6 +1037,7 @@ WRITE_SIDE_TABLES: Final = {
     "Adjustment": "adjustment",
     "Outbox": "outbox",
     "PostingAttempt": "posting_attempt",
+    "DeadLetter": "dlq",
 }
 
 #: Verbs that turn a mapped class into a write, matched as a substring of the callee's name.
@@ -1095,13 +1102,23 @@ def _written_entities(source: str) -> set[str]:
     return written
 
 
-#: The module allowed to change a guarded row that already exists.
+#: The modules allowed to change a guarded row that already exists, each with its reason.
 #:
-#: One module for the whole set, which is why :func:`_mutated_columns` does not need to work out
-#: *which* entity an attribute belongs to — an ambiguity it could not resolve anyway, since
-#: ``state`` is a column of both ``Outbox`` and ``PostingAttempt`` and ``posting_ref`` of both
-#: ``Adjustment`` and ``PostingAttempt``.
-ENTITY_MUTATOR: Final = "operations/dispatcher.py"
+#: A set rather than a single name as of 4.3, and the widening is the smallest one that admits the
+#: increment: scheduling a retry, dead-lettering an exhausted envelope and closing a replayed entry
+#: are all in-place changes to rows that already exist, and all belong to the retry module.
+#:
+#: The fence still does not need to work out *which* entity an attribute belongs to — an ambiguity
+#: it could not resolve anyway, since ``state`` is a column of ``Outbox``, ``PostingAttempt`` and
+#: ``DeadLetter`` alike — because the question it answers is "may this module change a guarded row
+#: at all", and that is answered per module.
+ENTITY_MUTATORS: Final = {
+    "operations/dispatcher.py": "settles the outbox row and records the posting reference",
+    "operations/retry.py": (
+        "writes next_attempt_at, resolves a not_sent attempt, marks a row dead-lettered and "
+        "closes a replayed dead letter"
+    ),
+}
 
 #: Every mapped column of every guarded entity, read off the ORM rather than typed out here.
 #:
@@ -1109,7 +1126,7 @@ ENTITY_MUTATOR: Final = "operations/dispatcher.py"
 #: the column added later is exactly the one a new write would use.
 GUARDED_COLUMNS: Final[frozenset[str]] = frozenset(
     column.key
-    for entity in (Adjustment, Outbox, PostingAttempt, Approval)
+    for entity in (Adjustment, Outbox, PostingAttempt, Approval, DeadLetter)
     for column in entity.__table__.columns
 )
 
@@ -1123,7 +1140,7 @@ def _holds_a_guarded_row(source: str) -> bool:
     (``outbox.adjustment.posting_ref``) still requires querying for the parent, which requires the
     class, so the limiter does not open a route around itself.
     """
-    guarded = {"Adjustment", "Outbox", "PostingAttempt", "Approval"}
+    guarded = {"Adjustment", "Outbox", "PostingAttempt", "Approval", "DeadLetter"}
     return any(
         alias.name in guarded
         for node in ast.walk(ast.parse(source))
@@ -1167,12 +1184,17 @@ def _mutated_columns(source: str) -> set[str]:
 
 
 def assert_only_one_module_mutates_a_guarded_row(sources: Mapping[str, str]) -> None:
-    """Exactly one module may change a guarded row in place, and it is the dispatcher.
+    """Only the named modules may change a guarded row in place, and the set is exact.
 
     The companion to :func:`assert_only_one_module_writes_an_adjustment`, and the two divide the
-    question the way the increments do: 4.1 and 4.2's service *create* these rows, 4.2's dispatcher
-    *settles* them. Neither fence is the other's weaker form — a module can pass one and fail the
-    other, which is why they are split rather than either being widened.
+    question the way the increments do: 4.1 and 4.2's service *creates* these rows, 4.2's dispatcher
+    settles them, and 4.3's retry module schedules, dead-letters and closes them. Neither fence is
+    the other's weaker form — a module can pass one and fail the other, which is why they are split
+    rather than either being widened.
+
+    The set grew from one name to two at 4.3. Equality is still what is asserted, so a third
+    appearing fails as loudly as the first disappearing; what changed is the number of legitimate
+    mutators, not the strength of the claim.
 
     The allowed module must actually mutate something. A fence that passes because its subject
     stopped doing the thing has become a comment, and this project has already had one of those.
@@ -1187,8 +1209,9 @@ def assert_only_one_module_mutates_a_guarded_row(sources: Mapping[str, str]) -> 
             mutators.add(name)
 
     assert inspected >= 2, "the mutation fence is not seeing the modules that hold guarded rows"
-    assert mutators == {ENTITY_MUTATOR}, (
-        f"exactly {ENTITY_MUTATOR} may change a guarded row in place; found {sorted(mutators)}"
+    assert mutators == set(ENTITY_MUTATORS), (
+        f"exactly {sorted(ENTITY_MUTATORS)} may change a guarded row in place; "
+        f"found {sorted(mutators)}"
     )
 
 
@@ -1228,10 +1251,23 @@ def test_kill_a_dispatcher_that_stopped_settling_rows_is_detected() -> None:
     as "no more than one" would pass — greenest at the moment the behaviour disappeared.
     """
     sources = dict(_package_sources())
-    sources[ENTITY_MUTATOR] = "from ledger_exception_control_plane.db.control import Outbox\n"
+    for mutator in ENTITY_MUTATORS:
+        sources[mutator] = "from ledger_exception_control_plane.db.control import Outbox\n"
 
     with pytest.raises(AssertionError, match="may change a guarded row"):
         assert_only_one_module_mutates_a_guarded_row(sources)
+
+
+def test_every_named_mutator_carries_a_reason() -> None:
+    """An entry with no reason is an entry nobody reviewed.
+
+    The set grew at 4.3 and will grow again at 4.4. Requiring a sentence beside each name is the
+    cheapest thing that makes the next widening visible in a diff rather than invisible in a set
+    literal.
+    """
+    for module, reason in ENTITY_MUTATORS.items():
+        assert (PACKAGE_ROOT / module).exists(), f"{module} does not exist"
+        assert len(reason) > 30, f"{module} is permitted to mutate with no stated reason"
 
 
 def test_kill_a_vacuous_mutation_scan_is_detected() -> None:
@@ -1242,6 +1278,7 @@ def test_kill_a_vacuous_mutation_scan_is_detected() -> None:
 def test_the_guarded_column_set_is_read_off_the_orm() -> None:
     """Introspected, so a column added tomorrow is guarded tomorrow rather than never."""
     assert {"posting_ref", "last_outcome", "attempt_count", "resolved_at"} <= GUARDED_COLUMNS
+    assert {"replay_state", "replayed_at", "envelope", "next_attempt_at"} <= GUARDED_COLUMNS
     assert len(GUARDED_COLUMNS) >= 25, "the ORM introspection returned implausibly little"
 
 

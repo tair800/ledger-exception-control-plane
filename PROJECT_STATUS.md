@@ -3,19 +3,23 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M4.2 complete — the transactional outbox and the capability-declaring
-ledger adapter. **Next:** M4.3 (bounded retry, backoff and the dead-letter queue).
+**Current milestone:** M4.3 complete — bounded retry, the dead-letter queue and the replay CLI.
+**Next:** M4.4 (`UNKNOWN` reconciliation, window enforcement and manual recovery).
 **The whole deterministic core exists.** A settlement file is ingested, normalised and either
 accepted or quarantined; its lines are matched deterministically against ledger entries with
 tolerance; every line that fails to match becomes exactly one classified exception; and an approved
 treatment for that exception can be priced into a financial instruction, or refused with a reason.
-**An approved instruction can now be dispatched.** 4.1 gave it a retry-independent identifier and
-persisted it; 4.2 writes the outbox row in the same transaction as the state change, commits a
-write-ahead attempt record before every send, and posts through a ledger port whose guarantees are
-*declared and proven* rather than assumed. What still does not exist: anything that decides a
-treatment or approves one — there is no approval workflow and no console — and, inside the
-reliability phase, no retry, no dead-letter queue, no `UNKNOWN` recovery workflow and no chaos
-suite.
+**An approved instruction can now be dispatched, and a failed dispatch has a floor and a way
+back.** 4.1 gave it a retry-independent identifier and persisted it; 4.2 writes the outbox row in
+the same transaction as the state change, commits a write-ahead attempt record before every send,
+and posts through a ledger port whose guarantees are *declared and proven* rather than assumed; 4.3
+retries an allowlisted transport failure under two independent bounds, dead-letters what is left,
+and replays it on an operator's command.
+
+What still does not exist: anything that decides a treatment or approves one — there is no approval
+workflow and no console — and, inside the reliability phase, nothing that *resolves* an ambiguity:
+no reconciliation, no window enforcement, no supersession interlock, no manual-recovery queue and
+no chaos suite.
 
 ---
 
@@ -38,7 +42,8 @@ suite.
 | **3.4 Cassette recording harness** | **DONE** | Whole-request fingerprint match, scrubbing, fail-closed capture; the corpus replays offline through both adapters |
 | **4.1 Claim locking and operation identifier** | **DONE** | `SKIP LOCKED` claim proven under forced concurrency; identifier retry-independent, instruction-bound, approver-independent, and persisted before dispatch |
 | **4.2 Transactional outbox and ledger adapter** | **DONE** | Outbox written in the state change's transaction; write-ahead attempt record before every send; three-valued `PostingOutcome` and `QueryOutcome`; capability declared, proven by a conformance run, and branched on |
-| 4.3 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **4.3 Bounded retry, DLQ and replay CLI** | **DONE** | Enumerated transport classifier defaulting to `UNKNOWN`; full-jitter backoff under an attempt ceiling *and* a wall-clock budget; dead-letter queue with a money-free envelope; replay proven to apply exactly one posting, measured at the ledger |
+| 4.4 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -700,6 +705,100 @@ accept the clean copy:
 Mutations are applied to in-memory copies — a parsed AST, a throwaway enum — so a crashed test cannot
 leave one in the money path, and a further test asserts none reached disk. A previous increment had a
 reviewer leave a mutation behind; this one is built so it cannot.
+
+## What M4.3 delivered
+
+*"Failure has a floor and a way back."* The floor is a bounded retry that will only ever take a
+failure it can prove wrote nothing; the way back is a dead-letter queue and a replay command.
+
+**One migration**, and it is two `CHECK` constraints wide: the persisted outcome vocabulary gained
+`not_sent`. Everything else M4.3 needs — `outbox.attempt_count`, `outbox.next_attempt_at`,
+`DispatchState.DEAD_LETTERED`, the whole `dlq` table — has existed since M1.2.
+
+### The classifier is enumerated, and the default is the unsafe answer
+
+Four retryable causes, exactly as §15 lists them: DNS resolution failure, TCP connect failure or
+refusal, TLS handshake failure, and connect-timeout before the first byte. **Everything else is
+`UNKNOWN`**, including a read timeout, a connection reset and an ambiguous 5xx — the three a
+conventional retry classifier treats as transient, and the three §15 calls *"precisely the defect
+this design exists to prevent"*.
+
+Only two exception types are believed without a declaration — `socket.gaierror` and
+`ConnectionRefusedError` — because only those two can occur before a request byte exists. A
+`TimeoutError` may be a connect timeout or a read timeout with the identical type, so an adapter
+that knows which it had raises `LedgerTransportError` and says so, and one that does not gets
+`UNKNOWN`. **The burden of proof is on the claim that nothing was sent.**
+
+It lives in `ledger/` rather than `operations/`, because the `operations` package is forbidden to
+import `socket` or `ssl` and moving that fence would have been a relaxation.
+
+### Both bounds, and the clock starts at the first send
+
+An attempt ceiling *and* a wall-clock budget, because either alone is unbounded in the other
+dimension. They produce different dead-letter reasons, since a count exhaustion usually means the
+endpoint is wrong and a budget exhaustion that it was down a long time. The budget runs from the
+first attempt, not from the row's creation: an entry that sat unsent has not been retrying.
+
+Backoff is **full jitter** — a uniform draw from `[0, base · multiplier^(n-1)]`, capped. The
+parameters are `Settings` fields with bounds that reject anything that would stop it being a bounded
+exponential retry. §15 says these *"are configuration"* and names no values, so the defaults are
+**declared project decisions** and ADR-055 says so rather than implying a measurement.
+
+### `UNKNOWN` is not filtered out of the retry path; it is invisible to it
+
+The due-work predicate excludes an ambiguous last outcome **and** any operation carrying an
+unresolved `in_flight` attempt. The second is the crash-mid-send case, which records no outcome at
+all — so a predicate reading only `last_outcome` would see an untouched row and retry the one thing
+§13.5 forbids. Nothing else happens to such a row: no schedule, no state change, no recovery entry.
+Every transition out of it is 4.4's.
+
+### A rejection is settled *and* dead-lettered; exhaustion is dead-lettered instead
+
+A terminal 4xx goes straight to the queue with no attempt wasted first, and the outbox row stays
+`settled` because the ledger *answered*. An exhausted retry has no answer to record, so it becomes
+`DEAD_LETTERED` — the state the schema has been carrying since M1.2 with nothing to write it. Each
+state is used exactly once and no M4.2 behaviour changed.
+
+### Replay is an ordinary send with a human choosing the moment
+
+`python -m ledger_exception_control_plane.operations replay --id <uuid>` re-reads the persisted
+`adjustment`, so the identifier, amount, currency, account and period are the approved ones. The
+envelope deliberately carries **no amount**, so nothing can be re-priced from it. The dispatcher's
+gates apply unchanged — a replay is not a route around the ambiguity gate — and `ABANDONED` is never
+set, because deciding an entry will never be replayed is an operator verb this increment does not
+ship.
+
+### What this increment did not build
+
+No reconciliation, no posting-identity query workflow, no idempotency-window or inflight-window
+enforcement, no supersession interlock, no manual-recovery queue, no `PartiallyApplied` routing —
+all 4.4's, and `recovery_queue` stays empty through every branch. No `naive/`, no chaos suite, no
+fault-injection port: **the kill-test gate is at 4.5 and has not run**. No audit events (5.2). No
+worker process, no daemon and no sleep loop — the plan names none, and the runner does a bounded
+pass and returns.
+
+### The claim, unchanged in strength
+
+The five clauses stated at 4.2 hold exactly as written and M4.3 strengthens none of them. What it
+adds sits beneath clause 3: a **transport** failure that provably wrote no byte may now be retried,
+bounded twice over. **No unconditional "exactly once" claim exists anywhere.** See ADR-055.
+
+## M4.3 verification
+
+```
+retry policy suite:   48 passed, no database (tests/test_retry_policy.py)
+retry database suite: 37 passed against real PostgreSQL (tests/test_retry_postgres.py)
+replay CLI suite:     11 passed against real PostgreSQL (tests/test_replay_cli_postgres.py)
+mutation battery:     32/32 defects reintroduced and killed, then restored
+unit suite:           1382 passed, no database (whole default run)
+whole suite:          1678 passed with the integration marker, real PostgreSQL
+coverage:             97.66% (gate 90%, whole suite against the real database)
+schema:               one migration; upgrade and downgrade both exercised against a live database
+```
+
+The exit criterion was demonstrated rather than asserted: an operation fails to connect until its
+budget runs out, lands in the dead-letter queue, and is replayed — with the applied-count read off
+the simulated ledger, not out of our own tables, exactly as acceptance criterion 8 requires.
 
 ## What M4.2 delivered
 

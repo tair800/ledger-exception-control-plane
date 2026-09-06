@@ -4,7 +4,7 @@
         ps smoke build db-up test-db-init migrate migrate-down schema-verify fixtures \
         fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify \
         money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
-        operations-verify dispatch-verify ledger-verify
+        operations-verify dispatch-verify ledger-verify retry-verify
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -160,6 +160,15 @@ ledger-verify: ## Prove the adapter capability contract and the conformance gate
 
 dispatch-verify: test-db-init ## Prove the outbox and one dispatch end to end against real PostgreSQL
 	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_dispatch_postgres.py -m integration -p no:cacheprovider --no-cov
+
+# --- bounded retry, dead-letter queue and replay (M4.3) ---
+#
+# The classifier and the backoff bounds are pure functions and run in the default suite; only the
+# scheduling, dead-lettering and replay behaviour needs a server, because every property there is
+# about persisted state and transaction boundaries.
+
+retry-verify: test-db-init ## Prove bounded retry, the DLQ and replay against real PostgreSQL
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_retry_postgres.py tests/test_replay_cli_postgres.py -m integration -p no:cacheprovider --no-cov
 
 # --- recorded cassettes (M3.4) ---
 #

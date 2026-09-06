@@ -608,6 +608,15 @@ def _identity_tree() -> ast.Module:
 #: one, asserted separately below: it must never *derive* an identifier.
 DERIVATION_EXEMPT: Final = {
     "dispatcher.py": "sends a persisted identifier; contributes no component and needs a clock",
+    "retry.py": (
+        "schedules a re-send of a persisted identifier. 4.3's whole subject is attempts, backoff "
+        "and a wall-clock budget, so it needs every name and module this fence bans — and "
+        "contributes no component to the derivation, which is asserted separately below"
+    ),
+    "__main__.py": (
+        "the replay command line. Reads a dead letter, reads the persisted identifier and hands "
+        "both to the dispatcher; it stamps a replay with the current time and derives nothing"
+    ),
 }
 
 
@@ -616,11 +625,20 @@ def _operations_trees(root: pathlib.Path | None = None) -> dict[str, ast.Module]
 
     ``root`` is a parameter so the inversion can be *demonstrated* on a planted module rather than
     asserted about the real package — a fence whose scope nobody has attacked is a comment.
+
+    **``rglob``, not ``glob``, and that was a hole rather than a preference.** The first version
+    scanned the package root only, so a module inside a subpackage — ``operations/retry/policy.py``,
+    exactly the shape a later increment would reach for — was watched by nothing while the suite
+    stayed green. The fence was inverted at 4.2 precisely so a new module is in scope by default,
+    and a depth limit quietly undid that for any module willing to sit one directory down. Keys are
+    relative paths for the same reason: two files in different directories can share a name, and
+    excusing one by bare name would have excused both.
     """
+    base = root or OPERATIONS_ROOT
     return {
-        path.name: ast.parse(path.read_text(encoding="utf-8"))
-        for path in sorted((root or OPERATIONS_ROOT).glob("*.py"))
-        if path.name not in DERIVATION_EXEMPT
+        str(path.relative_to(base)).replace("\\", "/"): ast.parse(path.read_text(encoding="utf-8"))
+        for path in sorted(base.rglob("*.py"))
+        if str(path.relative_to(base)).replace("\\", "/") not in DERIVATION_EXEMPT
     }
 
 
@@ -681,6 +699,28 @@ def test_no_module_that_feeds_the_derivation_reads_a_variable_input() -> None:
             raise AssertionError(f"{name}: {exc}") from exc
 
     assert inspected > 800, "the package walk is not seeing the operations modules"
+
+
+def test_a_module_inside_a_subpackage_is_watched_too(tmp_path: pathlib.Path) -> None:
+    """**The hole the depth limit left, demonstrated on the shape most likely to fall through it.**
+
+    ``operations/retry/policy.py`` is exactly what a later increment reaches for when one module
+    grows into several, and under ``glob("*.py")`` it was invisible to this fence — the inversion
+    that was supposed to watch new modules by default watched only new *top-level* modules. A
+    reviewer would have had to notice the difference between ``glob`` and ``rglob`` to catch it.
+    """
+    nested = tmp_path / "retry"
+    nested.mkdir()
+    (nested / "policy.py").write_text(
+        "import random\n\n\ndef _component() -> float:\n    return random.random()\n",
+        encoding="utf-8",
+    )
+
+    trees = _operations_trees(tmp_path)
+    assert set(trees) == {"retry/policy.py"}, "a module one directory down escaped the fence"
+
+    with pytest.raises(AssertionError, match="imports random"):
+        assert_derivation_reads_no_variable_input(trees["retry/policy.py"], minimum=0)
 
 
 def test_a_new_operations_module_is_watched_without_anyone_adding_it_to_a_list(
@@ -916,7 +956,12 @@ def _package_source(name: str) -> str:
 
 
 def assert_the_dispatcher_derives_nothing(source: str) -> None:
-    """The dispatcher may read an identifier and may not compute one.
+    """An excused module may **read** an identifier and may never compute one.
+
+    This is the claim that replaces the clock ban for everything in :data:`DERIVATION_EXEMPT`. The
+    exemption exists because those modules legitimately need a clock, a counter and a random source;
+    it is not an exemption from the property that actually matters, and without a replacement claim
+    it would be a hole with a comment attached.
 
     Takes source text rather than reading the file itself, so a mutation can be put through the
     identical check. The first version inlined the walk into its test, which left its kill test with
@@ -950,6 +995,19 @@ def test_the_dispatcher_never_derives_an_identifier() -> None:
     whatever the configuration happened to be at that moment.
     """
     assert_the_dispatcher_derives_nothing((OPERATIONS_ROOT / "dispatcher.py").read_text("utf-8"))
+
+
+@pytest.mark.parametrize("excused", sorted(DERIVATION_EXEMPT))
+def test_no_excused_module_derives_an_identifier(excused: str) -> None:
+    """**The replacement claim, applied to every exemption rather than just the first one.**
+
+    Each module in :data:`DERIVATION_EXEMPT` is excused from the clock, counter and randomness ban
+    because its job requires them — 4.2's dispatcher stamps a send time, 4.3's retry module computes
+    a backoff, the replay command stamps a replay. None of them may compute an identifier, and this
+    is where that is checked. Parametrised over the dictionary itself, so an exemption added later
+    is covered the moment it is added rather than when somebody remembers to extend a list.
+    """
+    assert_the_dispatcher_derives_nothing((OPERATIONS_ROOT / excused).read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize(

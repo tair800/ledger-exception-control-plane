@@ -180,11 +180,29 @@ class DispatchState(enum.StrEnum):
 
 
 class PostingOutcome(enum.StrEnum):
-    """The adapter outcome vocabulary (§13.4). Never a boolean.
+    """The **persisted** outcome vocabulary (§13.4). Never a boolean.
 
     ``UNKNOWN`` is the reason this enum exists: a timeout after the request was sent is
     indistinguishable from a ledger that committed and lost the response, and coercing it to
     either is the defect the whole design exists to prevent.
+
+    **This vocabulary is one member wider than the adapter's**, and the difference is deliberate.
+    An adapter answers with one of five variants (`PROJECT_SPEC.md` §10.1, closed, and a contract
+    test holds it at five). ``NOT_SENT`` is not one of them because it is not an answer: it records
+    a transport failure that happened *instead of* an answer, classified by the enumerated
+    allowlist in :mod:`~ledger_exception_control_plane.ledger.transport`. §14 names it —
+    *"Classified `NOT_SENT`; nothing applied; bounded retry, then DLQ. Distinct from `Rejected`,
+    which means the ledger declined"* — and the dispatch diagram in the README carries it as its
+    own branch.
+
+    It had to become storable at 4.3. The write-ahead record is committed *before* the send, so a
+    connect failure leaves a row behind; leaving it ``in_flight`` would make it indistinguishable
+    from a crash mid-send and would trip the ambiguity gate that exists to stop exactly that being
+    retried, while recording ``rejected`` would assert the ledger declined something it never
+    received. Neither is true, so the vocabulary gained the value that is.
+
+    ``NOT_SENT`` can never appear on a *settled* outbox row: ``settled_requires_terminal_outcome``
+    admits only ``confirmed`` and ``rejected``, and that constraint is unchanged.
     """
 
     CONFIRMED = "confirmed"
@@ -192,6 +210,7 @@ class PostingOutcome(enum.StrEnum):
     THROTTLED = "throttled"
     UNKNOWN = "unknown"
     PARTIALLY_APPLIED = "partially_applied"
+    NOT_SENT = "not_sent"
 
 
 class AttemptState(enum.StrEnum):

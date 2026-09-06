@@ -4,7 +4,7 @@ PSP settlement files against the general ledger. Deterministic matching clears t
 proposes a treatment from a closed enum whose type has no numeric field. A chaos suite proves no
 double-post against a RED baseline that does.
 
-> ## Status: milestone M4.2 of 31
+> ## Status: milestone M4.3 of 31
 >
 > **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
 > liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
@@ -61,12 +61,27 @@ double-post against a RED baseline that does.
 > credited, and an unproven claim is read as `NONE`. The evidence is keyed on the implementation
 > class, so an adapter cannot inherit another's proven capabilities by adopting its name.
 >
-> **What does not exist: anything that decides or approves.** No approval is obtained by any workflow
-> — approvals are seeded directly in tests, and the gate that records one is M5.1. Inside the
-> reliability phase there is still no retry, no backoff, no DLQ or replay (M4.3); no `UNKNOWN`
-> reconciliation workflow, no idempotency-window enforcement, no supersession interlock and no
-> recovery queue (M4.4); **no naive baseline and no chaos suite — the kill-test gate is at 4.5 and
-> has not run**; and no audit emission, console, evaluation or deployment.
+> And as of M4.3 — **bounded retry, a dead-letter queue and a replay command**. A transport failure
+> is classified against an enumerated allowlist of four causes — DNS, TCP connect, TLS handshake,
+> connect-timeout before the first byte — and **everything else defaults to `UNKNOWN`**, including a
+> read timeout and a connection reset, which are the ones a conventional retry classifier gets
+> wrong. What is retryable is retried with full-jitter exponential backoff under two independent
+> bounds, an attempt ceiling and a wall-clock budget, and then dead-lettered with an envelope that
+> carries no monetary value at all. `python -m ledger_exception_control_plane.operations replay`
+> sends it again, re-reading the persisted adjustment rather than rebuilding one — and the test that
+> proves it applies exactly one posting reads the count off the simulated ledger rather than out of
+> our own records.
+>
+> **What does not exist: anything that decides, approves, or resolves an ambiguity.** No approval is
+> obtained by any workflow — approvals are seeded directly in tests, and the gate that records one is
+> M5.1. Inside the reliability phase there is still no `UNKNOWN` reconciliation workflow, no
+> idempotency-window enforcement, no supersession interlock and no recovery queue (M4.4); **no naive
+> baseline and no chaos suite — the kill-test gate is at 4.5 and has not run**; and no audit
+> emission, console, evaluation or deployment.
+>
+> **An `UNKNOWN` is still never retried.** The retry path cannot see one: an operation whose last
+> outcome is ambiguous, or which carries an unresolved in-flight attempt from a crash mid-send, is
+> excluded by the due-work query itself rather than filtered out after being chosen.
 >
 > **No unconditional duplicate-suppression claim is made.** Sending an operation identifier to a
 > ledger does not make anything idempotent — it is a *request* for idempotent treatment, honoured

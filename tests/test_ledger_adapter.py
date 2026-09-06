@@ -21,6 +21,7 @@ import dataclasses
 import datetime as dt
 import decimal
 import inspect
+import typing
 import uuid
 from typing import Final
 
@@ -115,7 +116,17 @@ def test_the_persisted_vocabulary_covers_every_outcome_variant() -> None:
     """A variant the database cannot store would be an outcome nobody could record.
 
     The two lists are maintained in different files for different reasons — one is the wire
-    contract, the other a column's check constraint — so nothing but this test keeps them equal.
+    contract, the other a column's check constraint — so nothing but this test relates them.
+
+    **The relation is containment, not equality, and it stopped being equality at 4.3.** The
+    persisted vocabulary gained ``not_sent``, which no adapter can return because it is not an
+    answer: it records an allowlisted transport failure that happened *instead of* one. Equality
+    would now force either a sixth adapter variant — breaking the closed five-valued union
+    acceptance criterion 8d rests on — or a transport failure with nowhere to be written down.
+
+    Containment in this direction is the property that matters. It fails if an adapter variant
+    becomes unstorable, which is the defect the test was written for, and the excess is named
+    explicitly below so it cannot grow silently.
     """
     from typing import get_args
 
@@ -130,7 +141,28 @@ def test_the_persisted_vocabulary_covers_every_outcome_variant() -> None:
         PartiallyApplied(applied_legs=1, posting_refs=("ref",)),
     ]
     assert len(samples) == len(get_args(PostingOutcome))
-    assert {outcome_code(sample) for sample in samples} == set(OutcomeCode)
+
+    storable = {outcome_code(sample) for sample in samples}
+    assert storable <= set(OutcomeCode), "an adapter variant the database cannot store"
+    assert set(OutcomeCode) - storable == {OutcomeCode.NOT_SENT}, (
+        "the persisted vocabulary has grown a value no adapter produces and nothing explains"
+    )
+
+
+def test_not_sent_is_recorded_by_us_and_never_returned_by_an_adapter() -> None:
+    """**The one asymmetry between the two vocabularies, stated so it cannot be widened quietly.**
+
+    §14 names the classification — *"Classified `NOT_SENT`; nothing applied; bounded retry, then
+    DLQ. Distinct from `Rejected`, which means the ledger declined"* — and the distinction is the
+    whole reason the retry path exists. It is written by the transport classifier when an adapter
+    *raises*, never by an adapter answering, so it must be absent from the union and present in the
+    column.
+    """
+    from ledger_exception_control_plane.db.control import PostingOutcome as OutcomeCode
+
+    assert OutcomeCode.NOT_SENT.value == "not_sent"
+    assert "NotSent" not in {arm.__name__ for arm in typing.get_args(PostingOutcome)}
+    assert len(typing.get_args(PostingOutcome)) == 5, "the adapter union is closed at five"
 
 
 def test_every_outcome_carries_the_payload_the_spec_gives_it() -> None:
@@ -1113,3 +1145,103 @@ def test_the_branch_reads_the_record_and_never_the_adapter() -> None:
     assert list(parameters) == ["capabilities"]
     annotation = parameters["capabilities"].annotation
     assert annotation in (LedgerAdapterCapabilities, "LedgerAdapterCapabilities")
+
+
+# ======================================================================================
+# The attribution proxy must be transparent to the conformance record — and only it
+# ======================================================================================
+
+
+def test_wrapping_an_adapter_for_attribution_preserves_its_proven_capabilities() -> None:
+    """**A regression for a defect the fix for another defect introduced.**
+
+    4.3 dispatches through :class:`AttributedAdapter`, whose only job is to label the exceptions the
+    adapter raises so a *database* failure cannot be mistaken for a *ledger* one. Because evidence
+    is keyed on the implementation class, the first version of that wrapper produced an
+    unrecognised class — so the reference ledger's proven ``ENFORCES_KEY`` and ``BY_OPERATION_ID``
+    were both downgraded to ``NONE``, and a re-send §13.5 explicitly permits was refused.
+
+    A silent withdrawal of the exact claim the conformance suite exists to establish, caught only
+    because one integration test asserted the *permitted* branch rather than the refusal.
+    """
+    from ledger_exception_control_plane.ledger.transport import AttributedAdapter
+
+    direct = capabilities_for(SimulatedLedger())
+    wrapped = capabilities_for(AttributedAdapter(SimulatedLedger()))
+
+    assert wrapped == direct
+    assert wrapped.permits_effectively_once_claim is True
+    assert wrapped.suppresses_duplicates is True
+
+
+def test_only_that_exact_wrapper_is_unwrapped_and_a_subclass_is_not() -> None:
+    """**The unwrapping is an exact type check, and this is why.**
+
+    ``isinstance`` would reopen the forgery the implementation keying closed: a subclass could
+    override ``post``, stop delegating to the adapter it holds, and still inherit that adapter's
+    conformance record. The exact check makes the delegation and the evidence inseparable — you
+    cannot have the second without the first.
+    """
+    from ledger_exception_control_plane.ledger.transport import AttributedAdapter
+
+    class _PretendsToDelegate(AttributedAdapter):
+        async def post(self, operation_id: str, instruction: PostingInstruction) -> PostingOutcome:
+            return Confirmed(posting_ref="never-went-anywhere")
+
+    forger = _PretendsToDelegate(SimulatedLedger())
+    effective = capabilities_for(forger)
+
+    assert effective.idempotency is IdempotencyMode.NONE
+    assert effective.posting_identity_query is PostingQueryMode.NONE
+    assert effective.permits_effectively_once_claim is False
+
+
+def test_an_unrelated_object_with_a_wrapped_attribute_inherits_nothing() -> None:
+    """A plain attribute named ``wrapped`` is not a claim on anything."""
+    from ledger_exception_control_plane.ledger.transport import AttributedAdapter
+
+    class _LooksLikeAWrapper:
+        name = "looks-like-a-wrapper"
+
+        def __init__(self) -> None:
+            self.wrapped = SimulatedLedger()
+
+        def capabilities(self) -> LedgerAdapterCapabilities:
+            return self.wrapped.capabilities()
+
+        async def post(self, operation_id: str, instruction: PostingInstruction) -> PostingOutcome:
+            return Confirmed(posting_ref="pretend")
+
+    assert capabilities_for(_LooksLikeAWrapper()).permits_effectively_once_claim is False
+    assert capabilities_for(AttributedAdapter(SimulatedLedger())).permits_effectively_once_claim
+
+
+@pytest.mark.asyncio
+async def test_the_proxy_labels_only_the_adapters_own_failure() -> None:
+    """It forwards a normal answer untouched and labels a raise. Nothing else changes."""
+    from ledger_exception_control_plane.ledger.transport import (
+        AdapterCallError,
+        AttributedAdapter,
+    )
+
+    ledger = SimulatedLedger()
+    proxy = AttributedAdapter(ledger)
+
+    outcome = await proxy.post(PROBE, INSTRUCTION)
+    assert isinstance(outcome, Confirmed)
+    assert ledger.applied_count(PROBE) == 1
+    assert proxy.name == ledger.name
+
+    class _Raises:
+        name = "raises"
+
+        def capabilities(self) -> LedgerAdapterCapabilities:
+            return LedgerAdapterCapabilities()
+
+        async def post(self, operation_id: str, instruction: PostingInstruction) -> PostingOutcome:
+            raise ConnectionRefusedError(111, "refused")
+
+    with pytest.raises(AdapterCallError) as raised:
+        await AttributedAdapter(_Raises()).post(PROBE, INSTRUCTION)
+
+    assert isinstance(raised.value.error, ConnectionRefusedError)

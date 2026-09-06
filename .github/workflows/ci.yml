@@ -169,6 +169,21 @@ jobs:
       - name: Verify the transactional outbox and dispatch against real PostgreSQL
         run: uv run pytest tests/test_dispatch_postgres.py -m integration --no-cov
 
+      # Bounded retry, the dead-letter queue and replay. The exit criterion here is a
+      # demonstration rather than an assertion about types: an operation fails to connect until its
+      # budget runs out, lands in the DLQ, and is replayed — with the applied-count read off the
+      # simulated ledger rather than out of our own tables, which is what acceptance criterion 8
+      # asks for. None of that is observable without a real server.
+      - name: Verify bounded retry, the DLQ and replay against real PostgreSQL
+        run: uv run pytest tests/test_retry_postgres.py -m integration --no-cov
+
+      # The replay command itself, driven through `main()` with an argument vector. Acceptance
+      # criterion 8 is phrased in terms of the CLI rather than the function it calls, and the
+      # difference is where an operator's mistake becomes a financial one: argument handling, the
+      # adapter registry, what a batch does after a bad entry, and what reaches the terminal.
+      - name: Verify the replay CLI against real PostgreSQL
+        run: uv run pytest tests/test_replay_cli_postgres.py -m integration --no-cov
+
       # The authoritative coverage gate, and the only place it can be honest.
       #
       # The unit job cannot see `matching.service` or `classification.service` — their entire

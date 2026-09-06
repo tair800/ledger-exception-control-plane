@@ -714,7 +714,45 @@ def test_posting_outcome_can_express_ambiguity() -> None:
     assert "unknown" in values, "an outcome vocabulary without UNKNOWN cannot be honest"
     assert "partially_applied" in values
     assert "throttled" in values, "throttling is not rejection and must not share its path"
-    assert values == {"confirmed", "rejected", "throttled", "unknown", "partially_applied"}
+    assert values == {
+        "confirmed",
+        "rejected",
+        "throttled",
+        "unknown",
+        "partially_applied",
+        # 4.3. The one value no adapter can return: it records an allowlisted transport failure
+        # that happened *instead of* an answer (§14, "Classified `NOT_SENT`"). Storable because the
+        # write-ahead record is committed before the send and therefore outlives a connect failure;
+        # kept distinct from `rejected` because the ledger never received the request, and from
+        # `unknown` because we know it did not.
+        "not_sent",
+    }
+
+
+def test_a_transport_failure_is_settleable_by_neither_route_a_rejection_takes() -> None:
+    """The three-way distinction the retry path depends on, asserted on **behaviour of the schema**.
+
+    The first version asserted that three enum members formed a set of size three, which is true of
+    any three distinct members of any enum — it could only have failed if two shared a value, which
+    the test above already rejects. A reviewer pointed out that it added a green check for a
+    property it did not test.
+
+    What actually distinguishes the three is what the database will let each of them be. A
+    ``rejected`` row may settle; ``not_sent`` and ``unknown`` may not, because neither is an answer
+    from the ledger. That is a real constraint with a real consequence — it is why an exhausted
+    retry dead-letters instead of settling — and it fails if anyone widens the settled set.
+    """
+    settled = next(
+        c
+        for c in _tables()["outbox"].constraints
+        if isinstance(c, CheckConstraint)
+        and str(c.name) == "ck_outbox_settled_requires_terminal_outcome"
+    )
+    text = str(settled.sqltext)
+
+    assert "'rejected'" in text, "a declination is a terminal answer and must be settleable"
+    assert "'not_sent'" not in text, "a request that never arrived is not a settled dispatch"
+    assert "'unknown'" not in text, "an ambiguous outcome is never filed as done"
 
 
 def test_an_unknown_outcome_cannot_be_filed_as_settled() -> None:
@@ -727,8 +765,11 @@ def test_an_unknown_outcome_cannot_be_filed_as_settled() -> None:
     )
     text = str(constraint.sqltext)
     assert "settled" in text
-    for ambiguous in ("unknown", "throttled", "partially_applied"):
-        assert ambiguous not in text, f"{ambiguous} must not be an acceptable settled outcome"
+    # ``not_sent`` joins the list at 4.3 for a different reason from the other three: it is not
+    # ambiguous at all, it is definitely-nothing-happened. A row carrying it is unfinished rather
+    # than done, so it dead-letters on exhaustion instead of settling.
+    for unsettleable in ("unknown", "throttled", "partially_applied", "not_sent"):
+        assert unsettleable not in text, f"{unsettleable} must not be an acceptable settled outcome"
 
 
 def test_attempt_state_distinguishes_in_flight_from_resolved() -> None:

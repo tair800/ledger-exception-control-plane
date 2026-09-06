@@ -153,7 +153,24 @@ def implementation_of(adapter: object) -> str:
     path and qualified name cannot be adopted without actually being that class.
 
     ``name`` survives for display and for the human-readable record; it decides nothing.
+
+    **One wrapper is unwrapped, on an exact type check.** 4.3 dispatches through
+    :class:`~.transport.AttributedAdapter`, whose only job is to label the exceptions the adapter
+    raises so a database failure cannot be mistaken for a ledger one. It forwards every call to the
+    adapter it holds, so the wrapped adapter's conformance record genuinely applies — and without
+    this, wrapping the reference ledger produced an unrecognised class, downgraded both proven
+    claims to ``NONE``, and refused a re-send §13.5 permits.
+
+    ``type(...) is`` rather than ``isinstance``, deliberately: a subclass could override ``post``
+    and stop delegating, which would be the forgery this function exists to prevent wearing a
+    different hat. Nothing else is unwrapped, and a plain attribute named ``wrapped`` on some other
+    object means nothing here.
     """
+    from ledger_exception_control_plane.ledger.transport import AttributedAdapter
+
+    if type(adapter) is AttributedAdapter:
+        adapter = adapter.wrapped
+
     cls = type(adapter)
     return f"{cls.__module__}.{cls.__qualname__}"
 

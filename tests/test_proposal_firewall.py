@@ -865,11 +865,21 @@ def test_kill_a_vacuous_later_milestone_scan_is_detected(tmp_path: pathlib.Path)
 #: The modules in ``operations/`` allowed to reach a database, mirroring the ``llm/`` fence.
 #:
 #: ``dispatcher.py`` joined at 4.2: it reads the dispatch intent, commits the write-ahead attempt
-#: record and records the outcome, all of which are database work by definition. The list is still
-#: the point — ``identity.py`` stays off it, which is what keeps the derivation testable and
-#: copyable with no database at all.
+#: record and records the outcome, all of which are database work by definition. ``retry.py`` and
+#: ``__main__.py`` joined at 4.3 for the same kind of reason — one selects due work and writes the
+#: schedule and the dead letter, the other is the operator command that reads the queue.
+#:
+#: The list is still the point — ``identity.py`` stays off it, which is what keeps the derivation
+#: testable and copyable with no database at all, and the floor below is re-checked every time the
+#: allowlist grows so that widening it cannot quietly empty the scan.
 OPERATIONS_MODULES_THAT_MAY_REACH_A_DATABASE: Final = frozenset(
-    {"operations/claim.py", "operations/service.py", "operations/dispatcher.py"}
+    {
+        "operations/claim.py",
+        "operations/service.py",
+        "operations/dispatcher.py",
+        "operations/retry.py",
+        "operations/__main__.py",
+    }
 )
 
 
@@ -902,7 +912,7 @@ def test_nothing_in_the_operations_package_can_open_a_socket() -> None:
     assert inspected >= 4, "the scan is not seeing the operations package"
 
 
-def test_only_the_two_named_operations_modules_reach_a_database() -> None:
+def test_only_the_named_operations_modules_reach_a_database() -> None:
     """The derivation stays pure, so it can be tested — and copied — with no database at all.
 
     ``identity.py`` is named in the plan as a reusable foundation three later repositories copy. A
@@ -920,8 +930,12 @@ def test_only_the_two_named_operations_modules_reach_a_database() -> None:
             assert module.split(".")[0] not in {"asyncpg", "alembic"}, f"{name} imports {module}"
         assert "AsyncSession" not in _code_identifiers(source), f"{name} reaches for a session"
 
-    # The floor is deliberately re-checked whenever the allowlist grows: widening it shrinks the
-    # pure half, and a scan with nothing left to inspect would pass for the worst possible reason.
+    # The floor is re-checked whenever the allowlist grows, because widening it shrinks the pure
+    # half and a scan with nothing left to inspect would pass for the worst possible reason. At 4.3
+    # the allowlist took two more modules and the pure half is now exactly at this floor — which is
+    # the point at which the next widening must either raise a justification or admit that the
+    # fence has stopped watching anything. A reviewer noticed the comment claimed a re-check the
+    # 4.3 diff had not actually performed; it has now been performed, and this is the number.
     assert inspected >= 2, "the scan is not seeing the pure half of the operations package"
     assert "operations/identity.py" not in OPERATIONS_MODULES_THAT_MAY_REACH_A_DATABASE, (
         "the derivation must stay pure; it is copied into three later repositories"

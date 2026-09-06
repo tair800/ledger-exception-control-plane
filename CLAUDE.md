@@ -26,10 +26,13 @@ and the proposal flow**, recording proposals with their model id, version and pr
 **3.4 delivered the cassette record/replay harness** — the whole corpus replays offline through
 both adapters, from a committed file, with no credential (ADR-051); **4.1 delivered claim
 locking and the retry-independent operation identifier**, the first increment of the reliability
-phase (ADR-052); and **4.2 has delivered the transactional outbox and the capability-declaring
+phase (ADR-052); **4.2 delivered the transactional outbox and the capability-declaring
 ledger adapter** — the intent written in the state change's own transaction, a write-ahead attempt
 record before every send, and a port whose guarantees are declared as data, proven by a conformance
-run and branched on rather than assumed (ADR-054). **M4.3 is next.**
+run and branched on rather than assumed (ADR-054); and **4.3 has delivered bounded retry, the
+dead-letter queue and the replay CLI** — an enumerated transport classifier whose default is
+`UNKNOWN`, two independent bounds on every retry, and a replay that re-reads the persisted
+instruction rather than rebuilding one (ADR-055). **M4.4 is next.**
 
 The model layer still makes **no live call**: no provider SDK is a dependency, nothing under `llm/`
 imports an HTTP client, and no transport that speaks HTTP exists — the flow is exercised entirely
@@ -40,8 +43,9 @@ measurements produced from cassettes and the difference must never be lost.
 **Nor does the ledger side open a socket.** The reference adapter is an in-process simulated ledger,
 which is what lets the whole reliability layer be proven offline and in CI; a real adapter would
 need its capability profile established from a vendor's documentation rather than assumed, which is
-OPEN-11. Still not implemented: no evaluation, no scorer, no approval workflow, no retry or DLQ, no
-`UNKNOWN` recovery workflow, no chaos suite and no console.
+OPEN-11. The transport classifier added at 4.3 is exercised by handing it exceptions directly, for
+the same reason. Still not implemented: no evaluation, no scorer, no approval workflow, no `UNKNOWN`
+recovery workflow, no chaos suite and no console.
 
 **An `adjustment` row is now written and can now be dispatched**, and both sentences used to say
 the opposite. 4.1 derives a retry-independent `operation_id`, binds it to the whole posting
@@ -51,10 +55,17 @@ adapter port. Exactly one module may create each guarded row and exactly one may
 place; guard tests enforce both, separately, because creating a row and mutating one are different
 claims.
 
-What still does not exist is anything that sends *again*: no retry, no backoff, no DLQ, no replay,
-no reconciliation and no recovery queue. A second send after an ambiguous outcome is **refused**
-unless the adapter's verified capability permits it. `PROJECT_STATUS.md` is the authority on exactly
-what exists.
+4.3 added the way back: an allowlisted transport failure — DNS, TCP connect, TLS handshake,
+connect-timeout before first byte — is retried with exponential backoff and jitter, bounded by both
+an attempt ceiling and a wall-clock budget, and then dead-lettered with its envelope for the replay
+command. **Everything else defaults to `UNKNOWN` and is never retried**; an operation whose last
+outcome is ambiguous, or which has an unresolved in-flight attempt, is not merely skipped by the
+retry path but invisible to it.
+
+What still does not exist is anything that *resolves* an ambiguity: no reconciliation, no
+posting-identity query workflow, no idempotency-window enforcement, no supersession interlock and no
+recovery queue. A second send after an ambiguous outcome is **refused** unless the adapter's verified
+capability permits it. `PROJECT_STATUS.md` is the authority on exactly what exists.
 
 ---
 
@@ -272,6 +283,15 @@ make ledger-verify     # the port, the capability matrix and the conformance gat
 make dispatch-verify   # the outbox and one dispatch, end to end
 ```
 
+Bounded retry, the DLQ and replay (M4.3). The classifier and the backoff bounds are pure functions
+and run in the default suite; the scheduling, dead-lettering and replay behaviour needs a server:
+
+```bash
+make retry-verify      # bounded retry, the dead-letter queue and replay, end to end
+uv run python -m ledger_exception_control_plane.operations list
+uv run python -m ledger_exception_control_plane.operations replay --id <uuid>
+```
+
 Adding a dependency: `uv add <pkg>` for runtime, `uv add --dev <pkg>` for tooling. Both update
 `uv.lock`, which is committed. CI runs `--frozen`, so a dependency change that skipped the lockfile
 cannot reach `main`.
@@ -283,10 +303,12 @@ cannot reach `main`.
 - Python 3.12, typed throughout, Pydantic v2 for all boundary schemas.
 - `src/` layout: `db`, `fixtures`, `ingest`, `matching`, `classification`, `money`, `llm`,
   `operations`, `ledger`, `demo`. `ledger/` arrived at 4.2 and holds the adapter port, the
-  conformance suite and the reference simulated ledger. A module or package named `outbox`,
-  `approval` or `workers` remains forbidden by a guard test at any depth: the outbox row is written
-  by the module that already owns adjustment writes, so a file under that name would mean a second
-  dispatch path had appeared without review, and `workers` and `approval` belong to 4.3 and 5.1.
+  conformance suite, the reference simulated ledger and the transport classifier. A module or
+  package named `outbox`, `approval` or `workers` remains forbidden by a guard test at any depth:
+  the outbox row is written by the module that already owns adjustment writes, so a file under that
+  name would mean a second dispatch path had appeared without review; `approval` belongs to 5.1;
+  and **`workers` stayed forbidden through 4.3**, which needed no background process — the retry
+  runner does a bounded pass and returns, and what drives it is not this increment's decision.
 - `naive/` holds the RED baseline and is never imported by `src/`.
 - Migrations via Alembic; every migration applies and rolls back cleanly.
 - Conventional commit messages: `feat:`, `fix:`, `test:`, `chore:`, `docs:`, `refactor:`.

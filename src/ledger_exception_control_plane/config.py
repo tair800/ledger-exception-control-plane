@@ -63,6 +63,39 @@ class Settings(BaseSettings):
     #: Header carrying an inbound correlation id. Documented in the README.
     correlation_id_header: str = "X-Request-ID"
 
+    # -- Bounded retry (M4.3, §15) ------------------------------------------------------
+    #
+    # `PROJECT_SPEC.md` §15 says "base delay, multiplier and cap are configuration" and gives no
+    # values, and no ADR, migration or .env file in this repository names one either. **These
+    # defaults are therefore declared project decisions, not empirical findings** (ADR-055), chosen
+    # to be conservative for a financial counterparty rather than tuned against a measurement that
+    # does not exist. Every one is overridable, and the bounds below reject the values that would
+    # turn the policy into something other than a bounded retry.
+
+    #: First delay before a re-send, in seconds. One second: long enough that a counterparty
+    #: restarting is not hit immediately, short enough that a transient blip clears within a pass.
+    retry_base_delay_seconds: float = Field(default=1.0, gt=0.0, le=3600.0)
+
+    #: Growth factor per attempt. Two is the conventional doubling; below 1.0 the curve would
+    #: shrink, which the field bound rejects rather than leaving to a runtime surprise.
+    retry_multiplier: float = Field(default=2.0, ge=1.0, le=10.0)
+
+    #: Ceiling on the computed delay, in seconds. Sixty seconds keeps the longest gap inside a
+    #: normal operational attention span; an unbounded curve would put later attempts hours apart
+    #: while still counting as "retrying".
+    retry_cap_seconds: float = Field(default=60.0, gt=0.0, le=86400.0)
+
+    #: Maximum sends per operation, the first included. Five is small on purpose: this bound exists
+    #: so a failing dispatch reaches a human, and a large ceiling defers that without improving the
+    #: odds — an endpoint that refused five connections over the backoff curve is down, not busy.
+    retry_max_attempts: int = Field(default=5, ge=1, le=100)
+
+    #: Wall-clock budget for the whole operation, in seconds, measured from the first send. §15
+    #: requires this second, independent bound "so an entry cannot retry indefinitely". One hour:
+    #: past that, a settlement adjustment waiting on a dead endpoint is an operational problem, not
+    #: a transient one.
+    retry_time_budget_seconds: float = Field(default=3600.0, gt=0.0, le=604800.0)
+
     @field_validator("postgres_dsn", "redis_dsn")
     @classmethod
     def _reject_empty_dsn(cls, value: SecretStr) -> SecretStr:

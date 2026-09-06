@@ -2744,6 +2744,206 @@ queue (4.4). No naive baseline and no chaos suite — **the kill-test gate is at
 
 **No unconditional "exactly once" claim is made anywhere**, and none may be added.
 
+## ADR-055 — What may be retried, for how long, and what a replay is allowed to do (M4.3)
+
+**Status:** Accepted. Records the decisions taken while building bounded retry, the dead-letter queue
+and the replay CLI. Several were forced by the specification delegating a value rather than giving
+one; those are marked **declared**, in the sense ADR-042 established — a project decision, not an
+empirical finding.
+
+### 1. `NOT_SENT` became a storable outcome, and the vocabulary is now wider than the adapter's
+
+`PROJECT_SPEC.md` §14 names the classification — *"Classified `NOT_SENT`; nothing applied; bounded
+retry, then DLQ. Distinct from `Rejected`, which means the ledger declined"* — and the README's
+dispatch diagram has carried it as its own branch since M0. Nothing could store it: the persisted
+enum held five values, all of them things an adapter *says*.
+
+It had to become storable because of an ordering this project chose deliberately. §12.1.1 commits the
+write-ahead attempt record **before** the socket write, so a connect failure leaves a row behind for a
+request that never left the client, and that row has to say what happened. Every existing value says
+something false:
+
+| Value | What it would assert | Why it is wrong here |
+|---|---|---|
+| `in_flight` (unresolved) | a send is outstanding | this is what a crash *mid-send* leaves — the one state §13.5 forbids retrying, so the ambiguity gate would refuse the retry §15 explicitly permits |
+| `rejected` | the ledger declined | it never received the request |
+| `unknown` | we do not know | we do know: the classifier enumerated it |
+
+So the **persisted** vocabulary gained a sixth value and the **adapter's** union stayed at five.
+`not_sent` is not an answer, it is the absence of one, and acceptance criterion 8d — which rejects
+any adapter whose posting type cannot express `Unknown` — is untouched. The guard that asserted the
+two vocabularies were *equal* now asserts containment plus exactly one named exception, so the gap
+cannot widen quietly.
+
+### 2. The classifier lives in `ledger/`, and only two exception types are believed without a declaration
+
+Three of the four allowlisted causes are named by exception types from `socket` and `ssl`, and a
+guard forbids the whole `operations` package from importing either. Classification of a *ledger
+transport* failure belongs at the ledger boundary, so it went there — a narrowing. Putting it in
+`operations` would have meant widening the socket ban, which is a relaxation.
+
+Only `socket.gaierror` and `ConnectionRefusedError` are recognised from the type alone, because only
+they are unambiguous: resolution precedes connect, and a refusal *is* connect. `TimeoutError` and
+`ssl.SSLError` are deliberately **not** mapped — each covers a pre-first-byte case and a post-send
+case with the identical type, and a type that covers both proves neither. An adapter that knows which
+it had raises `LedgerTransportError` with an explicit cause; one that does not stays silent and gets
+`UNKNOWN`.
+
+That asymmetry is the design: **the burden of proof is on the claim that nothing was sent.**
+
+### 3. Both bounds, and the clock starts at the first send
+
+§15 requires *"Bounded maximum attempts"* and, separately, *"Total attempt budget … bounded in time
+as well as count."* Either alone is unbounded in the other dimension. Both are checked before every
+schedule, and they produce **different dead-letter reasons**, because the operator response differs:
+a count exhaustion usually means the endpoint is wrong, a budget exhaustion that it was down a long
+time.
+
+The budget runs from the **first attempt**, not from the outbox row's creation. The budget bounds
+*retrying*; an entry that sat unsent because no runner ran has not been retrying, and anchoring at
+creation would dead-letter an operation on its first attempt for a delay nothing observed.
+
+### 4. The numbers are declared, not discovered
+
+§15 says *"base delay, multiplier and cap are configuration"* and gives no value; no ADR, migration
+or `.env` in this repository names one. **Declared**: base 1 s, multiplier 2.0, cap 60 s, 5 attempts,
+1 hour. Every one is a bounded `Settings` field, and the bounds reject the values that would stop it
+being a bounded exponential retry. The reasoning is on each field rather than in a commit message.
+
+**Full jitter**, also declared — §15 says only *"with jitter"*. Equal jitter keeps half of each delay
+fixed, so a fleet that failed together retries in a tight band around the same instant, which is the
+failure mode jitter exists to prevent. The cost is that a delay may be very short; the ceiling still
+grows exponentially.
+
+### 5. `retry_after` is a floor, and is not capped
+
+§15 calls a 429 *"a scheduling signal, not a declination"*. A signal overruled by a shorter computed
+delay is not a signal, so the provider's delay is honoured in full — the cap exists to stop *our*
+curve running away, not to overrule a counterparty saying when it will be ready. The jittered backoff
+is still computed and the larger wins, so a token `retry_after` of zero still gets exponential
+spacing rather than an immediate re-send.
+
+Throttled attempts **count against both bounds**. "Retried on its own path" must not mean "retried
+without limit", which is the indefinite retry §15's second bound exists to forbid.
+
+### 6. A rejection is settled *and* dead-lettered; exhaustion is dead-lettered *instead*
+
+The plan says a terminal 4xx *"goes straight to DLQ"*; `dispatch_once` already settles a rejection.
+Both are true and they are not in conflict:
+
+- **Rejection** — the row stays `settled`, because the ledger *answered*, and overwriting that marker
+  would erase the fact that a terminal response was received. A dead letter is written alongside so
+  an operator sees it. No attempt is wasted first.
+- **Exhaustion** — `last_outcome` is `not_sent` or `throttled`, which
+  `settled_requires_terminal_outcome` forbids on a settled row. The row is unfinished, so it becomes
+  `DEAD_LETTERED` — the state the schema has carried since M1.2 with nothing to write it.
+
+Each state is used exactly once, and no M4.2 behaviour changed.
+
+### 7. `UNKNOWN` is not filtered out of the retry path; it is invisible to it
+
+The due-work predicate excludes an ambiguous last outcome **and** any operation with an unresolved
+`in_flight` attempt. The second is the crash-mid-send case, which records no outcome at all — so a
+predicate reading only `last_outcome` would see an untouched row and retry the one thing §13.5
+forbids retrying.
+
+Excluding at selection rather than after it is deliberate: a filter applied to a chosen row is one
+`if` away from being wrong, and this is the `if` that would double-post. Nothing else happens to such
+a row — no schedule, no state change, no recovery entry. Every transition out of it is 4.4's.
+
+### 8. A replay is an ordinary send with a human choosing the moment
+
+It re-reads the persisted `adjustment`, so the identifier, the amount, the currency, the account and
+the period are the approved ones; the envelope deliberately carries **no amount**, so nothing can be
+re-priced from it. It gets the dispatcher's gates unchanged — a replay is not a route around the
+ambiguity gate. Where capability *does* permit a re-send after ambiguity, it proceeds and the
+ledger's own suppression is what keeps the applied-count at one; that is §13.5's branch, and its
+*bounds* remain 4.4's.
+
+`ABANDONED` is never set. That state belongs to an operator deciding an entry will never be replayed,
+and this increment ships no verb for that decision. A failed replay leaves the entry **pending** and
+its attempt on the record, because an entry marked replayed that was not is a queue that lies.
+
+### 9. Two defects this increment shipped and fixed, kept because both are instructive
+
+**The `StrEnum` identity trap, again.** `replay_state` is a `String(16)` column with an enum
+annotation, so SQLAlchemy returns a plain `str`; `"pending" is not ReplayState.PENDING` is True, and
+every replay was refused with the message *"dead letter … is pending; only a pending entry may be
+replayed"* — a sentence that states its own contradiction. Fixed by coercion, and now guarded by an
+AST test over the whole package, because a check that never matches is one refactor from a check that
+always does.
+
+**A downgrade that could not run.** The first version narrowed the constraint and let PostgreSQL
+refuse rows carrying the new value. That read as protective and was not: `alembic downgrade base`
+died half-applied and no integration module could reset its database. It was also the wrong
+principle — the older schema had an honest representation for the same event, `in_flight` with no
+outcome, and the downgrade now restores exactly that. Nothing is deleted; what is lost is the
+distinction this migration introduced, which is what a downgrade of it should cost.
+
+### 10. Four defects the adversarial review found, and what each changed
+
+Six independent reviewers read the increment. Three found the same critical defect, and it
+reproduces in three lines against this repository's own dependencies.
+
+**The classifier was being shown the wrong exceptions.** `attempt_one` wrapped the whole
+`dispatch_once` call in `except Exception` and handed anything it caught to the ledger transport
+classifier — but that call is three *database* transactions with the socket write in the middle, and
+SQLAlchemy with asyncpg surfaces a connect failure as a bare `ConnectionRefusedError` or
+`socket.gaierror`. Both are on the retryable allowlist, correctly, *for the ledger*. So a PostgreSQL
+blip in the window §12.1.1 deliberately opens — after the posting was applied, before the outcome was
+recorded — was written down as `not_sent`: a positive assertion that the ledger had never been
+contacted, over the top of the evidence, followed by a reschedule. Both gates that stop a second send
+read exactly the two facts that write falsified. The classifier was never wrong; the call site asked
+it about an exception it was never scoped to judge. A proxy at the adapter boundary now makes "the
+adapter raised this" a fact rather than an assumption, and anything else propagates untouched.
+
+That fix needed a second correction of its own, and it is worth recording because the failure mode
+was invisible in the safe direction. Evidence is keyed on the implementation class, so wrapping the
+reference ledger produced an unrecognised class: both proven capabilities were downgraded to `NONE`
+and a re-send §13.5 permits was refused. Nothing looked broken — a refusal is the *safe* answer —
+and only an integration test asserting the **permitted** branch caught it. `implementation_of` now
+unwraps that one proxy on an **exact type check**, so the delegation and the evidence are
+inseparable: a subclass overriding `post` inherits nothing.
+
+**The attempt number was guessed before the send.** It was read as `max(attempt_no) + 1` before
+dispatch and used to resolve a row afterwards, while `dispatch_once` computed its own inside its own
+transaction — and nothing holds a lock between them, by design. A second runner landing an attempt in
+the gap made the two disagree, and the failing send then rewrote *another attempt's* record. The row
+is now found by being in flight; where two are outstanding, neither is touched and the operation is
+left in the state §12.1.1 calls `UNKNOWN` for 4.4 to resolve. Stuck and safe beats wrong.
+
+**A rejection's dead letter could never leave the queue.** Replay called the dispatcher, got the
+terminal-state refusal, reported `REFUSED` — and `REFUSED` does not resolve an entry, so one declined
+posting starved `replay --all` permanently. A rejection is *finished*, not *blocked*, and is now
+detected before any send and closed.
+
+**A schedule could be written past the budget.** The wall-clock bound was checked on elapsed time
+only, so a 429 asking for an hour against a ten-minute budget parked the row for that hour before
+anyone noticed. The delay is now part of the check.
+
+Two more were about the tests rather than the code, and both mattered: every "exactly one
+application" assertion was guaranteed by the reference ledger's own suppression rather than by us —
+`posts_received` now counts what actually left the client — and the replay CLI that acceptance
+criterion 8 names by name had no test at all.
+
+### What is deliberately absent
+
+No reconciliation, no posting-identity query workflow, no idempotency-window or inflight-window
+enforcement, no supersession interlock, no manual-recovery queue — all 4.4's, and `recovery_queue`
+stays empty through every branch of this increment. No `naive/`, no chaos suite, no fault-injection
+port: **the kill-test gate is at 4.5 and has not run** (ADR-053). No audit events — `AuditTool`
+already reserves `retry`, `dlq` and `replay`, but the contract itself is 5.2's and both prior
+increments deferred it on the same reasoning; emitting "under contract v1" before the contract exists
+would be inventing it. No worker process, no daemon and no sleep loop: the plan names none, and
+`run_due_once` does a finite amount of work and returns.
+
+### The reliability claim, unchanged in strength
+
+The five clauses stated at 4.2 still hold exactly as written, and M4.3 strengthens none of them. What
+it adds is beneath clause 3: a **transport** failure that provably wrote no byte may now be retried,
+bounded twice over, and everything else still defaults to `UNKNOWN`. **No unconditional "exactly
+once" claim exists anywhere, and none may be added.**
+
 ---
 
 # Open decisions

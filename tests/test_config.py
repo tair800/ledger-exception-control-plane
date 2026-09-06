@@ -76,3 +76,40 @@ def test_correlation_id_policy_accepts_safe_values(candidate: str) -> None:
 def test_correlation_id_policy_rejects_unsafe_values(candidate: str) -> None:
     """Every rejected shape is a way a header could corrupt a log stream."""
     assert is_valid_correlation_id(candidate) is False
+
+
+def test_every_setting_is_documented_in_the_env_example() -> None:
+    """**The file a deployment copies must list every knob the application reads.**
+
+    Nothing enforced this before M4.3, and M4.3 immediately demonstrated why: five new
+    ``LECP_RETRY_*`` settings shipped with the application reading them and ``.env.example``
+    silently not mentioning them, so a deployment copying the example got the declared defaults
+    with no visible control over the two bounds that decide how many times an irreversible
+    financial write is offered to a ledger. A reviewer found it; this is what would have.
+
+    The check runs the other way too. A variable documented here that ``Settings`` does not accept
+    is worse than an undocumented one, because ``extra="forbid"`` makes it fail at startup — the
+    example would be handing out a file that cannot be used.
+    """
+    import pathlib
+
+    from ledger_exception_control_plane.config import Settings
+
+    example = (pathlib.Path(__file__).resolve().parents[1] / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    documented = {
+        line.split("=", 1)[0].strip()
+        for line in example.splitlines()
+        if line.strip().startswith("LECP_") and "=" in line
+    }
+    expected = {f"LECP_{name.upper()}" for name in Settings.model_fields}
+
+    assert expected - documented == set(), (
+        f"settings the application reads but .env.example never mentions: "
+        f"{sorted(expected - documented)}"
+    )
+    assert documented - expected == set(), (
+        f".env.example documents variables Settings would reject at startup: "
+        f"{sorted(documented - expected)}"
+    )
