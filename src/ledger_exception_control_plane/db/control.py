@@ -506,6 +506,22 @@ class Approval(Base):
     approved_treatment: Mapped[TreatmentCode | None] = mapped_column(String(16), nullable=True)
 
     principal: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    #: The principal who *asked* for a different treatment, on an edited decision only (M5.1).
+    #:
+    #: §16: *"The approver cannot be the same principal as the requester where an edit changed the
+    #: treatment."* Recording both halves on the row is what turns that sentence into a constraint —
+    #: see ``approver_is_not_the_requester`` below. NULL on approve and reject, where there is no
+    #: requester distinct from the decider.
+    requested_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    #: Single-use authorisation token for this decision (M5.1).
+    #:
+    #: §14 lists *"Replay of a consumed approval token"* as a named failure whose expected behaviour
+    #: is *"Rejected; audit event recorded"*. Unique, so a replay loses to the database rather than
+    #: to an application check that a later refactor could skip.
+    approval_token: Mapped[str] = mapped_column(String(64), nullable=False)
+
     decided_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[dt.datetime] = created_at_column()
 
@@ -524,8 +540,23 @@ class Approval(Base):
         UniqueConstraint(
             "id", "approved_treatment", "principal", name="uq_approval_id_treatment_principal"
         ),
+        UniqueConstraint("approval_token", name="uq_approval_token"),
         CheckConstraint("resolution_version >= 1", name="resolution_version_positive"),
         CheckConstraint(_closed("decision", ApprovalDecision), name="decision_valid"),
+        # §16's countersignature rule, as a constraint rather than as a policy sentence. The same
+        # shape the recovery queue already uses for its segregation-of-duties rule: a CHECK cannot
+        # reach another table, so both principals are carried on the row and compared here.
+        CheckConstraint(
+            "requested_by IS NULL OR requested_by <> principal",
+            name="approver_is_not_the_requester",
+        ),
+        # An edit is the only decision with a requester, and it must have one. Without both halves
+        # the constraint above is vacuous: a NULL requester satisfies it trivially, so an edit that
+        # forgot to record who asked would pass the very check written to catch it.
+        CheckConstraint(
+            "(decision = 'edited') = (requested_by IS NOT NULL)",
+            name="requested_by_iff_edited",
+        ),
         CheckConstraint(
             "approved_treatment IS NULL OR " + _closed("approved_treatment", TreatmentCode),
             name="approved_treatment_valid",

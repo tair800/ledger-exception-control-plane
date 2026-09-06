@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ledger_exception_control_plane import __version__
 from ledger_exception_control_plane.config import Settings, is_valid_correlation_id
+from ledger_exception_control_plane.db.engine import create_engine
 from ledger_exception_control_plane.health import (
     DependencyHealth,
     check_postgres,
@@ -36,6 +37,8 @@ from ledger_exception_control_plane.log import (
     new_correlation_id,
     set_correlation_id,
 )
+from ledger_exception_control_plane.routes import router
+from ledger_exception_control_plane.security import PrincipalRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +109,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
     )
     app.state.settings = resolved
+    # Parsed once at construction so a malformed registry fails at startup rather than at the first
+    # approval — an authentication table that silently parses to empty is an outage that presents as
+    # a permissions problem. Empty is legal and means "no principal can authenticate": fail closed.
+    app.state.principals = PrincipalRegistry.from_json(resolved.principals)
+    app.state.engine = create_engine(resolved)
+    app.include_router(router)
 
     @app.middleware("http")
     async def correlation_id_middleware(

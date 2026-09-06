@@ -3,8 +3,9 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M4.3 complete — bounded retry, the dead-letter queue and the replay CLI.
-**Next:** M4.4 (`UNKNOWN` reconciliation, window enforcement and manual recovery).
+**Current milestone:** M5.1 complete — the human approval gate with role separation.
+**Next:** M4.4 (`UNKNOWN` reconciliation, window enforcement and manual recovery), which needs
+5.1's authenticated principals for its `/recovery` endpoints. See ADR-056 for the build order.
 **The whole deterministic core exists.** A settlement file is ingested, normalised and either
 accepted or quarantined; its lines are matched deterministically against ledger entries with
 tolerance; every line that fails to match becomes exactly one classified exception; and an approved
@@ -43,7 +44,8 @@ no chaos suite.
 | **4.1 Claim locking and operation identifier** | **DONE** | `SKIP LOCKED` claim proven under forced concurrency; identifier retry-independent, instruction-bound, approver-independent, and persisted before dispatch |
 | **4.2 Transactional outbox and ledger adapter** | **DONE** | Outbox written in the state change's transaction; write-ahead attempt record before every send; three-valued `PostingOutcome` and `QueryOutcome`; capability declared, proven by a conformance run, and branched on |
 | **4.3 Bounded retry, DLQ and replay CLI** | **DONE** | Enumerated transport classifier defaulting to `UNKNOWN`; full-jitter backoff under an attempt ceiling *and* a wall-clock budget; dead-letter queue with a money-free envelope; replay proven to apply exactly one posting, measured at the ledger |
-| 4.4 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **5.1 Approval gate with role separation** | **DONE** | OPEN-8 resolved; hashed bearer tokens, three roles, countersignature and single use enforced by database constraints; the gate proven to block the write |
+| 4.4, 4.5, 5.2 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 

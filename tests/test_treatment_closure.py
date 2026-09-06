@@ -1017,6 +1017,11 @@ def _package_sources() -> dict[str, str]:
 #: ``Approval`` is not here and must not be: FR-7 requires an explicit human decision before any
 #: ledger write, the gate that records one is 5.1, and nothing may manufacture its own authority.
 ENTITY_WRITERS: Final = {
+    #: 5.1. The human gate, and the increment this fence was explicitly reserved for: until now
+    #: ``Approval`` was forbidden outright, everywhere, because nothing was entitled to record a
+    #: decision. Exactly one module is now, and the claim is the same shape as the others — a second
+    #: writer fails as loudly as the first disappearing.
+    "Approval": "operations/approval.py",
     "Adjustment": "operations/service.py",
     "Outbox": "operations/service.py",
     "PostingAttempt": "operations/dispatcher.py",
@@ -1177,7 +1182,13 @@ def _mutated_columns(source: str) -> set[str]:
             mutated.update(
                 element.attr
                 for element in candidates
-                if isinstance(element, ast.Attribute) and element.attr in GUARDED_COLUMNS
+                if isinstance(element, ast.Attribute)
+                and element.attr in GUARDED_COLUMNS
+                # `self.x` is the module's own object, not a row it loaded. `reason` is a
+                # column of `dlq` *and* an ordinary attribute name on an exception class, and
+                # flagging the latter made an exception's constructor look like a financial
+                # write. Same false-positive shape a reviewer caught on the stored-enum guard.
+                and not (isinstance(element.value, ast.Name) and element.value.id == "self")
             )
 
     return mutated
@@ -1305,13 +1316,15 @@ def assert_only_one_module_writes_an_adjustment(sources: Mapping[str, str]) -> N
     :func:`assert_only_one_module_mutates_a_guarded_row`. This docstring used to say "writes",
     which reads as covering both and did not.
 
-    ``Approval`` is still forbidden outright, everywhere, and 5.1 is the increment entitled to
-    change that.
+    ``Approval`` joined the map at 5.1 rather than staying forbidden. It was forbidden outright for
+    four increments because nothing was entitled to record a human decision; 5.1 is the increment
+    whose whole subject is that decision, and the fence now says which single module may take it
+    instead of saying that nobody may. That is the same narrowing every other entity here has been
+    through, and it fails in both directions for the same reasons.
     """
     writers: dict[str, set[str]] = {entity: set() for entity in ENTITY_WRITERS}
     for name, source in sources.items():
         written = _written_entities(source)
-        assert "Approval" not in written, f"{name} writes Approval"
         for entity in ENTITY_WRITERS:
             if entity in written:
                 writers[entity].add(name)
@@ -1347,14 +1360,21 @@ def test_kill_an_aliased_adjustment_writer_is_detected() -> None:
         assert_only_one_module_writes_an_adjustment(sources)
 
 
-def test_kill_an_approval_written_anywhere_is_detected() -> None:
-    """5.1's deliverable must not appear early, under any module."""
+def test_kill_a_second_approval_writer_is_detected() -> None:
+    """**The narrowing 5.1 made, attacked from the direction that matters now.**
+
+    Until 5.1 this asserted that *nothing anywhere* wrote an ``Approval`` — the right claim
+    while no increment was entitled to record a human decision. One module is entitled now, so
+    the claim became "exactly that module", and the thing worth proving is that a *second*
+    writer still fails. A decision recorded by two code paths is two places that could disagree
+    about who authorised what.
+    """
     sources = dict(_package_sources())
     sources["operations/service.py"] = (
         sources["operations/service.py"] + "\n_rogue = Approval(principal='me')\n"
     )
 
-    with pytest.raises(AssertionError, match="writes Approval"):
+    with pytest.raises(AssertionError, match="may write Approval"):
         assert_only_one_module_writes_an_adjustment(sources)
 
 
@@ -1433,7 +1453,7 @@ def test_kill_a_second_adjustment_writer_by_any_route_is_detected(
         (
             "a raw approval write",
             '_rogue = text("INSERT INTO approval (id) VALUES (1)")',
-            "writes Approval",
+            "may write Approval",
         ),
         ("a raw outbox update", '_rogue = text("UPDATE outbox SET state = 1")', "may write Outbox"),
     ],

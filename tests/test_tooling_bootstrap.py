@@ -44,6 +44,7 @@ NEEDS_THE_DATABASE: Final = (
     "operations-verify",
     "dispatch-verify",
     "retry-verify",
+    "approval-verify",
 )
 
 

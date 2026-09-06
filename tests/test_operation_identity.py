@@ -607,6 +607,10 @@ def _identity_tree() -> ast.Module:
 #: every module or refusing 4.2 its deliverable. The property that matters for it is a different
 #: one, asserted separately below: it must never *derive* an identifier.
 DERIVATION_EXEMPT: Final = {
+    "approval.py": (
+        "records a human decision and stamps it with the moment it was taken; authorises a "
+        "treatment code and contributes no component to the identifier"
+    ),
     "dispatcher.py": "sends a persisted identifier; contributes no component and needs a clock",
     "retry.py": (
         "schedules a re-send of a persisted identifier. 4.3's whole subject is attempts, backoff "

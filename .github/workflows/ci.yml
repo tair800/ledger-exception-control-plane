@@ -184,6 +184,13 @@ jobs:
       - name: Verify the replay CLI against real PostgreSQL
         run: uv run pytest tests/test_replay_cli_postgres.py -m integration --no-cov
 
+      # The human gate. §5.1's exit criterion is that the gate *blocks the write*, and what blocks
+      # it is a composite foreign key: a rejection carries a NULL treatment and the referencing
+      # column is NOT NULL, so an adjustment referencing a rejection has nothing to point at. That
+      # is a property of PostgreSQL, not of the application, so it is proven here.
+      - name: Verify the approval gate and role separation against real PostgreSQL
+        run: uv run pytest tests/test_approval_postgres.py tests/test_approval_api_postgres.py -m integration --no-cov
+
       # The authoritative coverage gate, and the only place it can be honest.
       #
       # The unit job cannot see `matching.service` or `classification.service` — their entire

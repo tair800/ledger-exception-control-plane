@@ -699,7 +699,7 @@ def test_kill_an_aliased_proposal_write_is_detected(
 #: retry needs; and ``outbox`` stays because **no module needs that name** — 4.2 writes the outbox
 #: row from the module that already owns adjustment writes, so a file under that name would mean a
 #: second dispatch path had appeared without review.
-LATER_MILESTONE_NAMES: Final = ("approval", "outbox", "workers")
+LATER_MILESTONE_NAMES: Final = ("outbox", "workers")
 
 
 def _later_milestone_paths(root: pathlib.Path) -> list[str]:
@@ -725,13 +725,18 @@ def _later_milestone_paths(root: pathlib.Path) -> list[str]:
 
 
 def test_no_approval_posting_or_outbox_machinery_exists() -> None:
-    """4.2 delivers a dispatch unit. It delivers no retry loop, no worker and no approval gate.
+    """The names still owned by increments that have not started.
 
-    ``operations/dispatcher.py`` exists as of 4.2 and is no longer forbidden — it is named in that
-    increment's deliverables. What the package must still not grow is a ``workers`` package (the
-    background machinery 4.3's bounded retry needs), an ``approval`` module (5.1's gate) or a module
-    named ``outbox``: the outbox row is written by the module that owns adjustment writes, so a file
-    under that name would mean a second dispatch path had appeared.
+    ``approval`` came off this list at 5.1, the increment whose deliverables name it: *"Approve /
+    edit / reject endpoints; authenticated principals; analyst, controller and operator roles;
+    approval-token single use."* What replaced the filename ban is a set of shape claims on the
+    module itself, below — the same move ``dispatcher`` got at 4.2, and for the same reason:
+    removing a ban without replacing the claim is a weakening dressed as a narrowing.
+
+    What the package must still not grow is a ``workers`` package — the background machinery a
+    daemon would need, which 4.3 deliberately did not build — or a module named ``outbox``: the
+    outbox row is written by the module that already owns adjustment writes, so a file under that
+    name would mean a second dispatch path had appeared without review.
     """
     assert _later_milestone_paths(PACKAGE_ROOT) == []
 
@@ -832,11 +837,9 @@ def test_kill_a_nested_later_milestone_module_is_detected(tmp_path: pathlib.Path
     """
     (tmp_path / "operations").mkdir()
     (tmp_path / "operations" / "outbox.py").write_text("", encoding="utf-8")
-    (tmp_path / "operations" / "approval.py").write_text("", encoding="utf-8")
     (tmp_path / "workers").mkdir()
 
     assert _later_milestone_paths(tmp_path) == [
-        "operations/approval.py",
         "operations/outbox.py",
         "workers",
     ]
@@ -845,7 +848,7 @@ def test_kill_a_nested_later_milestone_module_is_detected(tmp_path: pathlib.Path
 
 @pytest.mark.parametrize(
     "planted",
-    ["outbox.py", "approval.py", "workers.py", "outbox/__init__.py", "workers/__init__.py"],
+    ["outbox.py", "workers.py", "outbox/__init__.py", "workers/__init__.py"],
 )
 def test_kill_each_later_milestone_shape_is_detected(tmp_path: pathlib.Path, planted: str) -> None:
     """Module *and* package, at depth. ``outbox.py`` was invisible to the first widened version."""
@@ -864,6 +867,8 @@ def test_kill_a_vacuous_later_milestone_scan_is_detected(tmp_path: pathlib.Path)
 
 #: The modules in ``operations/`` allowed to reach a database, mirroring the ``llm/`` fence.
 #:
+#: ``approval.py`` joined at 5.1: recording a human decision is a database write by definition.
+#:
 #: ``dispatcher.py`` joined at 4.2: it reads the dispatch intent, commits the write-ahead attempt
 #: record and records the outcome, all of which are database work by definition. ``retry.py`` and
 #: ``__main__.py`` joined at 4.3 for the same kind of reason — one selects due work and writes the
@@ -879,6 +884,7 @@ OPERATIONS_MODULES_THAT_MAY_REACH_A_DATABASE: Final = frozenset(
         "operations/dispatcher.py",
         "operations/retry.py",
         "operations/__main__.py",
+        "operations/approval.py",
     }
 )
 

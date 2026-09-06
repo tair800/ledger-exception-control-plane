@@ -396,6 +396,9 @@ def test_required_unique_constraints_are_declared() -> None:
         # Redundant as uniqueness claims — `id` is already the primary key — and required,
         # because a foreign key must reference a uniquely-constrained column list.
         ("approval", ("id", "approved_treatment", "principal")),
+        # 5.1: §14's "replay of a consumed approval token" is refused by the database, not by an
+        # application check that a later refactor could skip.
+        ("approval", ("approval_token",)),
         ("settlement_line", ("id", "match_state")),
         ("adjustment", ("id", "operation_id")),
         ("adjustment", ("id", "approving_principal")),

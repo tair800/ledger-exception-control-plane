@@ -2944,6 +2944,113 @@ it adds is beneath clause 3: a **transport** failure that provably wrote no byte
 bounded twice over, and everything else still defaults to `UNKNOWN`. **No unconditional "exactly
 once" claim exists anywhere, and none may be added.**
 
+## ADR-056 — Who may authorise a financial write, and in what order the rest of M4–M5 is built (M5.1)
+
+**Status:** Accepted. Resolves **OPEN-8**, records the role allocation §16 leaves implicit, and
+corrects the build order of increments 4.4, 4.5, 5.1 and 5.2. No milestone is merged, split or
+renamed, and every commit message stays exactly as `IMPLEMENTATION_PLAN.md` specifies.
+
+### 1. OPEN-8 — authentication, resolved without inventing an identity provider
+
+OPEN-8 asked *"how principals authenticate for approval, and how roles are assigned"*, with one
+constraint recorded against it: *"Deliberately **not** OAuth — project 4 owns that territory, and
+duplicating it here would be redundant."*
+
+**Decision: a configured registry of principals, one bearer token each, stored as SHA-256.**
+
+- The registry is `LECP_PRINCIPALS`, a JSON object mapping principal id to `{role, token_sha256}`.
+- Authentication hashes the presented token and compares in **constant time across the whole
+  registry** — the loop does not stop at the first match, so timing reveals neither which principal
+  matched nor how many bytes of a wrong token were right.
+- **The registry never contains a usable credential.** It ends up in an environment variable, a
+  secret store, a crash dump and occasionally a support ticket; storing the hash means each of
+  those carries something that cannot be replayed. A test asserts the fingerprint itself does not
+  authenticate, because if it did, hashing would have bought nothing.
+- **Empty means nobody.** A control plane with no configured humans refuses every approval. Treating
+  "no principals configured" as "no authentication required" is the most common way an admin surface
+  ends up open, and it fails open exactly when somebody forgot to configure it.
+- A malformed registry fails at **construction**, not at the first approval: an unknown role would
+  grant whatever the code defaulted to, a plaintext token in the hash field means a credential was
+  pasted into configuration, and two principals sharing a token would make the audit trail unable to
+  say which of them acted.
+
+This is not a production identity system and the module says so: no rotation, no expiry, no
+revocation, no sessions. It is the smallest mechanism that makes *"which human authorised this
+financial write"* a **verified fact rather than a client-supplied string**, which is the property
+§16 needs and the one every later increment leans on.
+
+### 2. The role allocation §16 leaves implicit
+
+§16 names three roles and does not say what each may do. Recorded here:
+
+| Role | May | May not |
+|---|---|---|
+| `analyst` | read the queue; **reject** (authorises nothing); *request* an edited treatment | approve; authorise an edit |
+| `controller` | approve; authorise an **edited** treatment | authorise an edit they requested; work the operations queues |
+| `operator` | work the dead-letter and recovery queues | record any approval decision |
+
+Two separations, each load-bearing:
+
+- **The operator holds no approval right.** A role that can both unstick a stalled posting and
+  authorise its amount is not a separation of duties.
+- **The approval roles cannot work the operations queues.** The same collapse from the other side: a
+  controller who could replay a dead letter could authorise a posting and then drive it.
+
+A role is a single value, not a permission set. There is no RBAC engine, and adding one would be the
+enterprise complexity this project's rules forbid.
+
+### 3. Two controls moved out of application code and into the database
+
+§16's countersignature rule — *"The approver cannot be the same principal as the requester where an
+edit changed the treatment"* — and §14's *"replay of a consumed approval token"* are both enforced by
+constraints, not by checks:
+
+- `approval.requested_by` carries the other half of the countersignature, and
+  `approver_is_not_the_requester` compares them. A CHECK cannot reach another table, so both
+  principals live on the row — the same shape `recovery_queue` already uses, so an auditor finds the
+  control in the same place in both.
+- `requested_by_iff_edited` stops that constraint being vacuous. Without it, an edit that forgot to
+  record who asked would carry `requested_by IS NULL`, satisfy the comparison trivially, and defeat
+  the control written to catch it.
+- `uq_approval_token` makes a replay lose to a unique index rather than to an application check a
+  later refactor could skip.
+
+The service refuses these cases too, with a specific reason — but a test writes each violation
+**directly against the table** to prove the constraint is the control and the service is the
+courtesy.
+
+### 4. The exit criterion is enforced by a key that already existed
+
+§5.1's exit criterion is *"The gate blocks the write, proven by test."* Nothing new enforces it. M1.2
+put a composite foreign key on `adjustment` referencing
+`approval (id, approved_treatment, principal)`; a rejection carries `approved_treatment IS NULL` and
+the referencing column is `NOT NULL`, so **an adjustment referencing a rejection has nothing to point
+at**. No trigger, no ordering assumption, no application check. The test posts money against a
+rejected decision and watches PostgreSQL refuse it, and a companion test proves an adjustment cannot
+claim a treatment the approval did not authorise — which is why the key is composite rather than a
+plain reference to `approval.id`.
+
+### 5. Build order: 5.1 → 4.4 → 5.2 → 4.5
+
+`IMPLEMENTATION_PLAN.md` §4.4's deliverables include *"`/recovery` endpoints"* with *"an
+authenticated principal"*, a segregation-of-duties rule between the resolving and approving
+principals, and *"audit events for every attempt, `UNKNOWN`, query result and operator decision"*.
+`PROJECT_SPEC.md` §19 lists *"replay of a consumed approval token"* among the chaos scenarios that
+acceptance criterion 7 requires a committed test for.
+
+All three need 5.1. Running 4.4 first would mean building recovery endpoints with no principals to
+authenticate, then deciding the kill-test gate on five of seven §19 scenarios and rewriting the
+chaos table afterwards. **A gate decided on incomplete evidence is the failure mode ADR-053 exists to
+prevent**, and its reasoning applies unchanged: a gate is decided against working code, and the code
+the §19 suite needs includes the approval token.
+
+The plan's own "early" requirement for the kill test is *"before the console, evaluation,
+observability and deployment work"* — M6 through M10. That still holds: 4.5 lands before all of them.
+
+**What this costs:** the four increments appear in the history out of their plan ordinal. What it
+buys: every §19 scenario has a committed test when the gate is decided, which is the entire point of
+the gate.
+
 ---
 
 # Open decisions
@@ -3007,7 +3114,7 @@ the first scorer run, and record the reasoning.
 **Constraint:** must be documented and reproducible; every later project's table depends on this shape.
 **Needed before:** increment 9.1.
 
-## OPEN-8 — Authentication mechanism for the console
+## OPEN-8 — Authentication mechanism for the console — **RESOLVED at M5.1 (ADR-056)**
 
 **Must decide:** how principals authenticate for approval, and how roles are assigned.
 **Constraint:** must support role separation and attributable approval. Deliberately *not* OAuth —

@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     #: Header carrying an inbound correlation id. Documented in the README.
     correlation_id_header: str = "X-Request-ID"
 
+    #: The principal registry (M5.1, §16), as a JSON object keyed by principal id:
+    #: ``{"controller-a": {"role": "controller", "token_sha256": "<64 hex>"}}``.
+    #:
+    #: **Hashes, never tokens.** A deployment computes the SHA-256 of each bearer token and stores
+    #: that here, so the configuration carries no usable credential — see
+    #: :mod:`~ledger_exception_control_plane.security`. Empty by default, which means every
+    #: authenticated route refuses everything: a control plane with no configured humans must fail
+    #: closed, and OPEN-8 explicitly rules out inventing an identity provider here.
+    principals: str = ""
+
     # -- Bounded retry (M4.3, §15) ------------------------------------------------------
     #
     # `PROJECT_SPEC.md` §15 says "base delay, multiplier and cap are configuration" and gives no

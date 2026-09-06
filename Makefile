@@ -4,7 +4,7 @@
         ps smoke build db-up test-db-init migrate migrate-down schema-verify fixtures \
         fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify \
         money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
-        operations-verify dispatch-verify ledger-verify retry-verify
+        operations-verify dispatch-verify ledger-verify retry-verify approval-verify
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -160,6 +160,14 @@ ledger-verify: ## Prove the adapter capability contract and the conformance gate
 
 dispatch-verify: test-db-init ## Prove the outbox and one dispatch end to end against real PostgreSQL
 	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_dispatch_postgres.py -m integration -p no:cacheprovider --no-cov
+
+# --- human approval gate (M5.1) ---
+#
+# The exit criterion is that the gate *blocks the write*, and the thing doing the blocking is a
+# composite foreign key — so it can only be demonstrated against a real database.
+
+approval-verify: test-db-init ## Prove the approval gate, roles and single use against real PostgreSQL
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_approval_postgres.py tests/test_approval_api_postgres.py -m integration -p no:cacheprovider --no-cov
 
 # --- bounded retry, dead-letter queue and replay (M4.3) ---
 #
