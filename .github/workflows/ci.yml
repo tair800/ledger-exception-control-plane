@@ -20,9 +20,85 @@ env:
   UV_FROZEN: "1"
 
 jobs:
+  # Repository plumbing, in under a minute, and it exists for one reason: the `schema` job below
+  # is allowed sixty minutes. A malformed Makefile, an unparseable workflow or a stale lockfile
+  # would otherwise be discovered after an hour of database work, or — in the case of a workflow
+  # that does not parse — not discovered by this pipeline at all, because a broken workflow file
+  # simply does not run.
+  #
+  # Deliberately not a duplicate of `quality`: everything here is either invisible to the test
+  # suite (workflow YAML, actionlint) or is the cheapest possible subset of it.
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.15"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install
+
+      # No project install: `uv lock --check` reads the lockfile against pyproject.toml and
+      # nothing else, so this fails in seconds on the mistake `uv sync --frozen` would take
+      # minutes to reach.
+      - name: Verify the lockfile is current
+        run: uv lock --check
+
+      # Every workflow in this directory must be valid YAML. Nothing else checks this, and a
+      # workflow that does not parse is not a red build — it is a check that silently stopped
+      # existing, which is strictly worse.
+      #
+      # `--no-project --with pyyaml` rather than the project environment: PyYAML is only a
+      # transitive dependency here, and a check that quietly stops running when an intermediary
+      # drops it is the same failure this step exists to prevent.
+      - name: Verify every workflow file parses
+        run: |
+          uv run --no-project --with pyyaml python - <<'PY'
+          import pathlib
+          import sys
+          import yaml
+
+          failures = []
+          for path in sorted(pathlib.Path(".github/workflows").glob("*.y*ml")):
+              try:
+                  yaml.safe_load(path.read_text(encoding="utf-8"))
+              except yaml.YAMLError as error:
+                  failures.append(f"{path}: {error}")
+              else:
+                  print(f"ok  {path}")
+          if failures:
+              print("\n".join(failures), file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      # The guards on the Makefile: literal escape sequences in a continuation, a recipe indented
+      # with spaces, a `.PHONY` entry naming nothing, a destructive command hidden in an ordinary
+      # target. `make` is not a dependency of this project, so nothing else executes the file.
+      - name: Verify the Makefile and the smoke tooling
+        run: |
+          uv sync --frozen
+          uv run pytest tests/test_tooling_bootstrap.py -q --no-cov -p no:cacheprovider
+
+      # The smoke checks assert properties of a *deployed* instance, so the test suite cannot
+      # exercise them — it has no deployed instance. This runs them against a local stub that
+      # serves one healthy scenario and ten scenarios each carrying a single planted deployment
+      # fault, and fails if any check stays green on the fault it exists to catch.
+      - name: Verify the smoke checks can still fail
+        run: uv run python scripts/smoke/selftest.py
+
   quality:
     name: Lint, type check and test
     runs-on: ubuntu-latest
+    needs: preflight
     timeout-minutes: 10
 
     steps:
@@ -91,9 +167,89 @@ jobs:
       - name: Verify the committed golden set has not drifted
         run: uv run python -m tests.evaluation verify
 
+  # Practical, visible and honest. Five checks, each of which can actually go red for a reason
+  # somebody can act on. Deliberately not a security platform: a dashboard nobody reads, or a
+  # scanner permanently amber, is worse than five checks that mean something.
+  #
+  # **This job does not certify anything.** A green run means these five checks found nothing, and
+  # says nothing about vulnerabilities they do not look for.
+  security:
+    name: Security checks
+    runs-on: ubuntu-latest
+    needs: preflight
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.15"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies from the lockfile
+        run: uv sync --frozen
+
+      # The detector, killed first. It plants a credible example of every credential shape it
+      # looks for and asserts each is reported, and plants the placeholders this repository
+      # legitimately contains and asserts none of them is. A scanner that has quietly stopped
+      # matching is indistinguishable from a clean repository, which is the whole problem.
+      - name: Verify the secret detector can still fire
+        run: uv run python deployment/checks/scan.py selftest
+
+      - name: Scan tracked files for credentials
+        run: uv run python deployment/checks/scan.py secrets
+
+      # Tracked filenames that must not exist, the `.gitignore` entries that keep them from
+      # appearing, and workflow credential hygiene: no `pull_request_target`, and no secret or
+      # untrusted event text interpolated into a shell command.
+      - name: Check for unsafe configuration and credential exposure
+        run: uv run python deployment/checks/scan.py config
+
+      # `frontend/` is built by a separate increment and does not exist yet, so this reports that
+      # it had nothing to scan and passes. It starts doing real work the moment the directory
+      # appears: server-side variable names reachable from browser code, credential-shaped
+      # `VITE_*` / `NEXT_PUBLIC_*` names that a bundler would inline into the shipped JavaScript,
+      # and tracked `.env` files.
+      - name: Check the frontend for exposed secrets
+        run: uv run python deployment/checks/scan.py frontend
+
+      # The authorisation model, as tests: which role may authorise an edit, that an operator
+      # holds no approval right, that no approval role may work the operations queues, that a
+      # principal carries exactly one role, and that the registry never holds a usable token.
+      # These run in `quality` too, as part of the whole suite. Named separately here because a
+      # red security job should say which property of the security model broke, rather than
+      # leaving a reader to find it among several hundred passing tests.
+      - name: Run the authorisation and secret-containment tests
+        run: |
+          uv run pytest tests/test_security.py tests/test_config.py \
+            -q --no-cov -p no:cacheprovider
+
+      # The dependency set that actually ships, exported from the lockfile so what is audited is
+      # what the container installs. Dev tooling is excluded on purpose: it is not part of the
+      # deployed surface, and a CVE in a linter would block a financial fix for no gain.
+      #
+      # This job is allowed to go red without any change to this repository — that is what a
+      # vulnerability feed does. When it does, the response is to upgrade, or to record a
+      # `--ignore-vuln GHSA-...` with the reason in `docs/deployment.md`. It is deliberately NOT
+      # `continue-on-error`: a scanner that cannot fail is decoration.
+      - name: Audit the shipped dependencies for known vulnerabilities
+        run: |
+          uv export --frozen --no-dev --no-emit-project \
+            --format requirements-txt --output-file requirements-runtime.txt
+          uv run --no-project --with pip-audit \
+            pip-audit --requirement requirements-runtime.txt --strict --progress-spinner off
+
   schema:
     name: Migrations and schema integrity
     runs-on: ubuntu-latest
+    needs: preflight
     # Raised from 10 at M5.2 and from 30 at M4.5, and the reason is worth recording rather than
     # just the number. This job runs a per-increment integration step for every increment since
     # 1.1 *and* the whole-suite coverage gate, which re-executes all of them — deliberate
@@ -272,6 +428,7 @@ jobs:
   container:
     name: Build container image
     runs-on: ubuntu-latest
+    needs: preflight
     timeout-minutes: 10
 
     # Deliberately narrow. This job builds the image and stops — it does NOT start the
