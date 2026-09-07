@@ -256,10 +256,17 @@ def test_every_recipe_line_begins_with_a_tab() -> None:
 
 
 def _declared_phony(source: str) -> set[str]:
-    """Every name on the ``.PHONY`` line, following its continuations."""
-    match = re.search(r"^\.PHONY:((?:[^\n]*\\\n)*[^\n]*)", source, re.M)
-    assert match, "the Makefile declares no .PHONY targets"
-    return set(match.group(1).replace("\\", " ").split())
+    """Every name on **every** ``.PHONY`` line, following each one's continuations.
+
+    All of them, not the first. Make accumulates ``.PHONY`` declarations, so a self-contained block
+    of targets can legitimately declare its own — and reading only the first line made this guard
+    report those targets as undeclared while Make treated them as declared. A guard that is wrong
+    about the thing it guards is worse than no guard: the failure it produces is a false one, and
+    the fix somebody reaches for is to edit the shared line the block was written to avoid.
+    """
+    matches = list(re.finditer(r"^\.PHONY:((?:[^\n]*\\\n)*[^\n]*)", source, re.M))
+    assert matches, "the Makefile declares no .PHONY targets"
+    return {name for match in matches for name in match.group(1).replace("\\", " ").split()}
 
 
 def _defined_targets(source: str) -> set[str]:

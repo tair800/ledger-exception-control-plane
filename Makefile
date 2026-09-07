@@ -264,11 +264,6 @@ cassette-verify: ## Prove the harness replays the whole corpus offline (no key, 
 
 # --- evaluation (M6.2/6.3) ---
 #
-# A second `.PHONY` rather than an edit to the one at the top of the file. Make accumulates them,
-# and a block that declares its own targets can be added or removed in one piece.
-.PHONY: eval-gate eval-gate-update eval-gate-verify label-packet label-packet-verify \
-        eval-compare eval-compare-verify
-#
 # 6.2's gate and 6.3's comparison harness. Both replay the committed cassette offline, so neither
 # needs a database, a credential or a network — and neither can reach a provider: no module they
 # import has an HTTP client in its dependency graph.
@@ -283,6 +278,11 @@ cassette-verify: ## Prove the harness replays the whole corpus offline (no key, 
 # `live-eval` is deliberately absent from this file. It is the one command that would reach a paid
 # API, it is gated on an explicit environment opt-in, and putting it behind a `make` target would
 # make it one tab-completion away from a run nobody meant to pay for.
+#
+# A second `.PHONY` rather than an edit to the one at the top of the file. Make accumulates them,
+# so a block that declares its own targets can be added or removed in one piece.
+.PHONY: eval-gate eval-gate-update eval-gate-verify label-packet label-packet-verify \
+        eval-compare eval-compare-verify
 
 eval-gate: ## Fail if the offline evaluation replay has drifted from its committed baseline
 	uv run python -m tests.evaluation gate
