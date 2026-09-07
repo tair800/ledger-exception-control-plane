@@ -261,3 +261,18 @@ cassettes-check: ## Fail if the committed cassette has drifted from its builder
 
 cassette-verify: ## Prove the harness replays the whole corpus offline (no key, no network)
 	uv run pytest tests/test_cassette_harness.py -p no:cacheprovider --no-cov
+
+# --- observability (M8.1) ---
+#
+# `PROJECT_SPEC.md` §18. Conventions, the redaction gate and the correlation contract, none of
+# which needs a database, a network, a provider or an OpenTelemetry SDK — the sink is injected and
+# the default one emits nothing. So this runs in the default suite too, and is only broken out here
+# because the leak test and its kill test are the pair a reviewer will want to run on their own.
+#
+# The exit criterion §18 states — a single exception traceable end to end in Langfuse — is **not**
+# discharged by this command and cannot be from this branch: it needs the OTel dependency, a
+# provider bootstrap and a running collector. `docs/observability.md` §9 says what remains.
+.PHONY: observability-verify
+
+observability-verify: ## Prove the telemetry conventions, the redaction gate and the correlation contract
+	uv run pytest tests/test_observability.py -p no:cacheprovider --no-cov
