@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import json
 import pathlib
+from typing import Final
 
 import pytest
 
@@ -25,10 +26,17 @@ from ledger_exception_control_plane.classification.taxonomy import (
     ClassificationRule,
 )
 from ledger_exception_control_plane.db.control import ExceptionClassification, TreatmentCode
+from ledger_exception_control_plane.fixtures.generator import generate
+from ledger_exception_control_plane.fixtures.schema import Profile
+from ledger_exception_control_plane.ingest import interpret
 from ledger_exception_control_plane.money import DEMO_ACCOUNT_POLICY
+from tests.cassette_builder import CORPUS_LINES, corpus_subjects
 from tests.evaluation.golden import (
+    GOLDEN_INSTANCES,
     GOLDEN_PATH,
+    GOLDEN_PROFILE,
     GOLDEN_SCHEMA_VERSION,
+    GOLDEN_SEED,
     HOLD_OUT_EVERY,
     GoldenRecord,
     build_golden_set,
@@ -42,6 +50,12 @@ from tests.evaluation.labels import (
     LabelSource,
     label_for,
 )
+
+#: How many exceptions the canonical corpus produces, and therefore how many the committed cassette
+#: covers. Stated here rather than derived, so a change in the corpus fails the join test with a
+#: message about the corpus instead of silently redefining what "complete" means.
+CANONICAL_CORPUS_EXCEPTIONS: Final = 13
+
 
 # ======================================================================================
 # The label declaration
@@ -143,6 +157,89 @@ def test_every_label_clause_carries_a_reason_a_reviewer_can_disagree_with() -> N
 
 
 # ======================================================================================
+# Identity — the golden set and the graded subjects must be the same records
+# ======================================================================================
+
+
+def test_the_golden_set_and_the_cassette_covered_subjects_join_completely() -> None:
+    """**The test this whole identity migration exists for.**
+
+    The golden set is an answer key. A key that cannot be joined to the answers it grades is not a
+    key, and for the whole of the first version of M6 it could not be: the golden generator derived
+    its own ``uuid5`` identifiers from a content hash and a line number, while the committed
+    cassettes and the real pipeline's ``ExceptionSubject`` are both keyed on the corpus row's own
+    ``id``. Thirteen exceptions on each side of the canonical corpus, **zero in common** — and
+    every arithmetic check still passed, because 13 and 13 look right and nothing compared the
+    identifiers.
+
+    So this asserts the join, not the counts. It fails if the overlap is anything other than total,
+    and it says what to do about it.
+    """
+    subjects = {str(subject.exception_id) for subject, _ in corpus_subjects()}
+    golden = {
+        record.exception_id
+        for record in build_golden_set(profile=Profile.CANONICAL, instances=CORPUS_LINES).records
+    }
+    overlap = subjects & golden
+
+    assert len(subjects) == CANONICAL_CORPUS_EXCEPTIONS, (
+        f"the canonical corpus now produces {len(subjects)} exceptions, not "
+        f"{CANONICAL_CORPUS_EXCEPTIONS}; the cassette and this constant both need updating"
+    )
+    assert overlap == subjects == golden, (
+        f"the golden set and the cassette-covered subjects share {len(overlap)} of "
+        f"{len(subjects)} identifiers. They must share all of them: both sides key an exception "
+        "by the corpus row's own `id`. If this is zero, one side has started deriving its own "
+        "identifiers again — fix the derivation rather than the assertion, because a golden set "
+        "that joins to nothing grades nothing while still reporting a number."
+    )
+
+
+def test_the_golden_set_agrees_with_what_ingestion_parses_from_the_same_bytes() -> None:
+    """The property the generator gave up when it stopped calling ``interpret``, checked directly.
+
+    The generator now takes its settlement facts from the corpus rows rather than from ingestion's
+    parse of the raw file, because only the rows carry the identifier everything else uses. That is
+    a real reduction in what the generator itself exercises, so the equivalence it relies on is
+    asserted here instead of assumed: for every line of the corpus the golden set is generated
+    from, the row and what ``interpret`` produces from the very same bytes agree on every field a
+    golden record reads.
+
+    If a future ingestion change made the two disagree, this fails — which is the correct place for
+    it to fail, because the answer would then depend on which side of the parse you asked.
+    """
+    generated = generate(GOLDEN_SEED, GOLDEN_PROFILE, GOLDEN_INSTANCES)
+
+    compared = 0
+    for batch in generated.corpus.batches:
+        parsed, defects = interpret(generated.files[batch.raw_payload_path])
+        assert not defects, "the seeded corpus must parse cleanly"
+        by_line_number = {line.line_number: line for line in parsed}
+        assert len(by_line_number) == len(batch.lines)
+
+        for row in batch.lines:
+            line = by_line_number[row.line_number]
+            assert (
+                row.psp_reference,
+                row.merchant_reference,
+                row.transaction_type,
+                row.amount,
+                row.currency,
+                row.value_date,
+            ) == (
+                line.psp_reference,
+                line.merchant_reference,
+                line.transaction_type,
+                line.amount,
+                line.currency,
+                line.value_date,
+            ), f"row {row.id} disagrees with ingestion's parse of the same line"
+            compared += 1
+
+    assert compared == generated.corpus.line_count
+
+
+# ======================================================================================
 # The committed artefact
 # ======================================================================================
 
@@ -154,6 +251,21 @@ def test_the_committed_golden_set_matches_its_generator() -> None:
     which is where a stale artefact is cheapest to notice.
     """
     assert GOLDEN_PATH.read_text(encoding="utf-8") == render_golden_set(build_golden_set())
+
+
+def test_the_committed_file_is_byte_identical_across_platforms() -> None:
+    """The drift check above compares *text*; this one compares bytes.
+
+    ``read_text`` translates newlines, so a file written on Windows in text mode — 251 CRLFs where
+    CI writes 251 LFs — satisfied every existing check while not being the same file. "Same seed,
+    same bytes" is the property §20 needs from a committed generator, so the bytes are asserted.
+    """
+    raw = GOLDEN_PATH.read_bytes()
+    assert b"\r" not in raw, (
+        "the committed golden set contains carriage returns; the generator must write it with "
+        'newline="\\n" so regeneration is byte-identical on every platform'
+    )
+    assert raw.endswith(b"}\n")
 
 
 def test_the_committed_set_loads_and_declares_its_own_provenance() -> None:

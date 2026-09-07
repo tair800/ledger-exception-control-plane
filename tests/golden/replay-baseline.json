@@ -1,0 +1,125 @@
+{
+  "baseline_version": "1",
+  "cassette": {
+    "path": "tests/cassettes/canonical-corpus.json",
+    "sha256": "3b7c55bb2146679b4f0ee20d17e46e18bba1a5dc754d449cd3ffdd9bddcd8edc"
+  },
+  "golden": {
+    "instances": 200,
+    "profile": "canonical",
+    "records": 13,
+    "schema_version": "2",
+    "sha256": "8a72240cd6c1aa37121e5197b89359881e6848e512d0e48493f355d08249ed94"
+  },
+  "providers": {
+    "anthropic": {
+      "abstained_where_a_treatment_was_available": 0,
+      "abstained_where_escalation_was_correct": 2,
+      "abstentions": 2,
+      "accuracy": 0.384615,
+      "accuracy_on_priceable": 1.0,
+      "calls_served": 13,
+      "confusion": [
+        {
+          "count": 1,
+          "expected": "accrue",
+          "proposed": "accrue"
+        },
+        {
+          "count": 2,
+          "expected": "escalate",
+          "proposed": "accrue"
+        },
+        {
+          "count": 3,
+          "expected": "escalate",
+          "proposed": "escalate"
+        },
+        {
+          "count": 3,
+          "expected": "escalate",
+          "proposed": "rebook"
+        },
+        {
+          "count": 3,
+          "expected": "escalate",
+          "proposed": "write_off"
+        },
+        {
+          "count": 1,
+          "expected": "rebook",
+          "proposed": "rebook"
+        }
+      ],
+      "correct": 5,
+      "correct_on_priceable": 2,
+      "distinct_recordings_served": 13,
+      "lift_over_baseline": -0.461538,
+      "majority_baseline": 0.846154,
+      "majority_label": "escalate",
+      "measures_a_model": false,
+      "model_id": "claude-opus-5",
+      "model_version": "claude-opus-5",
+      "priceable": 2,
+      "response_origin": "synthesised",
+      "scored": 13,
+      "unanswered": 0,
+      "unknown_ids": 0
+    },
+    "openai": {
+      "abstained_where_a_treatment_was_available": 0,
+      "abstained_where_escalation_was_correct": 2,
+      "abstentions": 2,
+      "accuracy": 0.384615,
+      "accuracy_on_priceable": 1.0,
+      "calls_served": 13,
+      "confusion": [
+        {
+          "count": 1,
+          "expected": "accrue",
+          "proposed": "accrue"
+        },
+        {
+          "count": 2,
+          "expected": "escalate",
+          "proposed": "accrue"
+        },
+        {
+          "count": 3,
+          "expected": "escalate",
+          "proposed": "escalate"
+        },
+        {
+          "count": 3,
+          "expected": "escalate",
+          "proposed": "rebook"
+        },
+        {
+          "count": 3,
+          "expected": "escalate",
+          "proposed": "write_off"
+        },
+        {
+          "count": 1,
+          "expected": "rebook",
+          "proposed": "rebook"
+        }
+      ],
+      "correct": 5,
+      "correct_on_priceable": 2,
+      "distinct_recordings_served": 13,
+      "lift_over_baseline": -0.461538,
+      "majority_baseline": 0.846154,
+      "majority_label": "escalate",
+      "measures_a_model": false,
+      "model_id": "gpt-5.4-mini-2026-03-17",
+      "model_version": "2026-03-17",
+      "priceable": 2,
+      "response_origin": "synthesised",
+      "scored": 13,
+      "unanswered": 0,
+      "unknown_ids": 0
+    }
+  },
+  "what_this_is": "REPRODUCTION BASELINE, NOT A MODEL MEASUREMENT. Every figure below was computed by replaying tests/cassettes/canonical-corpus.json through the shipped proposal path. Those cassettes are synthesised: no model produced them, and their treatments are assigned round-robin by the exception's position in sorted-id order. The agreement rate here is arithmetic over two orderings and says nothing whatever about a model's judgement. What this file protects is reproducibility - evidence assembly, prompt construction, request fingerprinting, response parsing, the golden labels and the scorer's arithmetic. Do not quote 'accuracy' from it, and do not treat any number in it as a quality threshold; the accuracy and abstention thresholds a build should fail on are OPEN-6 and cannot be chosen before a real capture exists."
+}

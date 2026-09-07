@@ -261,3 +261,59 @@ cassettes-check: ## Fail if the committed cassette has drifted from its builder
 
 cassette-verify: ## Prove the harness replays the whole corpus offline (no key, no network)
 	uv run pytest tests/test_cassette_harness.py -p no:cacheprovider --no-cov
+
+# --- evaluation (M6.2/6.3) ---
+#
+# 6.2's gate and 6.3's comparison harness. Both replay the committed cassette offline, so neither
+# needs a database, a credential or a network — and neither can reach a provider: no module they
+# import has an HTTP client in its dependency graph.
+#
+# **`eval-gate` is a reproduction gate, not a model-quality gate.** The committed cassettes are
+# synthesised and their treatments are assigned round-robin by position, so agreement with the
+# golden labels is arithmetic. What the gate protects is evidence assembly, prompt construction,
+# request fingerprinting, response parsing, the golden labels and the scorer's arithmetic. The
+# accuracy and abstention thresholds a build should fail on remain OPEN-6, and cannot be chosen
+# before a real capture exists.
+#
+# `live-eval` is deliberately absent from this file. It is the one command that would reach a paid
+# API, it is gated on an explicit environment opt-in, and putting it behind a `make` target would
+# make it one tab-completion away from a run nobody meant to pay for.
+#
+# A second `.PHONY` rather than an edit to the one at the top of the file. Make accumulates them,
+# so a block that declares its own targets can be added or removed in one piece.
+.PHONY: eval-gate eval-gate-update eval-gate-verify label-packet label-packet-verify \
+        eval-compare eval-compare-verify
+
+eval-gate: ## Fail if the offline evaluation replay has drifted from its committed baseline
+	uv run python -m tests.evaluation gate
+
+eval-gate-update: ## Deliberately rewrite tests/golden/replay-baseline.json from the current run
+	uv run python -m tests.evaluation gate --update
+
+eval-gate-verify: ## Prove the gate passes on the baseline and fails on an injected regression
+	uv run pytest tests/test_evaluation_gate.py -p no:cacheprovider --no-cov
+
+# The hold-out label packet (§20's human-labelled slice, OPEN-15). `label-packet` writes the
+# question; nothing in this repository writes the answer. `import-labels` is not a target on
+# purpose — it takes a path to a file the owner filled in, so it belongs on a command line rather
+# than behind a `make` verb that would need a variable to be useful.
+
+label-packet: ## Write the human-label packet for the frozen hold-out slice (writes no label)
+	uv run python -m tests.evaluation packet
+
+label-packet-verify: ## Prove the packet leaks no ground truth and the import validator refuses bad input
+	uv run pytest tests/test_human_labels.py -p no:cacheprovider --no-cov
+
+# §20's three-arm comparison (6.3). The deterministic arm is measured; the two model-dependent arms
+# print NOT MEASURED, because the committed cassettes are synthesised and carry no token usage and
+# cost is computed from provider usage fields or not at all.
+#
+# It prints rather than writing a file, and that is deliberate: one column is wall clock on the
+# machine that ran it, so a committed copy could not be drift-checked the way the §19 results
+# table is. Whoever publishes it records this command beside the table.
+
+eval-compare: ## Render §20's three-arm comparison (NOT MEASURED where a live capture is required)
+	uv run python -m tests.evaluation compare
+
+eval-compare-verify: ## Prove the comparison harness fabricates no number and gates live capture
+	uv run pytest tests/test_three_arm_comparison.py -p no:cacheprovider --no-cov

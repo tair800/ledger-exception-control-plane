@@ -1,6 +1,4 @@
-"""The evaluation CLI: generate, verify and score (M6.1).
-
-Three commands, and the split between them is the same one the cassette harness uses:
+"""The evaluation CLI: generate, verify, score, gate, packet and compare (M6.1 to M6.3).
 
 ``generate``
     Rebuild ``tests/golden/treatment-golden.jsonl`` from the seeded generator and write it.
@@ -15,23 +13,71 @@ Three commands, and the split between them is the same one the cassette harness 
     **required** argument with no default, because the one thing this harness must never do is
     present a synthesised run as an evaluation result.
 
-Nothing here can reach a provider. There is no HTTP client in the dependency graph of any module it
-imports, and no command takes a credential.
+``gate``
+    Replay the committed cassette through the shipped proposal path, recompute every figure the
+    scorer reports, and fail on **any** difference from ``tests/golden/replay-baseline.json``.
+    ``--update`` rewrites the baseline deliberately. This is a *reproduction* gate: the cassettes
+    are synthesised, so no number it compares is a statement about a model (see
+    :mod:`tests.evaluation.gate`).
+
+``packet``
+    Write the human-label packet for the frozen hold-out slice — a CSV with a blank ``HUMAN_LABEL``
+    column, a JSONL companion and the instructions. **It generates no label.**
+
+``import-labels``
+    Validate a returned label file against the frozen slice and report. It writes nothing, produces
+    no label, and refuses a file rather than repairing it. A file marked ``synthetic`` is validated
+    and then explicitly refused a human label source.
+
+``compare``
+    Render §20's three-arm comparison as markdown. Cells with no run print ``NOT MEASURED``.
+
+``live-eval``
+    The one command that *would* reach a provider, and the only one that is gated. It refuses
+    without an explicit environment opt-in, and it refuses again for a second reason that is not
+    going away by itself: this repository ships **no transport that speaks HTTP** (ADR-051), so a
+    capture needs an operator to supply one. It is never invoked by CI and never by a test.
+
+Every other command is offline by construction: no HTTP client is in the dependency graph of any
+module they import, and none of them takes a credential.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sys
+from typing import Final
 
 from ledger_exception_control_plane.db.control import TreatmentCode
+from ledger_exception_control_plane.llm.cassette import CAPTURE_OPT_IN
+from tests.evaluation.arms import compare_arms, render_comparison
+from tests.evaluation.gate import (
+    BASELINE_PATH,
+    compare,
+    load_baseline,
+    measure,
+    render_baseline,
+)
 from tests.evaluation.golden import (
     GOLDEN_PATH,
     build_golden_set,
     load_golden_set,
     render_golden_set,
+)
+from tests.evaluation.humanlabels import (
+    PACKET_CSV,
+    PACKET_DIR,
+    PACKET_JSONL,
+    PACKET_README,
+    ImportRejected,
+    build_packet,
+    read_import,
+    render_packet_csv,
+    render_packet_jsonl,
+    render_packet_readme,
 )
 from tests.evaluation.scorer import CassetteOrigin, Proposal, score
 
@@ -39,7 +85,12 @@ from tests.evaluation.scorer import CassetteOrigin, Proposal, score
 def _generate(path: pathlib.Path) -> int:
     golden = build_golden_set()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_golden_set(golden), encoding="utf-8")
+    # ``newline="\n"`` explicitly, the same as the cassette builder. Without it, Python's text mode
+    # translates every newline to the platform's, so regenerating this file on Windows produced
+    # 251 CRLFs where CI produces 251 LFs — a file that is *not* byte-identical across platforms
+    # while every drift check still passed, because `read_text` translates them back. "Same seed,
+    # same bytes" has to mean the bytes on disk.
+    path.write_text(render_golden_set(golden), encoding="utf-8", newline="\n")
     print(
         f"wrote {len(golden.records)} records to {path.name} "
         f"({len(golden.hold_out)} held out, {len(golden.human_labelled)} human-labelled)"
@@ -121,14 +172,228 @@ def _score(proposals_path: pathlib.Path, origin: CassetteOrigin) -> int:
     return 0
 
 
+def _gate(path: pathlib.Path, *, update: bool) -> int:
+    """Recompute the offline replay and compare it with the committed baseline.
+
+    Exits non-zero on **any** difference. Everything upstream is deterministic, so there is nothing
+    for a tolerance band to absorb except a behaviour change somebody would rather not discuss.
+    """
+    produced = measure()
+
+    if update:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_baseline(produced), encoding="utf-8", newline="\n")
+        print(f"wrote {path.name}")
+        for provider, metrics in sorted(produced.providers.items()):
+            print(
+                f"  {provider:10s} {metrics['scored']:3d} scored, "
+                f"{metrics['correct']:3d} agreeing, origin {metrics['response_origin']}"
+            )
+        print()
+        print(
+            "  This is a reproduction baseline over synthesised cassettes. It is not a model "
+            "measurement and none of its figures is a quality threshold."
+        )
+        return 0
+
+    if not path.is_file():
+        print(
+            f"{path} does not exist; run `make eval-gate-update` to create it",
+            file=sys.stderr,
+        )
+        return 1
+
+    differences = compare(load_baseline(path), produced)
+    if differences:
+        print(
+            f"the offline evaluation replay no longer matches {path.name}: "
+            f"{len(differences)} difference(s)",
+            file=sys.stderr,
+        )
+        for line in differences:
+            print(f"  {line}", file=sys.stderr)
+        print(
+            "\nThis gate protects the reproduction, not a model: evidence assembly, prompt "
+            "construction, request fingerprinting, response parsing, the golden labels and the "
+            "scorer's arithmetic. If the change above is intended, run "
+            "`make eval-gate-update` and put the new baseline in the review.",
+            file=sys.stderr,
+        )
+        return 1
+
+    for provider, metrics in sorted(produced.providers.items()):
+        print(
+            f"{provider:10s} {metrics['scored']:3d} scored, {metrics['correct']:3d} agreeing, "
+            f"{metrics['distinct_recordings_served']:3d} recordings served, origin "
+            f"{metrics['response_origin']}"
+        )
+    print(f"the offline evaluation replay matches {path.name}")
+    print(
+        "  (reproduction gate over synthesised cassettes: not a model measurement, and no "
+        "figure here is a quality threshold)"
+    )
+    return 0
+
+
+def _packet() -> int:
+    """Write the packet. Three files, all generated, none of them containing a label."""
+    packet = build_packet()
+    PACKET_DIR.mkdir(parents=True, exist_ok=True)
+    for path, text in (
+        (PACKET_CSV, render_packet_csv(packet)),
+        (PACKET_JSONL, render_packet_jsonl(packet)),
+        (PACKET_README, render_packet_readme(packet)),
+    ):
+        path.write_text(text, encoding="utf-8", newline="\n")
+        print(f"wrote {path.relative_to(PACKET_DIR.parents[1])}")
+    print()
+    print(f"  {len(packet.records)} records, hold-out version {packet.hold_out_version}")
+    print(f"  hold_out_sha256 {packet.digest}")
+    print("  HUMAN_LABEL is blank in every row. No label was generated by this command.")
+    return 0
+
+
+def _import_labels(path: pathlib.Path) -> int:
+    """Validate a returned label file. Reports; never writes, never fills anything in."""
+    packet = build_packet()
+    try:
+        imported = read_import(path, packet)
+    except ImportRejected as rejected:
+        print(f"{path.name} is refused, for {len(rejected.reasons)} reason(s):", file=sys.stderr)
+        for reason in rejected.reasons:
+            print(f"  {reason}", file=sys.stderr)
+        return 1
+
+    print(f"{path.name} validates against hold-out version {imported.hold_out_version}")
+    print(f"  {len(imported.labels)} label(s), covering the frozen slice exactly")
+    counts: dict[str, int] = {}
+    for label in imported.labels.values():
+        counts[label.treatment.value] = counts.get(label.treatment.value, 0) + 1
+    for treatment, count in sorted(counts.items()):
+        print(f"    {treatment:10s} {count:4d}")
+
+    if imported.synthetic:
+        print(file=sys.stderr)
+        print(
+            "  MARKED SYNTHETIC. These labels exercise this validator and are not evidence about "
+            "anything. They have no label source, must never be reported as human, must never be "
+            "counted in an accuracy figure, and must never be written into the golden set.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"  label source: {imported.label_source.value}")
+    print(
+        "  Nothing has been written. Applying these labels to the golden set is a separate, "
+        "reviewed change — see docs/evaluation.md."
+    )
+    return 0
+
+
+def _compare() -> int:
+    """Print §20's three-arm table. Not written to a file, and that is a decision.
+
+    One column is wall clock on the machine that ran it, so a committed copy could not be
+    drift-checked the way the §19 results table is — and a generated artefact nobody re-derives is
+    the thing `CLAUDE.md` §5 was written against. So this prints, and whoever publishes it records
+    the command beside the table.
+    """
+    print(render_comparison(compare_arms()))
+    return 0
+
+
+#: The environment variable that must be set to ``1`` before ``live-eval`` will do anything.
+#:
+#: Deliberately its own name rather than reusing the cassette opt-in: capture and *evaluation
+#: against a paid API* are different decisions, and one variable for both would mean anyone
+#: recording a cassette had also enabled a measurement run.
+LIVE_EVAL_OPT_IN: Final = "LECP_LIVE_EVAL"
+
+
+def _live_eval() -> int:
+    """Refuse, and say exactly what would be required. **Never runs a paid call from this tree.**
+
+    Two independent refusals, and both are stated because closing one would not enable the command:
+
+    1. The opt-in is absent. A command that can spend money is never the default and is never
+       inferred from the presence of a credential.
+    2. Even with it, there is no transport. Nothing under ``llm/`` imports an HTTP client and no
+       transport that speaks HTTP exists in this repository (ADR-051) — which is the property that
+       lets every other command here be provably offline. Capture requires an operator to supply
+       one explicitly, which is the point at which a person decides to spend money.
+
+    The names of the variables involved are printed. **No value is printed, and none is asked
+    for.**
+    """
+    enabled = os.environ.get(LIVE_EVAL_OPT_IN) == "1"
+    print("live capture is refused.", file=sys.stderr)
+    print(file=sys.stderr)
+    if not enabled:
+        print(
+            f"  1. {LIVE_EVAL_OPT_IN} is not set to 1. A command that can reach a paid API is "
+            "never the default and is never inferred from a credential being present.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"  1. {LIVE_EVAL_OPT_IN} is set, which is necessary and not sufficient.",
+            file=sys.stderr,
+        )
+    print(
+        "  2. This repository ships no transport that speaks HTTP (ADR-051). That is what makes "
+        "every other command here provably offline, and it is not a gap to be closed casually: "
+        "capture requires an operator to supply a transport explicitly.",
+        file=sys.stderr,
+    )
+    print(file=sys.stderr)
+    print("  What a live capture would need, by variable NAME only:", file=sys.stderr)
+    for name in (LIVE_EVAL_OPT_IN, CAPTURE_OPT_IN, "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+        print(f"    {name}", file=sys.stderr)
+    print(
+        "\n  No value for any of those is printed here, asked for here, or read into any "
+        "artefact this repository commits.",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="tests.evaluation", description="Generate, verify or score the §20 golden set."
+        prog="tests.evaluation",
+        description="Generate, verify, score and gate the §20 evaluation artefacts.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("generate", help="rebuild the committed golden set")
     sub.add_parser("verify", help="fail if the committed golden set has drifted")
+
+    gating = sub.add_parser(
+        "gate", help="fail if the offline cassette replay has drifted from the committed baseline"
+    )
+    gating.add_argument(
+        "--update",
+        action="store_true",
+        help=(
+            "rewrite the baseline from the current run instead of comparing. Deliberate: the new "
+            "file is what review then sees."
+        ),
+    )
+
+    sub.add_parser("packet", help="write the human-label packet for the frozen hold-out slice")
+
+    importing = sub.add_parser(
+        "import-labels", help="validate a returned human-label file against the frozen slice"
+    )
+    importing.add_argument("labels", type=pathlib.Path)
+
+    sub.add_parser("compare", help="render §20's three-arm comparison as markdown")
+    sub.add_parser(
+        "live-eval",
+        help=(
+            f"would capture live provider responses. Refused without {LIVE_EVAL_OPT_IN}=1, and "
+            "refused anyway because no HTTP transport exists here. Never run by CI."
+        ),
+    )
 
     scoring = sub.add_parser("score", help="grade a JSONL file of proposals")
     scoring.add_argument("proposals", type=pathlib.Path)
@@ -147,6 +412,16 @@ def main(argv: list[str] | None = None) -> int:
         return _generate(GOLDEN_PATH)
     if arguments.command == "verify":
         return _verify(GOLDEN_PATH)
+    if arguments.command == "gate":
+        return _gate(BASELINE_PATH, update=arguments.update)
+    if arguments.command == "packet":
+        return _packet()
+    if arguments.command == "import-labels":
+        return _import_labels(arguments.labels)
+    if arguments.command == "compare":
+        return _compare()
+    if arguments.command == "live-eval":
+        return _live_eval()
     return _score(arguments.proposals, CassetteOrigin(arguments.origin))
 
 
