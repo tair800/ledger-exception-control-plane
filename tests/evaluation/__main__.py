@@ -1,4 +1,4 @@
-"""The evaluation CLI: generate, verify, score and gate (M6.1, M6.2).
+"""The evaluation CLI: generate, verify, score, gate, packet and compare (M6.1 to M6.3).
 
 ``generate``
     Rebuild ``tests/golden/treatment-golden.jsonl`` from the seeded generator and write it.
@@ -29,18 +29,31 @@
     no label, and refuses a file rather than repairing it. A file marked ``synthetic`` is validated
     and then explicitly refused a human label source.
 
-Every command is offline by construction: no HTTP client is in the dependency graph of any module
-they import, and none of them takes a credential.
+``compare``
+    Render §20's three-arm comparison as markdown. Cells with no run print ``NOT MEASURED``.
+
+``live-eval``
+    The one command that *would* reach a provider, and the only one that is gated. It refuses
+    without an explicit environment opt-in, and it refuses again for a second reason that is not
+    going away by itself: this repository ships **no transport that speaks HTTP** (ADR-051), so a
+    capture needs an operator to supply one. It is never invoked by CI and never by a test.
+
+Every other command is offline by construction: no HTTP client is in the dependency graph of any
+module they import, and none of them takes a credential.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sys
+from typing import Final
 
 from ledger_exception_control_plane.db.control import TreatmentCode
+from ledger_exception_control_plane.llm.cassette import CAPTURE_OPT_IN
+from tests.evaluation.arms import compare_arms, render_comparison
 from tests.evaluation.gate import (
     BASELINE_PATH,
     compare,
@@ -277,6 +290,73 @@ def _import_labels(path: pathlib.Path) -> int:
     return 0
 
 
+def _compare() -> int:
+    """Print §20's three-arm table. Not written to a file, and that is a decision.
+
+    One column is wall clock on the machine that ran it, so a committed copy could not be
+    drift-checked the way the §19 results table is — and a generated artefact nobody re-derives is
+    the thing `CLAUDE.md` §5 was written against. So this prints, and whoever publishes it records
+    the command beside the table.
+    """
+    print(render_comparison(compare_arms()))
+    return 0
+
+
+#: The environment variable that must be set to ``1`` before ``live-eval`` will do anything.
+#:
+#: Deliberately its own name rather than reusing the cassette opt-in: capture and *evaluation
+#: against a paid API* are different decisions, and one variable for both would mean anyone
+#: recording a cassette had also enabled a measurement run.
+LIVE_EVAL_OPT_IN: Final = "LECP_LIVE_EVAL"
+
+
+def _live_eval() -> int:
+    """Refuse, and say exactly what would be required. **Never runs a paid call from this tree.**
+
+    Two independent refusals, and both are stated because closing one would not enable the command:
+
+    1. The opt-in is absent. A command that can spend money is never the default and is never
+       inferred from the presence of a credential.
+    2. Even with it, there is no transport. Nothing under ``llm/`` imports an HTTP client and no
+       transport that speaks HTTP exists in this repository (ADR-051) — which is the property that
+       lets every other command here be provably offline. Capture requires an operator to supply
+       one explicitly, which is the point at which a person decides to spend money.
+
+    The names of the variables involved are printed. **No value is printed, and none is asked
+    for.**
+    """
+    enabled = os.environ.get(LIVE_EVAL_OPT_IN) == "1"
+    print("live capture is refused.", file=sys.stderr)
+    print(file=sys.stderr)
+    if not enabled:
+        print(
+            f"  1. {LIVE_EVAL_OPT_IN} is not set to 1. A command that can reach a paid API is "
+            "never the default and is never inferred from a credential being present.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"  1. {LIVE_EVAL_OPT_IN} is set, which is necessary and not sufficient.",
+            file=sys.stderr,
+        )
+    print(
+        "  2. This repository ships no transport that speaks HTTP (ADR-051). That is what makes "
+        "every other command here provably offline, and it is not a gap to be closed casually: "
+        "capture requires an operator to supply a transport explicitly.",
+        file=sys.stderr,
+    )
+    print(file=sys.stderr)
+    print("  What a live capture would need, by variable NAME only:", file=sys.stderr)
+    for name in (LIVE_EVAL_OPT_IN, CAPTURE_OPT_IN, "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+        print(f"    {name}", file=sys.stderr)
+    print(
+        "\n  No value for any of those is printed here, asked for here, or read into any "
+        "artefact this repository commits.",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="tests.evaluation",
@@ -306,6 +386,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     importing.add_argument("labels", type=pathlib.Path)
 
+    sub.add_parser("compare", help="render §20's three-arm comparison as markdown")
+    sub.add_parser(
+        "live-eval",
+        help=(
+            f"would capture live provider responses. Refused without {LIVE_EVAL_OPT_IN}=1, and "
+            "refused anyway because no HTTP transport exists here. Never run by CI."
+        ),
+    )
+
     scoring = sub.add_parser("score", help="grade a JSONL file of proposals")
     scoring.add_argument("proposals", type=pathlib.Path)
     scoring.add_argument(
@@ -329,6 +418,10 @@ def main(argv: list[str] | None = None) -> int:
         return _packet()
     if arguments.command == "import-labels":
         return _import_labels(arguments.labels)
+    if arguments.command == "compare":
+        return _compare()
+    if arguments.command == "live-eval":
+        return _live_eval()
     return _score(arguments.proposals, CassetteOrigin(arguments.origin))
 
 

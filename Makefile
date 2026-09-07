@@ -266,7 +266,8 @@ cassette-verify: ## Prove the harness replays the whole corpus offline (no key, 
 #
 # A second `.PHONY` rather than an edit to the one at the top of the file. Make accumulates them,
 # and a block that declares its own targets can be added or removed in one piece.
-.PHONY: eval-gate eval-gate-update eval-gate-verify label-packet label-packet-verify
+.PHONY: eval-gate eval-gate-update eval-gate-verify label-packet label-packet-verify \
+        eval-compare eval-compare-verify
 #
 # 6.2's gate and 6.3's comparison harness. Both replay the committed cassette offline, so neither
 # needs a database, a credential or a network — and neither can reach a provider: no module they
@@ -302,3 +303,17 @@ label-packet: ## Write the human-label packet for the frozen hold-out slice (wri
 
 label-packet-verify: ## Prove the packet leaks no ground truth and the import validator refuses bad input
 	uv run pytest tests/test_human_labels.py -p no:cacheprovider --no-cov
+
+# §20's three-arm comparison (6.3). The deterministic arm is measured; the two model-dependent arms
+# print NOT MEASURED, because the committed cassettes are synthesised and carry no token usage and
+# cost is computed from provider usage fields or not at all.
+#
+# It prints rather than writing a file, and that is deliberate: one column is wall clock on the
+# machine that ran it, so a committed copy could not be drift-checked the way the §19 results
+# table is. Whoever publishes it records this command beside the table.
+
+eval-compare: ## Render §20's three-arm comparison (NOT MEASURED where a live capture is required)
+	uv run python -m tests.evaluation compare
+
+eval-compare-verify: ## Prove the comparison harness fabricates no number and gates live capture
+	uv run pytest tests/test_three_arm_comparison.py -p no:cacheprovider --no-cov
