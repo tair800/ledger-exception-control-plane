@@ -269,9 +269,28 @@ def test_generation_succeeds_from_a_clean_checkout(tmp_path: pathlib.Path) -> No
 # ======================================================================================
 
 
+#: The one module in `demo/` these guards deliberately do not walk.
+#:
+#: **Narrowed rather than relaxed.** The guards below assert that the M2 snapshot runs from a
+#: generated corpus in memory — no session, no engine, no socket, no model. That is the whole claim
+#: of that artefact and it must not erode.
+#:
+#: `seed.py` (M7 support) is a different thing: it seeds a disposable database so the console has
+#: real rows to show, so a database import is not a violation but its purpose. Excluding it by
+#: *name* rather than widening the permitted-import sets keeps the snapshot's claim exactly as
+#: strong as it was, and `test_the_seeder_is_the_only_exception_and_still_makes_no_model_call`
+#: below states what is asserted about the excluded file instead — because an exclusion with
+#: nothing behind it is a hole.
+_NOT_THE_SNAPSHOT: Final = frozenset({"seed.py"})
+
+
 def _demo_sources() -> list[tuple[str, ast.Module]]:
-    paths = sorted(DEMO_ROOT.rglob("*.py"))
+    paths = [p for p in sorted(DEMO_ROOT.rglob("*.py")) if p.name not in _NOT_THE_SNAPSHOT]
     assert len(paths) >= 4, "the guards must be walking real files"
+    assert {p.name for p in DEMO_ROOT.rglob("*.py")} & _NOT_THE_SNAPSHOT == _NOT_THE_SNAPSHOT, (
+        "the excluded module has been renamed or removed; re-scope the exclusion rather than "
+        "leaving a name in it that matches nothing"
+    )
     return [(p.name, ast.parse(p.read_text(encoding="utf-8"))) for p in paths]
 
 
@@ -366,6 +385,11 @@ def test_the_demo_touches_no_database_and_no_network() -> None:
         "__future__",
         "argparse",
         "ast",
+        # The CLI grew an async subcommand at M7 (`demo seed`), so it drives one coroutine to
+        # completion. Permitted for `__main__` only in the sense that it is the only snapshot
+        # module that has a reason to: nothing under it awaits anything, and the determinism
+        # guards below are unaffected by a scheduler.
+        "asyncio",
         "collections",
         "dataclasses",
         "datetime",
@@ -449,7 +473,14 @@ def test_the_demo_introduced_no_frontend_tooling_and_still_involves_no_model() -
     for forbidden in ("package.json", "package-lock.json", "node_modules", "frontend", "web", "ui"):
         assert not (REPO_ROOT / forbidden).exists(), f"{forbidden} was introduced"
 
+    # Scoped to the snapshot, like the guards above. The M2 snapshot's headline claim is that no
+    # AI is involved in it at all, and that must not erode. `seed.py` is excluded because the
+    # console's demonstration deliberately records a *proposal*: it supplies a stand-in proposer
+    # through the real provider port, and `test_the_seeder_is_the_only_exception_and_still_makes_no
+    # _model_call` asserts it reaches no provider and declares what it is.
     for path in sorted(DEMO_ROOT.rglob("*.py")):
+        if path.name in _NOT_THE_SNAPSHOT:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             modules: list[str] = []
@@ -466,3 +497,43 @@ def test_the_demo_introduced_no_frontend_tooling_and_still_involves_no_model() -
     assert "No AI is involved" in page
     assert "Nothing is posted to a ledger" in page
     assert "not</b> the operations console" in page
+
+
+def test_the_seeder_is_the_only_exception_and_still_makes_no_model_call() -> None:
+    """What `demo/seed.py` is held to instead of the snapshot's offline claim.
+
+    It is excluded from the guards above because seeding a database is its purpose, so "no engine,
+    no session" cannot apply to it. Everything else still does, and this is where that is stated:
+
+    * **No model call.** The demonstration must run with no credential and no network. It supplies
+      a stand-in proposer rather than reaching a provider, and no HTTP client may appear here.
+    * **No ``float``.** The same money rule the rest of the package lives under.
+    * **It says what the stand-in is.** The proposal it records is displayed in the console as
+      model provenance, so the text must declare that no model produced it — otherwise the demo
+      presents a fixed answer as a judgement, which is the overclaim the project exists to avoid.
+
+    An exclusion with nothing behind it is a hole, and this test is what fills it.
+    """
+    source = (DEMO_ROOT / "seed.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    forbidden_transport = {"httpx", "requests", "aiohttp", "urllib", "http", "socket"}
+    for node in ast.walk(tree):
+        modules: list[str] = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            modules = [node.module or ""]
+        for module in modules:
+            assert module.split(".")[0] not in forbidden_transport, (
+                f"demo/seed.py imports {module}: the demonstration must make no live call"
+            )
+
+    assert "float" not in _referenced_names(tree), "demo/seed.py references float"
+
+    # The rationale the console renders must declare what produced it.
+    assert "Not produced by a model" in source, (
+        "the stand-in proposer no longer says it is not a model; the console would present a "
+        "fixed answer as a model's judgement"
+    )
+    assert '"stand-in"' in source, "the stand-in no longer identifies itself as one"

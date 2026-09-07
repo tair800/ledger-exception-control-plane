@@ -214,6 +214,16 @@ async def supersession_is_blocked(
     ).scalar_one_or_none()
 
 
+def _authorises_a_posting(decision: ApprovalDecision) -> bool:
+    """Whether this decision permits money to move.
+
+    ``APPROVED`` and ``EDITED`` both authorise a posting; ``REJECTED`` authorises nothing. Written
+    as a function over the enum rather than as a set literal at the call site so that a fourth
+    decision cannot be added without someone answering this question about it.
+    """
+    return decision in {ApprovalDecision.APPROVED, ApprovalDecision.EDITED}
+
+
 async def record_decision(
     session: AsyncSession,
     *,
@@ -236,10 +246,24 @@ async def record_decision(
     database, then the write whose constraint is the real control. A caller gets the most specific
     reason available, and the constraint stays the backstop rather than the error message.
     """
-    if not principal.may_approve():
+    if not principal.may_record_decision():
         raise ApprovalRefusedError(
             RefusalReason.ROLE_MAY_NOT_APPROVE,
             f"role {principal.role.value} may not record an approval decision",
+        )
+
+    # **Recording a decision and authorising a posting are different rights.** The check above
+    # admits the analyst because a rejection is a decision they are given; this one refuses them
+    # the two decisions that authorise a financial effect.
+    #
+    # The single check that used to stand here admitted an analyst to `APPROVED` as well, which
+    # contradicted ADR-056 §2 in as many words and made the approval gate enforceable by the role
+    # it was meant to constrain. Narrowed here rather than at the route, because the route is one
+    # caller and this function is the gate.
+    if _authorises_a_posting(decision) and not principal.may_authorise():
+        raise ApprovalRefusedError(
+            RefusalReason.ROLE_MAY_NOT_APPROVE,
+            f"role {principal.role.value} may reject but may not authorise a posting",
         )
 
     if _requires_treatment(decision) and treatment is None:

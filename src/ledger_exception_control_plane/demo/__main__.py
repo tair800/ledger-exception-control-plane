@@ -33,13 +33,22 @@ def _page(seed: int, instances: int) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m ledger_exception_control_plane.demo",
-        description="Render the M2 pipeline snapshot from real pipeline output.",
+        description=(
+            "Render the M2 pipeline snapshot, or seed a disposable database so the console "
+            "has real rows to show."
+        ),
     )
-    parser.add_argument("command", choices=("render", "verify"))
+    parser.add_argument("command", choices=("render", "verify", "seed"))
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--instances", type=int, default=DEFAULT_INSTANCES)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args(argv)
+
+    if args.command == "seed":
+        # Delegated whole. See `demo.seed.run_seed` for why the wiring is not here.
+        from ledger_exception_control_plane.demo.seed import run_seed
+
+        return run_seed()
 
     page = _page(args.seed, args.instances)
 

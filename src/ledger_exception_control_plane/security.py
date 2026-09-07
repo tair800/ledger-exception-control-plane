@@ -47,7 +47,8 @@ import json
 from typing import Final
 
 __all__ = [
-    "APPROVAL_ROLES",
+    "AUTHORISATION_ROLES",
+    "DECISION_ROLES",
     "EDIT_ROLES",
     "OPERATIONS_ROLES",
     "Principal",
@@ -70,8 +71,30 @@ class Role(enum.StrEnum):
     OPERATOR = "operator"
 
 
-#: Roles permitted to record an approval decision at all.
-APPROVAL_ROLES: Final[frozenset[Role]] = frozenset({Role.ANALYST, Role.CONTROLLER})
+#: Roles permitted to record a decision at all — including a rejection.
+#:
+#: The analyst is here because ADR-056 gives them the **reject** right, and a rejection is a
+#: decision: it closes the exception, authorises nothing, and must be attributable. A role that
+#: could not record one would have to escalate every refusal to a controller, which is the
+#: bottleneck the analyst role exists to remove.
+DECISION_ROLES: Final[frozenset[Role]] = frozenset({Role.ANALYST, Role.CONTROLLER})
+
+#: Roles permitted to record a decision that **authorises a posting** — ``APPROVED`` or ``EDITED``.
+#:
+#: **Only the controller, and this was a defect.** The predicate these two sets replaced was a
+#: single ``APPROVAL_ROLES`` containing both roles, checked once at the top of ``record_decision``,
+#: with only ``EDITED`` narrowed further. So an analyst could record an ``APPROVED`` decision and
+#: authorise a ledger posting — directly contradicting ADR-056 §2, which states in a table that an
+#: analyst *may not approve*.
+#:
+#: Nothing caught it: no test asserted an analyst could approve, and none asserted they could not,
+#: so the hole was untested in both directions. Found by a read-only reviewer comparing the route's
+#: behaviour with the accepted decision record rather than with the code around it.
+#:
+#: The distinction the old name blurred is the one that matters: *recording* a decision and
+#: *authorising a financial effect* are different rights, and the approval gate is worth nothing if
+#: the weaker role holds the stronger one.
+AUTHORISATION_ROLES: Final[frozenset[Role]] = frozenset({Role.CONTROLLER})
 
 #: Roles permitted to authorise a treatment **different** from the one proposed.
 #:
@@ -105,8 +128,17 @@ class Principal:
     id: str
     role: Role
 
-    def may_approve(self) -> bool:
-        return self.role in APPROVAL_ROLES
+    def may_record_decision(self) -> bool:
+        """Whether this principal may record any decision, including a rejection."""
+        return self.role in DECISION_ROLES
+
+    def may_authorise(self) -> bool:
+        """Whether this principal may record a decision that authorises a posting.
+
+        Separate from :meth:`may_record_decision` because a rejection and an approval are not the
+        same act. Collapsing the two is the defect :data:`AUTHORISATION_ROLES` records.
+        """
+        return self.role in AUTHORISATION_ROLES
 
     def may_edit_treatment(self) -> bool:
         return self.role in EDIT_ROLES

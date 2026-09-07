@@ -637,17 +637,35 @@ def _proposal_constructors(source: str) -> set[str]:
     increment it was supposed to be watching.
     """
     tree = ast.parse(source)
+
+    # Resolved **per import statement**, not by asking whether the file mentions `db.control`
+    # anywhere. The Pydantic contract shares the class name and is constructed at every provider
+    # boundary by design, so the only interesting binding is one that came from the ORM module.
+    #
+    # The previous version decided ownership with a whole-file substring — "does this source
+    # mention db.control?" — and then attributed *any* `TreatmentProposal(` call to the ORM. That
+    # was fine while no module both imported something else from `db.control` and constructed the
+    # schema, and `demo/seed.py` is the first that does: it imports `ApprovalDecision` from the ORM
+    # module and builds an `llm.schema.TreatmentProposal` in a stand-in proposer. The fence
+    # reported it as an ORM write, which it is not. A guard that cannot tell the two apart would
+    # eventually be silenced by someone with a legitimate case, and a silenced fence protects
+    # nothing.
     aliases = {
         alias.asname or alias.name.rsplit(".", 1)[-1]
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom | ast.Import)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "ledger_exception_control_plane.db.control"
         for alias in node.names
-        if alias.name.rsplit(".", 1)[-1] == "TreatmentProposal"
+        if alias.name == "TreatmentProposal"
     }
-    # The Pydantic contract shares the class name and is constructed at the provider boundary by
-    # design, so only the module that imports the *ORM* one is interesting.
-    if "ledger_exception_control_plane.db.control" not in source:
-        aliases = set()
+    # `import ledger_exception_control_plane.db.control` followed by attribute access is the other
+    # shape, and it is caught because `_constructed` records the attribute name.
+    if any(
+        isinstance(node, ast.Import)
+        and any(alias.name == "ledger_exception_control_plane.db.control" for alias in node.names)
+        for node in ast.walk(tree)
+    ):
+        aliases.add("TreatmentProposal")
     return {name for name in _constructed(source) if name in aliases}
 
 
@@ -671,6 +689,26 @@ def _proposal_constructors(source: str) -> set[str]:
             "from ledger_exception_control_plane.llm.schema import TreatmentProposal\n"
             "value = TreatmentProposal()\n",
             False,
+        ),
+        (
+            "the schema, in a module that also imports something else from the ORM module",
+            "from ledger_exception_control_plane.db.control import ApprovalDecision\n"
+            "from ledger_exception_control_plane.llm.schema import TreatmentProposal\n"
+            "value = TreatmentProposal()\n",
+            False,
+        ),
+        (
+            "the row, in a module that also imports the schema",
+            "from ledger_exception_control_plane.llm.schema import ProposalPrompt\n"
+            "from ledger_exception_control_plane.db.control import TreatmentProposal\n"
+            "row = TreatmentProposal()\n",
+            True,
+        ),
+        (
+            "the ORM module imported whole, then the row constructed through it",
+            "import ledger_exception_control_plane.db.control\n"
+            "row = ledger_exception_control_plane.db.control.TreatmentProposal()\n",
+            True,
         ),
     ],
 )

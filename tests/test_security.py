@@ -12,7 +12,8 @@ import json
 import pytest
 
 from ledger_exception_control_plane.security import (
-    APPROVAL_ROLES,
+    AUTHORISATION_ROLES,
+    DECISION_ROLES,
     EDIT_ROLES,
     OPERATIONS_ROLES,
     Principal,
@@ -184,17 +185,50 @@ def test_only_the_controller_may_authorise_an_edit() -> None:
     assert Principal("o", Role.OPERATOR).may_edit_treatment() is False
 
 
-def test_the_operator_holds_no_approval_right() -> None:
+def test_the_operator_holds_no_decision_right() -> None:
     """The separation the whole design rests on, asserted as a property rather than a comment."""
-    assert Role.OPERATOR not in APPROVAL_ROLES
-    assert Principal("o", Role.OPERATOR).may_approve() is False
+    assert Role.OPERATOR not in DECISION_ROLES
+    assert Principal("o", Role.OPERATOR).may_record_decision() is False
+    assert Principal("o", Role.OPERATOR).may_authorise() is False
     assert Principal("o", Role.OPERATOR).may_work_operations_queues() is True
 
 
-def test_no_approval_role_may_work_the_operations_queues() -> None:
+def test_only_the_controller_may_authorise_a_posting_and_the_analyst_may_only_reject() -> None:
+    """**The hole this test exists because of, pinned in both directions.**
+
+    ADR-056 §2 records in a table that an analyst *may not approve*. The code disagreed: a single
+    ``APPROVAL_ROLES`` containing both roles was checked once, with only ``EDITED`` narrowed, so an
+    analyst could record an ``APPROVED`` decision and authorise a ledger posting.
+
+    Nothing caught it, and the reason is the shape of the tests that were here: one asserted the
+    *operator* could not approve, and none asserted anything about the analyst either way. An
+    untested permission is an ungoverned one, so both directions are asserted below — the right the
+    analyst holds as well as the one they do not.
+    """
+    analyst = Principal("a", Role.ANALYST)
+    controller = Principal("c", Role.CONTROLLER)
+
+    assert frozenset({Role.CONTROLLER}) == AUTHORISATION_ROLES
+
+    # The analyst may act — a rejection is a decision, and it is theirs to record.
+    assert analyst.may_record_decision() is True
+    # And may not authorise money to move.
+    assert analyst.may_authorise() is False
+
+    assert controller.may_record_decision() is True
+    assert controller.may_authorise() is True
+
+    # Every role that may authorise may also record; the converse must not hold, or the two rights
+    # have collapsed back into one and this test is measuring nothing.
+    assert AUTHORISATION_ROLES < DECISION_ROLES, (
+        "authorisation must be strictly narrower than recording a decision"
+    )
+
+
+def test_no_decision_role_may_work_the_operations_queues() -> None:
     """The other direction. A controller who could also replay a dead letter would be able to
     authorise a posting and then drive it, which is the same collapse from the other side."""
-    assert APPROVAL_ROLES.isdisjoint(OPERATIONS_ROLES)
+    assert DECISION_ROLES.isdisjoint(OPERATIONS_ROLES)
     assert Principal("c", Role.CONTROLLER).may_work_operations_queues() is False
     assert Principal("a", Role.ANALYST).may_work_operations_queues() is False
 

@@ -75,7 +75,10 @@ from ledger_exception_control_plane.operations.approval import (
     RefusalReason,
     record_decision,
 )
-from ledger_exception_control_plane.operations.dispatcher import dispatch_once
+from ledger_exception_control_plane.operations.dispatcher import (
+    DispatchRefusedError,
+    dispatch_once,
+)
 from ledger_exception_control_plane.operations.recovery import (
     RecoveryRefusal,
     RecoveryRefusedError,
@@ -345,7 +348,9 @@ async def _decide(
             # reason keeps the real scope: there the authority was held and the refusal was about
             # something else.
             scope_granted=(
-                approval_scope(principal.role.value) if principal.may_approve() else NO_AUTHORITY
+                approval_scope(principal.role.value)
+                if principal.may_record_decision()
+                else NO_AUTHORITY
             ),
             principal=principal,
             correlation_id=await _correlation_of(session, exception_id),
@@ -1123,12 +1128,30 @@ async def inject_fault(
     inner = SimulatedLedger()
     faulted = FaultInjectingLedger(inner, fault=Fault.COMMIT_THEN_LOSE_RESPONSE)
 
-    result = await dispatch_once(
-        request.app.state.engine,
-        adjustment_id=adjustment.id,
-        adapter=faulted,
-        sent_at=dt.datetime.now(dt.UTC),
-    )
+    # A refusal here is the dispatcher working, not failing: it declines an operation that is
+    # already finished, already in flight, or whose last outcome was ambiguous — §13.5 forbids
+    # re-sending that last one, which is the whole guarantee. Returning 409 with the reason says
+    # so; the first version let the exception escape and the console got a 500 for a correct
+    # decision, which would have read as a broken demo instead of an enforced rule.
+    try:
+        result = await dispatch_once(
+            request.app.state.engine,
+            adjustment_id=adjustment.id,
+            adapter=faulted,
+            sent_at=dt.datetime.now(dt.UTC),
+        )
+    except DispatchRefusedError as refusal:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "dispatch_refused",
+                "message": str(refusal),
+                "hint": (
+                    "this posting has already reached a state the dispatcher will not send "
+                    "from; seed the demonstration again for a posting that is awaiting dispatch"
+                ),
+            },
+        ) from refusal
 
     return InjectedFaultReport(
         adjustment_id=adjustment.id,
