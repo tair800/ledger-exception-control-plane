@@ -67,8 +67,18 @@ fail. The third is a gap that opens as soon as the operations console ships.
 
 `release_command = "alembic upgrade head"` runs inside the deployed image. The root `Dockerfile`
 copies `pyproject.toml`, `uv.lock`, `README.md`, `LICENSE` and `src/` and nothing else, so the
-release machine has no `alembic.ini` and no migration scripts, and the release aborts. Required
-change, after the `COPY src/ ./src/` line:
+release machine has no `alembic.ini` and no migration scripts.
+
+Confirmed against the built image rather than inferred — `/app` contains exactly
+`LICENSE README.md pyproject.toml src uv.lock`, and although the `alembic` binary is installed at
+`/app/.venv/bin/alembic`, running it produces:
+
+```
+FAILED: No 'script_location' key found in configuration.
+```
+
+The release aborts on that, which means the *first* deploy fails and the app is never released.
+Required change, after the `COPY src/ ./src/` line:
 
 ```dockerfile
 COPY alembic.ini ./
@@ -490,6 +500,33 @@ The ceiling itself is a payment decision and stays open. What the configuration 
 a spending limit on both accounts before the first deploy.
 
 ---
+
+## What has actually been verified, and what has not
+
+The distinction matters more here than anywhere else in this repository, because everything on this
+page describes something that has never run in the environment it is written for.
+
+**Verified, by running it.** The container image builds from the root `Dockerfile`. Alembic applies
+every migration from zero to head against a real PostgreSQL 16 and the fixture corpus loads into a
+database named `lecp_demo` — 10 ledger entries, 2 settlement batches, 17 settlement lines. The
+built image, run with `LECP_ENVIRONMENT=production` against that database, a real Redis and a real
+principal registry, passes all seven post-deploy checks: liveness, correlation-id echo,
+correlation-id sanitising, readiness reporting both dependencies healthy, the queue refusing an
+anonymous caller with `401` and `WWW-Authenticate: Bearer`, an authenticated queue read, and `/docs`
+answering `404`. The smoke checks are falsifiable — ten planted deployment faults, each caught by
+the check that exists for it. The secret detector is falsifiable — nine credible credentials
+reported and nine legitimate placeholders not. Every workflow file parses, and P1 above was
+confirmed by inspecting the image rather than by reading the Dockerfile.
+
+**Not verified, and not verifiable from here.** No Fly app or Neon project exists, so nothing about
+Fly's release-command mechanism, its health checks, machine suspend and resume, the GHCR pull path,
+or Neon's connection behaviour has been exercised — including whether `8.0` is the right readiness
+bound for a resuming Neon compute, which is a considered starting point and not a measurement. The
+GitHub Actions jobs have never run: `workflow_run` only fires for workflow files on the default
+branch, so the deploy workflow will first execute after this reaches `main`. The queue read was
+verified against a seeded database containing **no exceptions** — seeding loads settlement data, and
+exceptions are produced by running the ingest, match and classify stages — so the check exercised
+authentication, the database query and serialisation, and returned an empty list.
 
 ## Verifying deployment changes without deploying
 
