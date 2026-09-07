@@ -3643,6 +3643,327 @@ to catch a wrong label table unable to catch anything.
 Recorded as **OPEN-15** rather than left as a comment, because it is owner action and nothing else
 unblocks it.
 
+## ADR-061 — Recording a decision and authorising a posting are different rights (M5.1 correction)
+
+**Status:** Accepted. Corrects a defect in the approval gate delivered at 5.1. Resolves no OPEN
+item.
+
+### The defect
+
+ADR-056 §2 records the role allocation in a table. The analyst row reads: may *"read the queue;
+reject (authorises nothing); request an edited treatment"*; may not *"approve; authorise an edit"*.
+
+The code allowed the first of those two prohibitions. `APPROVAL_ROLES` held both `ANALYST` and
+`CONTROLLER`; `record_decision` checked `may_approve()` once at the top; only `EDITED` was narrowed
+further. So **an analyst could record an `APPROVED` decision and authorise a ledger posting** — the
+approval gate enforceable by the role it exists to constrain.
+
+It shipped at 5.1 and survived four increments. Nothing caught it, and the shape of the tests is
+why: one asserted the *operator* could not approve, and none asserted anything about the analyst in
+either direction. **An untested permission is an ungoverned one.**
+
+### The correction
+
+One predicate became two, because one right had been standing in for two:
+
+- `DECISION_ROLES` = {analyst, controller} — may record a decision at all. The analyst belongs here
+  because a rejection *is* a decision: it closes the exception, authorises nothing, and must be
+  attributable. A role that could not record one would escalate every refusal to a controller,
+  which is the bottleneck the analyst role exists to remove.
+- `AUTHORISATION_ROLES` = {controller} — may record a decision that authorises a posting, meaning
+  `APPROVED` or `EDITED`.
+
+`_authorises_a_posting` is a function over the decision enum rather than a set literal at the call
+site, so a fourth decision cannot be added without someone answering the question about it. The gate
+is enforced in `record_decision`, not at the route: the route is one caller and that function is the
+gate.
+
+The test now pins both directions and asserts `AUTHORISATION_ROLES` is **strictly** narrower than
+`DECISION_ROLES`. If the two ever collapse back into one set the assertion fails, rather than the
+test quietly measuring nothing again.
+
+### Why the finding is worth recording beyond the fix
+
+It was found by comparing the code with the **decision record**, not with the code around it. Every
+local reading of `record_decision` was self-consistent; the disagreement was with a table in
+`DECISIONS.md` that no test referenced. That is a category of defect this repository is unusually
+exposed to, because it writes its reasoning down: a written decision nothing enforces is a decision
+that can be silently reversed by a plausible-looking edit.
+
+`GET /api/v1/me` returns the four capability booleans **the server will enforce** rather than a role
+name, and this defect is why. A console computing authority from a role name would have rendered the
+correct controls while the server allowed the wrong ones, which hides the defect instead of showing
+it. The console's own role table *was* correct and reported the mismatch, which is how the hole
+surfaced.
+
+---
+
+## ADR-062 — The operations console, and the three things it is not allowed to do (M7)
+
+**Status:** Accepted. Delivers 7.1 and 7.2. Resolves no OPEN item.
+
+Next.js 15 + React 19 + TypeScript, `frontend/`. No component library, no state-management library,
+no design system, six routes. The console is small on purpose: §7.1's exit criterion is that
+provenance for any exception is reachable in two clicks, and a larger surface would not have made
+that truer.
+
+### 1. The browser never holds the bearer token
+
+Validated at sign-in and kept in an httpOnly `SameSite=Strict` cookie; the page talks only to its
+own origin and Next.js route handlers forward server-side. Two consequences worth stating: no page
+script can read a credential that authorises financial writes, and the control plane needs **no CORS
+allowlist** for the console to work. `cors_allow_origins` exists for other clients and defaults to
+empty.
+
+### 2. The console performs no arithmetic on a monetary value
+
+It renders `adjustment.amount` as the string the API returned. No client-side totals, no conversion,
+no percentages. A test greps the source for arithmetic applied to amount fields and a lint rule bans
+numeric coercion — because §7's boundary is worth nothing if the last hop re-derives the number, and
+a formatter that multiplies by 100 is how that happens.
+
+### 3. It asks the control plane what it can do
+
+The console reads the published `/openapi.json` path list and enables each control when its route
+appears; a disabled control carries the reason. That design was written when four of the endpoints it
+needed did not exist, and it earned itself twice over:
+
+- When the endpoints shipped, **five path strings** turned four controls on with no change to any
+  component.
+- The paths the console had guessed were not the ones built. A negative test now pins the
+  reconciliation, so reverting the probe to the guessed spelling fails a test rather than silently
+  disabling two working controls.
+
+### 4. The fault-injection control, and the defect it contained
+
+7.2's exit criterion is that a visitor can trigger a crash and see that no second adjustment is
+posted. `POST /api/v1/demo/exceptions/{id}/inject-fault` dispatches through 4.5's fault-injection
+port with `COMMIT_THEN_LOSE_RESPONSE`, so what a visitor watches is the mechanism the kill test
+measures rather than a dramatisation of it.
+
+It returns **404, not 403**, when `demo_mode` is false. A 403 confirms the route exists and invites
+someone to look for the credential; 404 says there is nothing there, which is true. And it requires
+operations authority, because injecting a fault dispatches a financial write.
+
+**The first version built a fresh ledger per injection**, so that a visitor's count was their own
+demonstration rather than a running total. That also destroyed the only thing making a bounded
+re-send safe: press the button twice inside the declared idempotency window and §13.5 clause 3
+*permits* the second send, but a ledger with no memory of the first cannot suppress it. Both
+responses reported an applied count of one while the money had moved twice — the exact failure the
+endpoint exists to disprove, reachable from a button.
+
+Found by a test that expected a refusal and got a success. The success was correct; the endpoint was
+not. It now wraps the instance's own ledger and reports the applied count **per operation
+identifier** with the received count as a **delta across the call**, so the numbers stay this
+operation's without giving up the suppression. The test asserts the stronger property: press it
+twice and the ledger has applied the operation once.
+
+### 5. What the console tells a visitor about itself
+
+`GET /api/v1/meta` returns `ledger_adapter`, and the console displays it. A visitor is told, in the
+console, that the guarantee they are watching rests on a simulated ledger written in this repository
+(OPEN-11). A demo that quietly implied a real provider would be the overclaim this project exists to
+avoid.
+
+---
+
+## ADR-063 — The evaluation identity migration, and what an offline gate may claim (M6.2, M6.3)
+
+**Status:** Accepted. Delivers 6.2 and 6.3 at portfolio-MVP level. **Does not resolve OPEN-6**, and
+records why. Opens nothing.
+
+### 1. One identifier namespace, because there had been two
+
+The canonical golden set and the cassette-covered subjects both contained thirteen exceptions and
+shared **zero** identifiers. `corpus_subjects()` keys each exception by the corpus row's own `id`;
+`build_golden_set` derived its own from the content hash and line number. Every evaluation join
+across the two was therefore empty, and nothing noticed because nothing joined them yet.
+
+Unified on the **corpus row id**, because that is the namespace the committed cassettes are keyed
+against and the one the real pipeline's subjects carry. The golden set now takes its lines from the
+corpus rows and no longer passes through `interpret()`; a test asserts the corpus rows and
+ingestion's parse of the same bytes agree field for field, so the property that stage was providing
+is now checked directly rather than assumed.
+
+All 250 identifiers were regenerated, and the schema version bumped to `2` — the field list is
+unchanged and the *meaning of the key* is not. A join-cardinality test now asserts the overlap is
+**total**, not merely non-zero: it fails unless every cassette-covered subject has a golden record.
+
+A deleted comment claimed the old derivation mirrored `demo/snapshot.py`. It did not — different
+namespace, different string — and the two never agreed. Recorded because a false comment about an
+identifier derivation is how two id spaces come to exist in one repository.
+
+### 2. The gate is a reproduction gate, and says so in its own artefact
+
+The committed cassettes are **synthesised**, and their treatments are assigned **round-robin by
+position**. Agreement with the golden labels is therefore arithmetic over two orderings. It says
+nothing whatever about a model's judgement.
+
+So 6.2's gate compares a replay of the committed cassette through the shipped proposal path against
+a committed baseline, exactly, and fails on any difference. What it catches is real: a regression in
+evidence assembly, prompt construction, request fingerprinting, response parsing, the golden labels
+or the scorer's arithmetic. What it is not is a quality threshold, and the baseline file says that in
+plain words above its own numbers.
+
+**This is why OPEN-6 stays open.** An accuracy threshold a build should fail on cannot be chosen
+before a real capture exists, and inventing one would put a fabricated number in a mandatory gate.
+
+### 3. The three-arm comparison publishes `NOT MEASURED` where nothing was measured
+
+The deterministic matcher arm is measured and real: pair precision, recall on the matchable set, and
+a p95 per line described as wall clock on the machine that produced it. Its USD per 1,000 lines is
+`0`, labelled *structural, not measured* — compute and database cost are not measured and are not
+claimed to be zero.
+
+The LLM-as-matcher arm reports `NOT MEASURED` for accuracy, cost and p95, each with the reason: no
+capture exists; cost is computed from provider usage fields and never estimated, and the cassettes
+carry no usage block; a replayed cassette returns in microseconds and a provider round trip does not.
+The hybrid arm measures its deterministic half and marks the rest.
+
+The table is **not** committed, because one column is wall clock and a committed copy would fail a
+drift check on every machine. A test asserts every non-latency cell is identical across two runs.
+
+### 4. The human-label packet exists; the labels do not
+
+§20 requires a human-labelled hold-out slice. The slice is frozen and hashed, the packet is generated
+as CSV plus a JSONL companion, and the importer refuses an unknown id, a duplicate, an unknown
+label, a missing label or a slice-hash mismatch. Synthetic labels are permitted **only** to test the
+importer's mechanics and are marked as such; a test proves a synthetic-marked import cannot be
+presented as human.
+
+Every committed record still says `label_source: derived`, and a test asserts it. **OPEN-15** is
+unchanged: only the mechanism shipped.
+
+### 5. A CRLF defect worth propagating
+
+`write_text(..., encoding="utf-8")` uses platform newlines, so regenerating the golden set on Windows
+produced CRLF where CI produces LF. Every drift check passed anyway, because `read_text` translates
+them back — so "same seed, same bytes" was not true of the bytes on disk. Fixed with
+`newline="\n"` and a byte-level test. The same pattern is worth auditing in any generator that
+writes a committed artefact.
+
+---
+
+## ADR-064 — Observability conventions, and the attributes §18 cannot truthfully carry (M8.1)
+
+**Status:** Accepted. Delivers 8.1's conventions, metrics and redaction. **Does not discharge §18's
+exit criterion**, and says so. Resolves no OPEN item.
+
+### 1. Conventions as committed data, in a package that degrades to nothing
+
+`CLAUDE.md` names "OpenTelemetry → self-hosted Langfuse conventions" as one of five things this
+repository owes the portfolio, so the span names, attribute keys and metric names are **closed enums
+and `Final` tuples**, not string literals at call sites. Nine spans are §11's audit verbs prefixed
+`lecp.`; two more cover §18 flows that emit no audit event. A test asserts the two sets agree in both
+directions.
+
+The sink is injected behind a protocol with a no-op default, so the package imports and its 81 tests
+pass **with no OpenTelemetry dependency installed**. Adding the exporter is three dependencies and a
+bootstrap line; not adding them costs nothing.
+
+`correlation_id` is deliberately **unprefixed**, because it is spelled identically in `log.py`, in
+`audit_event` and on spans — it is the join key, and a prefix on one of the three would break the
+join for a reader.
+
+### 2. Two attributes are recorded as absent, by name, with a reason
+
+§18 asks for *"token usage, estimated cost and processing region"* on every model call. **No model
+call is made anywhere in this repository.** So `gen_ai.usage.input_tokens`,
+`gen_ai.usage.output_tokens`, `gen_ai.usage.cost`, `gen_ai.processing.region` and `gen_ai.agent.id`
+are declared absent with a recorded reason and emitted as `lecp.not_recorded` — the same mechanism
+`provenance()` uses for §11's two null fields (ADR-058).
+
+The recorder **raises** for a field marked unrecorded with no reason, and no attribute key in the
+vocabulary contains `usage`, `token`, `cost`, `region` or `jurisdiction`. So a later call site cannot
+populate one without justifying it, which is stronger than a convention.
+
+### 3. One correction to §18
+
+*DLQ depth* is listed under counters and is a level: a counter named "depth" can only rise. It is a
+**gauge**, and the monotonic half is a separate counter. Recorded rather than silently implemented,
+because the specification is the authority and this is a disagreement with it.
+
+### 4. Redaction is structural where it can be
+
+No attribute key in the vocabulary could carry a merchant identifier, proved by running every member
+through the fence. Value-level detection is **not** attempted, so the guarantee is structural rather
+than semantic — stated as a limit, not implied as coverage. Merchant references are **dropped**, not
+pseudonymised: a stable pseudonym for a low-entropy identifier is a re-identification risk nobody has
+decided to accept.
+
+### 5. What is not discharged
+
+§18's exit criterion is *"a single exception traceable end to end in Langfuse."* That needs the
+dependency, a provider bootstrap and one observed run against a collector. The OpenTelemetry sink is
+tested against a hand-written double of the API surface it calls, which proves the adapter's logic
+and **not** interoperability with the real SDK. The Compose block for self-hosted Langfuse is
+written and reviewed but has never been started.
+
+---
+
+## ADR-065 — Deployment posture: everything but the deploy (M10.1)
+
+**Status:** Accepted. Delivers 10.1's engineering. **Nothing is deployed**, and no cloud resource
+exists. Narrows OPEN-10.
+
+### 1. The pipeline is green today and becomes live when secrets arrive
+
+`preflight → tests → security → build → deploy staging → staging smoke → production approval →
+deploy production → production smoke`.
+
+Deploy jobs are **gated on the presence of their secrets** and *skip with a notice* when absent —
+never fail. A missing credential is not a broken build, and a mandatory job that goes red because
+nobody has signed up for Fly yet would train everyone to ignore red.
+
+The `secrets` context is not readable in a job-level `if:`, so a `guard` job resolves presence in a
+step and publishes booleans. No token value enters the environment; the expressions evaluate to
+`"true"`/`"false"` first.
+
+**Build once, deploy twice.** One image per commit, identified downstream **by digest**, so
+production deploys the exact artifact staging smoke-tested rather than a rebuild of the same source.
+
+Production approval is a GitHub Environment required-reviewer rule, which is the one part of the
+pipeline that cannot be declared in YAML and is therefore documented as a manual step.
+
+### 2. Migrations are a release command, and the image lacked them
+
+A process that migrates on boot races every replica for the same DDL, and on a rolling deploy the old
+and new schema are live at once. So migrations run as a release command — which failed, because the
+image contained neither `alembic.ini` nor `migrations/`.
+
+Found by building the image and running it, not by reading the Dockerfile: the release command exits
+with `No 'script_location' key found in configuration` and the first deploy never releases. Both,
+plus the fixture corpus, now travel with the image, and the fix was verified by running
+`alembic current` inside it against real PostgreSQL.
+
+### 3. There is no worker, and the deployment must not invent one
+
+A guard test forbids a `workers` module at any depth: the retry and reconciliation passes are
+bounded one-shot passes, not daemons, and what drives them is a deployment decision. So the
+"worker deployment" is a **scheduled invocation** of those bounded passes. Getting this wrong would
+have meant deploying a process the repository deliberately does not have.
+
+### 4. The security stage reports what it checked, and claims nothing more
+
+Tracked-secret detection, a dependency vulnerability scan over the exported runtime set, an unsafe
+config check, a frontend exposure check that passes cleanly while the directory is absent and does
+real work once it appears, and the repository's own authorization tests. Each detector has a
+falsifiability battery: nine credible credentials fire, nine legitimate placeholders do not.
+
+No `continue-on-error` on any mandatory job. The dependency audit can turn CI red with no repository
+change when a new advisory lands — deliberate, with the documented response being an upgrade or a
+recorded ignore with a reason.
+
+**No claim of being vulnerability-free is made anywhere.**
+
+### 5. Redis is provisioned for a probe and nothing else
+
+`LECP_REDIS_DSN` is read by the readiness probe and by no other module. A deployment must therefore
+provision Redis to satisfy a health check for a dependency nothing uses, or `/readyz` returns 503 and
+every smoke test fails. Recorded as a real cost of an honest readiness probe; removing the probe and
+the setting until something uses Redis is a repository change rather than a deployment one, and is
+not taken here.
+
 ---
 
 # Open decisions

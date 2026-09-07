@@ -17,47 +17,32 @@ adjustments, **dispatched at most once per operation identifier**, with an effec
 Deterministic matching clears the bulk. The model proposes a *treatment* for the residual — never an
 amount.
 
-**Status: implementation in progress.** M0 (scaffold, stack), M1 (schema, fixture corpus) and all
-of M2 (ingestion, deterministic matching, residual classification, and the deterministic adjustment
-calculator) are complete; **increment 3.1 — the treatment-enum closure gate — has passed** (ADR-048);
-**3.2 delivered the provider port and the closed proposal contract**, with OPEN-5 resolved to
-Anthropic and OpenAI (ADR-049); **3.3 delivered deterministic evidence assembly, prompt construction
-and the proposal flow**, recording proposals with their model id, version and prompt hash (ADR-050);
-**3.4 delivered the cassette record/replay harness** — the whole corpus replays offline through
-both adapters, from a committed file, with no credential (ADR-051); **4.1 delivered claim
-locking and the retry-independent operation identifier**, the first increment of the reliability
-phase (ADR-052); **4.2 delivered the transactional outbox and the capability-declaring
-ledger adapter** — the intent written in the state change's own transaction, a write-ahead attempt
-record before every send, and a port whose guarantees are declared as data, proven by a conformance
-run and branched on rather than assumed (ADR-054); **4.3 delivered bounded retry, the
-dead-letter queue and the replay CLI** — an enumerated transport classifier whose default is
-`UNKNOWN`, two independent bounds on every retry, and a replay that re-reads the persisted
-instruction rather than rebuilding one (ADR-055); **5.1 delivered the human approval gate with role
-separation**, resolving OPEN-8 with a registry of hashed bearer tokens and moving the
-countersignature and single-use rules into database constraints (ADR-056); **4.4 delivered
-`UNKNOWN` semantics, bounded reconciliation and manual recovery** — the capability branch of §13.5
-executed rather than described, with both re-send bounds enforced, a negative answer trusted only
-after N consecutive observations and both declared windows, monotonic transitions held by triggers,
-the supersession interlock, and an operator queue that carries its own evidence procedure (ADR-057);
-and **5.2 has delivered audit-event contract v1** — all ten verbs emitting inside the transaction of
-the state change they describe, a closed `scope_granted` vocabulary, a correlation id derived from
-the ingested artefact rather than threaded through, and a `provenance()` read that answers §5.2's
-five questions while keeping what the trail attests apart from what the domain tables hold
-(ADR-058); and **4.5 has discharged the kill-test gate — the flagship claim is proven rather than
-asserted**. Fifty-four scenario runs against real PostgreSQL, every §19 scenario on both branches
-across all three adapter capability configurations: `naive/` commits the same financial effect twice
-in five of the seven scenarios, `main` applies at most once in all twenty-one cells, and every one
-of the forty-two observed cells matches an expectation declared before the run. Faults are a closed
-enum injected through a port, the results table is generated from what the run recorded at the
-ledger, and a five-mutant battery plants the ways the gate could have been green and worthless
-(ADR-059); and **6.1 has delivered the golden set and the treatment-proposal scorer** — 250
-labelled exceptions produced by running the shipped deterministic stages over a seeded corpus, with
-labels derived from what the classifier concluded and what the account policy configures rather than
-from the corpus's own answer key, and a scorer that reports §20's three figures **plus** the
-constant-answer baseline, the accuracy on the 36 priceable records and the abstention rate split by
-whether escalating was correct. 85.6% of the set is one label, so a model that decides nothing scores
-85.6%, and every one of those additions exists to stop that number being publishable on its own
-(ADR-060).
+**Status: PORTFOLIO MVP COMPLETE.** Every repository-side engineering task is done; three items
+are pending owner action and none of them is code. `PROJECT_STATUS.md` is the authority on exactly
+what exists, and `DECISIONS.md` on why.
+
+The deterministic core, the reliability layer, the human gate and the audit trail were delivered
+across M0–M5 (ADR-048 to ADR-058). **The 4.5 kill-test gate then passed** — 52 scenario runs against
+real PostgreSQL, both branches, all three adapter capability configurations: `naive/` commits the
+same financial effect twice in five of the seven scenarios, `main` applies at most once in all
+twenty-one cells, and every one of the forty-two observed cells matches an expectation declared
+before the run (ADR-059). It is now a standing CI step rather than a one-off measurement.
+
+Since then: **6.1 to 6.3** delivered the golden set, the scorer and the evaluation gate — with the
+identity migration that made the evaluation joins mean anything, and a scorer that reports the
+constant-answer baseline beside every accuracy figure because 214 of 250 labels are `escalate`
+(ADR-060, ADR-063). **M7** delivered the operations console, which never lets the bearer token reach
+the browser, performs no arithmetic on a monetary value, and makes §19.1 reachable from a button
+(ADR-062). **8.1** delivered the observability conventions, §18's metrics and redaction, degrading to
+a no-op with no SDK installed (ADR-064). **10.1** delivered the gated deployment pipeline, validated
+against the built image and real PostgreSQL, deploying nothing (ADR-065). **11.1** rewrote the README
+recruiter-first and added the two documentation checks §11.1 names.
+
+**A critical authorisation defect was found and fixed in that window.** `APPROVAL_ROLES` held both
+`ANALYST` and `CONTROLLER`, so an analyst could authorise a ledger posting — contradicting ADR-056's
+own table, which states they may not. It shipped at 5.1 and survived four increments because no test
+asserted anything about the analyst in either direction. Recording a decision and authorising a
+posting are now separate rights (ADR-061).
 
 The model layer still makes **no live call**: no provider SDK is a dependency, nothing under `llm/`
 imports an HTTP client, and no transport that speaks HTTP exists — the flow is exercised entirely
@@ -107,9 +92,14 @@ of §11's ten fields are deliberately null here, with the reason recorded rather
 quietly left blank — this system is not an agent, and it makes no model call whose region could be
 recorded.
 
-What still does not exist is 6.2 onwards. There is also no wired pipeline: nothing calls the stages
-in sequence, which is M7's orchestration.
-`PROJECT_STATUS.md` is the authority on exactly what exists.
+**What is pending owner action, and must be reported as pending:** live model quality, cost and
+latency are **NOT MEASURED** (no credential, and the committed cassettes are synthesised); the
+human-labelled hold-out slice is **PENDING OWNER LABEL REVIEW** (OPEN-15); and live deployment is
+**PENDING OWNER CLOUD CREDENTIALS** (nothing is deployed).
+
+**What is genuinely absent:** no orchestration wires the stages into a running service — the demo
+seeder composes them and says so; §18's Langfuse trace is not discharged; and there is no real
+ledger adapter (OPEN-11). `PROJECT_STATUS.md` is the authority on exactly what exists.
 
 ---
 
