@@ -6,7 +6,8 @@
         money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
         operations-verify dispatch-verify ledger-verify retry-verify approval-verify \
         reconcile-verify audit-verify chaos-verify chaos-table chaos-check \
-        golden golden-check eval-verify
+        golden golden-check eval-verify \
+        smoke-local smoke-selftest secret-scan deploy-check
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -261,3 +262,25 @@ cassettes-check: ## Fail if the committed cassette has drifted from its builder
 
 cassette-verify: ## Prove the harness replays the whole corpus offline (no key, no network)
 	uv run pytest tests/test_cassette_harness.py -p no:cacheprovider --no-cov
+
+# --- deployment (M10.1) ---
+#
+# Nothing here deploys anything. These targets run the checks the pipeline runs, so a
+# deployment-affecting change can be verified before it is pushed rather than after.
+#
+# `smoke` (above) is a different thing and the names are worth keeping straight: that target runs
+# the *integration test suite* against the local stack. These run the *post-deploy* checks against
+# a URL, which is a much smaller question — is the thing at this address alive, ready, refusing
+# anonymous callers, and not leaking a connection string.
+
+smoke-local: ## Run the post-deploy smoke checks against the local stack (make up first)
+	uv run python scripts/smoke/smoke.py --base-url http://localhost:8000 --environment local
+
+smoke-selftest: ## Prove the smoke checks can still fail: 10 planted deployment faults
+	uv run python scripts/smoke/selftest.py
+
+secret-scan: ## Scan tracked files for credentials, unsafe config and frontend exposure
+	uv run python deployment/checks/scan.py all
+
+deploy-check: secret-scan smoke-selftest ## Everything the deployment lane gates on, no Docker needed
+	uv run --no-project --with pyyaml python -c "import pathlib, yaml; [yaml.safe_load(p.read_text(encoding='utf-8')) for p in pathlib.Path('.github/workflows').glob('*.yml')]; print('workflows parse')"
