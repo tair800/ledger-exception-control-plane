@@ -5,7 +5,8 @@
         fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify \
         money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
         operations-verify dispatch-verify ledger-verify retry-verify approval-verify \
-        reconcile-verify audit-verify chaos-verify chaos-table chaos-check
+        reconcile-verify audit-verify chaos-verify chaos-table chaos-check \
+        golden golden-check eval-verify
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -223,6 +224,28 @@ chaos-table: chaos-verify ## Render the §19 results table into README.md from t
 
 chaos-check: chaos-verify ## Fail if the results table in README.md has drifted from the run
 	uv run python -m tests.chaos.results verify
+
+# --- the golden set and the scorer (M6.1) ---
+#
+# §20's golden set is generated from a seeded corpus by running the shipped deterministic stages —
+# ingest, match, classify — and labelling what the classifier left. So it needs no database and no
+# model, and `golden-check` is cheap enough to run on every build.
+#
+# `eval-verify` runs the scorer's own suite. It is separate from `golden-check` because they fail
+# for different reasons: the first means the committed artefact is stale, the second means the
+# arithmetic or the reporting is wrong. A red build should not make a reader guess which.
+#
+# **None of these can reach a provider.** No module they import has an HTTP client in its
+# dependency graph, and no command takes a credential.
+
+golden: ## Regenerate the committed §20 golden set from the seeded corpus
+	uv run python -m tests.evaluation generate
+
+golden-check: ## Fail if the committed golden set has drifted from its generator
+	uv run python -m tests.evaluation verify
+
+eval-verify: ## Prove the golden set's schema and the scorer's arithmetic and reporting
+	uv run pytest tests/test_golden_set.py tests/test_scorer.py -p no:cacheprovider --no-cov
 
 # --- recorded cassettes (M3.4) ---
 #

@@ -3533,6 +3533,116 @@ proven nowhere would be. The fourth item on that list — a crash between the so
 response write — *is* driven here: it is what `COMMIT_THEN_LOSE_RESPONSE` models, and 4.4 also proves
 it from the other side in `test_a_crash_between_the_send_and_the_response_is_ambiguous_without_any_outcome`.
 
+## ADR-060 — What the golden set can measure, and the number it refuses to publish (M6.1)
+
+**Status:** Accepted. Establishes the labelled evaluation set and the scorer, and records the one
+thing 6.1 cannot do without owner action. Resolves no OPEN item; **opens OPEN-15**.
+
+### 1. Only four conditions are reachable, and only two are priceable
+
+§20 asks for *"labelled exceptions with expected treatment codes"*, which requires knowing the
+correct treatment for every condition the classifier can reach. Two committed tables decide it
+between them, and neither was written for this purpose:
+
+- `RULE_CLASSIFICATION` has four rules, so an exception can carry exactly four classes:
+  `chargeback_reversal`, `cross_period_refund`, `fee_split`, `unclassified`.
+- `DEMO_ACCOUNT_POLICY` configures an account for the first two and **deliberately nothing** for the
+  other two — a fee split is one movement reported across rows that `adjustment` cannot express, and
+  an unexplained residual is one nobody can say which account restates.
+
+So for half the reachable taxonomy the correct treatment is `ESCALATE`, and the account policy's
+silence is what says so rather than a view taken in the evaluation harness. `partial_capture` and
+`fx_rounding` are in the taxonomy and **no exception can carry them** (ADR-045); they get no label,
+and `label_for` raises rather than defaulting, because a label for a class nothing produces is a row
+that can never be scored.
+
+The two priceable labels are accounting decisions and are recorded as such:
+
+- **`chargeback_reversal` → `REBOOK`.** A reversal is an event of the period it settled in, not of
+  the period of the chargeback it reverses.
+- **`cross_period_refund` → `ACCRUE` where an originating period exists, `REBOOK` otherwise.** The
+  refund belongs to the period of the capture it reverses; without a single established counterpart
+  `ACCRUE` has nothing to accrue into and the calculator refuses, so labelling it `ACCRUE` anyway
+  would have made the "correct" answer one the system declines to price. This is the only label that
+  depends on a per-exception fact rather than on the class, which is why the set is generated per
+  exception rather than per scenario.
+
+### 2. The label is derived from what the system concluded, never from the corpus's answer key
+
+A golden record carries no `scenario_id`, no `intended_classification`, no awkwardness — and two
+tests enforce it, one on the record shape and one parsing the generator for the identifiers. The
+reason is not tidiness: the corpus *intends* `partial_capture` for two scenarios that the classifier
+assigns something else entirely, so a label read off the construction metadata would grade a model
+against a fact it was never shown.
+
+The generator is six steps, five of which are calls into shipped modules — `generate`, `interpret`,
+`match`, `classify`, and the counterpart-period derivation. Only the sixth is the harness's own
+judgement, and it lives in one small module that can be read in a minute.
+
+### 3. The harness lives under `tests/`, and that was the cheaper of two bad options
+
+An `evaluation` package in `src/` would have needed a third exemption added to the fixture-truth
+firewall, which already exempts `fixtures/` and `demo/`. Exempting a module from a firewall in order
+to build the thing the firewall exists to keep out is the wrong direction. `tests/cassette_builder.py`
+set the precedent for the same reason, and the Makefile records it in one line: *"A test artifact is
+made on the test side of that fence."*
+
+### 4. The set is 85.6% one label, and the scorer is built around that
+
+214 of 250 labels are `ESCALATE`. The proportion is **stable at every scale tried** — 84.6% at 200
+scenario instances, 85.8% at 600, 85.6% at 1200, 85.5% at 2400 — so it is structural rather than a
+sampling artefact, and no amount of corpus is going to fix it. It follows directly from §1: half the
+reachable taxonomy is unpriceable.
+
+That makes bare accuracy the most flattering and least informative number available. **A model that
+answers `ESCALATE` to every exception scores 85.6% while deciding nothing.** So the scorer reports:
+
+- the **constant-answer baseline**, computed from the labels themselves, and the lift over it — zero
+  for the constant, negative for anything worse;
+- **accuracy on the priceable records** — 36 of 250, the only ones where the answer changes what
+  happens, on which the constant scores 0.0%;
+- **abstention split by whether escalating was correct**, because §20's single rate averages a
+  virtue (abstaining on a fee split) with a failure (abstaining on a chargeback reversal);
+- the confusion matrix §20 asks for.
+
+A test drives the constant answerer against the committed set and asserts all three exposures,
+including the exact wording of the headline. A metric that cannot be embarrassed by a constant is
+not a metric.
+
+### 5. The scorer will not describe a synthesised run as a model measurement
+
+The committed cassettes are **synthesised** — their recorded bodies say *"Not produced by a model"* —
+and `CLAUDE.md` has carried that warning since 3.4 precisely because 6.3 publishes measurements
+produced from cassettes. A score over them is a real fact about the harness and no fact at all about
+a model.
+
+So `score()` takes a **required** `origin` with no default, and `Score.headline()` phrases itself
+accordingly: a synthesised run gets a sentence containing *"THIS IS NOT A MODEL MEASUREMENT"* and the
+word "agreement" rather than "accuracy". The wording is load-bearing, because whoever copies that
+line into a README will not copy a caveat from a docstring. A default `origin` would have been
+supplied by every caller that forgot it, and the wrong default presents a synthesised run as an
+evaluation result — which `CLAUDE.md` §10 forbids outright.
+
+`CassetteOrigin` has three members rather than two: a run with **no model in it** — 6.3's
+deterministic arm — is a real measurement of a real thing, and calling it "not captured" would lump
+it in with the synthesised cassettes it has nothing in common with.
+
+### 6. The hold-out slice is selected but not yet labelled by a human — OPEN-15
+
+§20 requires *"a human-labelled hold-out slice"*. The slice is selected deterministically by a fixed
+stride, so it is the same 25 records on every run and a reviewer can find them by eye; `LabelSource`
+carries `HUMAN` as a value; and **every committed record says `derived`**, because no person has
+confirmed one.
+
+A test asserts that — `test_no_record_claims_a_human_label_because_no_human_has_confirmed_one` — and
+it is written to fail on the day the owner confirms the slice, which is the correct direction for a
+test that pins a gap. Marking the records `human` without a human would be inventing provenance, and
+a fabricated label source is worse than the gap it hides: it would make the one part of §20 designed
+to catch a wrong label table unable to catch anything.
+
+Recorded as **OPEN-15** rather than left as a comment, because it is owner action and nothing else
+unblocks it.
+
 ---
 
 # Open decisions
@@ -3636,6 +3746,24 @@ configurations, so the *behavioural* half of this question is settled — the di
 degrade correctly when a capability is absent, and the results table states in its own footer that
 suppression under `ENFORCES_KEY` is performed by a simulated ledger written here. What remains is
 purely the vendor half: establishing a real provider's three declarations from its documentation.
+
+## OPEN-15 — Human confirmation of the golden set's hold-out slice
+
+**Must decide:** whether the two priceable label rules are accounting-correct, and whether the 25
+held-out records carry the right treatment. Both are recorded in `tests/evaluation/labels.py` with a
+stated reason per clause, so confirming them is a review rather than a labelling exercise from
+scratch.
+**The two judgements to confirm:** a `chargeback_reversal` is recognised in the period it settled
+(`REBOOK`), not back-dated to the chargeback it reverses; and a `cross_period_refund` with a known
+counterpart period belongs in that period (`ACCRUE`), not in the period the refund settled.
+**Why it cannot be resolved here:** §20 asks for a *human-labelled* slice. Marking the records
+`label_source: human` without a person would fabricate provenance, and a test asserts none of them
+claims it — see ADR-060 §6.
+**Minimum action:** read the 25 records in `tests/golden/treatment-golden.jsonl` where
+`"held_out": true`, confirm or correct the treatment, and say who confirmed and when. The mechanism
+to record it already exists.
+**Needed before:** 6.2's threshold is set against a model measurement. The deterministic arm and the
+gate machinery do not depend on it.
 
 ## OPEN-10 — Hosting cost ceiling and shutdown policy
 
