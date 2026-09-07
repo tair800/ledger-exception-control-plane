@@ -1169,10 +1169,12 @@ async def test_dispatch_creates_no_row_in_any_later_increment_table(engine: Asyn
             " FROM audit_event ORDER BY created_at"
         )
         assert [(row["tool"], row["outcome"]) for row in events] == [
+            # 5.2: enqueueing writes the adjustment, which is the `compute_amount` transition.
+            ("compute_amount", "success"),
             ("post", "quarantined"),
             ("post", "success"),
         ], "one attempt owes exactly two events: the send recorded, then the answer"
-        assert {row["scope_granted"] for row in events} == {"ledger:post"}
+        assert {row["scope_granted"] for row in events} == {"money:compute", "ledger:post"}
         assert {row["principal"] for row in events} == {"system"}
         assert {row["correlation_id"] for row in events} == {"lecp:scope"}, (
             "the correlation id must span ingestion to posting, so it is the exception's own"

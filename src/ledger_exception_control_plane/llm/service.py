@@ -30,7 +30,15 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from ledger_exception_control_plane.audit import (
+    correlation_for_exception,
+    emit,
+    model_identity,
+    scope_for,
+)
 from ledger_exception_control_plane.db.control import (
+    AuditOutcome,
+    AuditTool,
     Evidence,
     ExceptionClassification,
     ExceptionRecord,
@@ -135,6 +143,19 @@ async def propose_for_exception(
     outcome = await propose_treatment(proposer, subject, evidence)
 
     if outcome.status is not ProposalStatus.PROPOSED:
+        # **An unusable answer is still an event, and it needs its own transaction.** Nothing was
+        # persisted on this branch, so there is no state change to write the event alongside — but
+        # §11 requires the trail to say a model was asked and what came back, and `CitationError`'s
+        # own docstring has promised since 3.3 that "the reason survives into the audit trail".
+        # Without this, a provider that was unreachable all afternoon leaves no trace at all.
+        async with AsyncSession(db) as session, session.begin():
+            await _emit_proposal_event(
+                session,
+                subject=subject,
+                proposer=proposer,
+                outcome=outcome,
+                occurred_at=proposed_at,
+            )
         return ProposalRecord(
             outcome=outcome, evidence_ids=tuple(i.evidence_id for i in evidence.items)
         )
@@ -147,6 +168,13 @@ async def propose_for_exception(
             proposer=proposer,
             region_jurisdiction=region_jurisdiction,
             proposed_at=proposed_at,
+        )
+        await _emit_proposal_event(
+            session,
+            subject=subject,
+            proposer=proposer,
+            outcome=outcome,
+            occurred_at=proposed_at,
         )
 
     return ProposalRecord(
@@ -332,3 +360,59 @@ async def _persist_proposal(
         )
 
     return proposal_id
+
+
+#: How a proposal outcome reads in the audit trail. Total over :class:`ProposalStatus`, and a test
+#: proves it — with abstention split out, because §11 has an ``abstained`` outcome and the whole
+#: point of a closed treatment set with an ``escalate`` member is that declining to decide is a
+#: first-class answer rather than a failure.
+#:
+#: ``INVALID`` is ``quarantined`` rather than ``failure``: the provider answered, and the answer was
+#: held aside because it was malformed, outside the closed vocabulary, or cited evidence it was
+#: never shown. That is a different fact from "the provider could not be reached", and an auditor
+#: counting model failures should not be shown a refused answer as an outage.
+def _proposal_audit_outcome(outcome: ProposalOutcome) -> AuditOutcome:
+    """The audit reading of one proposal attempt. Raises rather than defaulting."""
+    if outcome.status is ProposalStatus.UNAVAILABLE:
+        return AuditOutcome.FAILURE
+    if outcome.status is ProposalStatus.INVALID:
+        return AuditOutcome.QUARANTINED
+    if outcome.status is ProposalStatus.PROPOSED:
+        return AuditOutcome.ABSTAINED if outcome.abstained else AuditOutcome.SUCCESS
+    raise ValueError(  # pragma: no cover - the enum is closed and mypy proves the branches
+        f"{outcome.status!r} has no audit reading; classify it rather than defaulting"
+    )
+
+
+async def _emit_proposal_event(
+    session: AsyncSession,
+    *,
+    subject: ExceptionSubject,
+    proposer: TreatmentProposer,
+    outcome: ProposalOutcome,
+    occurred_at: dt.datetime,
+) -> None:
+    """Record that a model was asked about this exception, and what came back (§11).
+
+    **``region_jurisdiction`` is left unset, and that is the honest value rather than an
+    oversight.** §11 defines it as *"processing region of the model call"*. No model call is made
+    anywhere in this repository: ``llm/port.py`` ships no transport, no provider SDK is a
+    dependency, and every committed cassette is marked synthesised. The region this function is
+    handed elsewhere is a *deployment declaration* about where calls would be processed, and
+    stamping it here would put a fact about a network request that never happened into the one
+    record an auditor trusts. It becomes populated when a live transport ships; until then the
+    field is null, and ADR-058 says so.
+
+    ``agent_identity`` is unset for a different reason, and permanently: §11 admits null *"for
+    deterministic steps"* and §2 states this system is **not** an agent. There is no agent to
+    identify — the model proposes a treatment code and takes no action.
+    """
+    await emit(
+        session,
+        tool=AuditTool.PROPOSE_TREATMENT,
+        outcome=_proposal_audit_outcome(outcome),
+        correlation_id=await correlation_for_exception(session, subject.exception_id),
+        occurred_at=occurred_at,
+        scope_granted=scope_for(AuditTool.PROPOSE_TREATMENT),
+        model=model_identity(proposer.model_id, proposer.model_version),
+    )

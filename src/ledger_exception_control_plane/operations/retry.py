@@ -54,11 +54,13 @@ from ledger_exception_control_plane.audit import (
     correlation_for_adjustment,
     emit,
     posting_audit_outcome,
+    scope_for,
 )
 from ledger_exception_control_plane.config import Settings
 from ledger_exception_control_plane.db.control import (
     Adjustment,
     AttemptState,
+    AuditOutcome,
     AuditTool,
     DeadLetter,
     DispatchState,
@@ -79,7 +81,6 @@ from ledger_exception_control_plane.ledger.transport import (
     classify_transport_failure,
 )
 from ledger_exception_control_plane.operations.dispatcher import (
-    POST_SCOPE,
     DispatchRefusedError,
     dispatch_once,
     outcome_code,
@@ -354,6 +355,7 @@ async def dead_letter(
     envelope: dict[str, object],
     attempts: int,
     mark_state: bool,
+    dead_lettered_at: dt.datetime,
 ) -> None:
     """Write the dead letter and, where the outcome left the row unfinished, mark it.
 
@@ -388,13 +390,46 @@ async def dead_letter(
         intent.state = DispatchState.DEAD_LETTERED
     await session.flush()
 
+    # §11 ``dlq``. `failure` on both routes here, and for both it is the truth: an exhausted retry
+    # ran out of an allowlisted transport failure where nothing was written, and a terminal
+    # rejection is the ledger declining. Neither is ambiguous — an ambiguous outcome never reaches
+    # this function, because §13.5 routes it to reconciliation or to an operator instead.
+    await emit(
+        session,
+        tool=AuditTool.DLQ,
+        outcome=AuditOutcome.FAILURE,
+        correlation_id=await correlation_for_adjustment(session, adjustment_id),
+        occurred_at=dead_lettered_at,
+        scope_granted=scope_for(AuditTool.DLQ),
+    )
 
-async def _schedule(session: AsyncSession, *, adjustment_id: uuid.UUID, when: dt.datetime) -> None:
+
+async def _schedule(
+    session: AsyncSession, *, adjustment_id: uuid.UUID, when: dt.datetime, now: dt.datetime
+) -> None:
+    """Schedule a further attempt, and record that the decision was taken (§11 ``retry``).
+
+    Two timestamps and they are different facts: ``when`` is the schedule and ``now`` is the moment
+    the decision was made. Stamping the event with ``when`` would date it in the future, which is
+    the sort of thing that looks harmless until somebody orders the trail by it.
+
+    The outcome is ``quarantined``, not ``failure``: a scheduled retry is an operation held aside to
+    be tried again, and the failure it followed already has its own ``post`` event. Recording it as
+    a second failure would double-count outages in the one record used to measure them.
+    """
     intent = (
         await session.execute(select(Outbox).where(Outbox.adjustment_id == adjustment_id))
     ).scalar_one()
     intent.next_attempt_at = when
     await session.flush()
+    await emit(
+        session,
+        tool=AuditTool.RETRY,
+        outcome=AuditOutcome.QUARANTINED,
+        correlation_id=await correlation_for_adjustment(session, adjustment_id),
+        occurred_at=now,
+        scope_granted=scope_for(AuditTool.RETRY),
+    )
 
 
 def _budget_exhausted(
@@ -449,7 +484,7 @@ async def _retry_or_dead_letter(
             reason = DeadLetterReason.TIME_BUDGET_EXHAUSTED
         else:
             when = now + delay
-            await _schedule(session, adjustment_id=adjustment_id, when=when)
+            await _schedule(session, adjustment_id=adjustment_id, when=when, now=now)
             return RetryReport(
                 adjustment_id=adjustment_id,
                 operation_id=operation_id,
@@ -474,6 +509,7 @@ async def _retry_or_dead_letter(
             ),
             attempts=attempt_no,
             mark_state=True,
+            dead_lettered_at=now,
         )
 
     return RetryReport(
@@ -553,7 +589,7 @@ async def _resolve_not_sent(engine: AsyncEngine, *, adjustment_id: uuid.UUID) ->
             outcome=posting_audit_outcome(OutcomeCode.NOT_SENT),
             correlation_id=await correlation_for_adjustment(session, adjustment_id),
             occurred_at=attempt.sent_at,
-            scope_granted=POST_SCOPE,
+            scope_granted=scope_for(AuditTool.POST),
         )
         return int(attempt.attempt_no)
 
@@ -730,6 +766,7 @@ async def attempt_one(
                 ),
                 attempts=result.attempt_no,
                 mark_state=False,
+                dead_lettered_at=now,
             )
         return RetryReport(
             adjustment_id=adjustment_id,
@@ -889,6 +926,7 @@ async def replay_dead_letter(
     dlq_id: uuid.UUID,
     adapter: LedgerAdapter,
     now: dt.datetime,
+    principal: str,
 ) -> ReplayReport:
     """Replay one dead letter. **The identifier is read, never re-derived.**
 
@@ -909,6 +947,12 @@ async def replay_dead_letter(
     criterion 8 asks for a demonstration that replay *applies nothing further* — and a refusal
     raised from inside the dispatcher, while equally safe, is a weaker demonstration than never
     making the call.
+
+    **``principal`` is required, and 5.2 made it so.** A replay is a human deciding to send an
+    irreversible financial write again. 4.3 shipped it without one, so every event this path
+    produced recorded ``system`` — §11 offers *"authenticated human, or `system`"* and this path was
+    answering with the wrong half. A default would have kept the trail compiling and lying, so there
+    is none: a caller with nobody to name cannot replay.
     """
     async with AsyncSession(engine) as session, session.begin():
         entry = (
@@ -950,7 +994,13 @@ async def replay_dead_letter(
             posting_ref=already,
             detail="the adjustment already carries a posting reference; nothing was sent",
         )
-        await _close_entry(engine, dlq_id=dlq_id, now=now)
+        await _close_entry(
+            engine,
+            dlq_id=dlq_id,
+            adjustment_id=adjustment_id,
+            now=now,
+            principal=principal,
+        )
         return report
 
     if settled_outcome is OutcomeCode.REJECTED:
@@ -964,7 +1014,13 @@ async def replay_dead_letter(
             outcome=ReplayOutcome.REJECTED,
             detail="the ledger declined this operation; a re-send cannot change that",
         )
-        await _close_entry(engine, dlq_id=dlq_id, now=now)
+        await _close_entry(
+            engine,
+            dlq_id=dlq_id,
+            adjustment_id=adjustment_id,
+            now=now,
+            principal=principal,
+        )
         return report
 
     try:
@@ -1026,11 +1082,24 @@ async def replay_dead_letter(
         )
 
     if report.resolved:
-        await _close_entry(engine, dlq_id=dlq_id, now=now)
+        await _close_entry(
+            engine,
+            dlq_id=dlq_id,
+            adjustment_id=adjustment_id,
+            now=now,
+            principal=principal,
+        )
     return report
 
 
-async def _close_entry(engine: AsyncEngine, *, dlq_id: uuid.UUID, now: dt.datetime) -> None:
+async def _close_entry(
+    engine: AsyncEngine,
+    *,
+    dlq_id: uuid.UUID,
+    adjustment_id: uuid.UUID,
+    now: dt.datetime,
+    principal: str,
+) -> None:
     """Mark a dead letter replayed.
 
     ``replayed_at`` is set in the same statement because ``replayed_at_iff_replayed`` is an
@@ -1047,3 +1116,12 @@ async def _close_entry(engine: AsyncEngine, *, dlq_id: uuid.UUID, now: dt.dateti
         ).scalar_one()
         entry.replay_state = ReplayState.REPLAYED
         entry.replayed_at = now
+        await emit(
+            session,
+            tool=AuditTool.REPLAY,
+            outcome=AuditOutcome.SUCCESS,
+            correlation_id=await correlation_for_adjustment(session, adjustment_id),
+            occurred_at=now,
+            scope_granted=scope_for(AuditTool.REPLAY),
+            principal=principal,
+        )

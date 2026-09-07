@@ -109,6 +109,17 @@ async def _wipe() -> None:
     key doing exactly what it exists to do."""
     connection = await asyncpg.connect(DSN)
     try:
+        # 5.2 emits an audit event at every state transition, so this table now accumulates
+        # across tests. Cleared with its append-only trigger suspended — the harness explicitly
+        # overriding a control it also tests, which `assert_target_is_disposable` has already
+        # established is safe here because the target is a throwaway database.
+        await connection.execute(
+            "ALTER TABLE audit_event DISABLE TRIGGER audit_event_append_only_row"
+        )
+        await connection.execute("DELETE FROM audit_event")
+        await connection.execute(
+            "ALTER TABLE audit_event ENABLE TRIGGER audit_event_append_only_row"
+        )
         for table in ("exception", "match_result", "settlement_line", "settlement_batch"):
             await connection.execute(f"DELETE FROM {table}")
         await connection.execute("DELETE FROM ledger_entry")

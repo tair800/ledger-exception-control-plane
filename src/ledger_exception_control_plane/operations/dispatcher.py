@@ -54,6 +54,7 @@ from ledger_exception_control_plane.audit import (
     correlation_for_adjustment,
     emit,
     posting_audit_outcome,
+    scope_for,
 )
 from ledger_exception_control_plane.db.control import (
     Adjustment,
@@ -84,7 +85,6 @@ from ledger_exception_control_plane.ledger.port import (
 )
 
 __all__ = [
-    "POST_SCOPE",
     "DispatchRefusedError",
     "DispatchResult",
     "ResendBound",
@@ -95,13 +95,6 @@ __all__ = [
     "resend_decision",
     "resend_is_within_bounds",
 ]
-
-#: §11's *"authorisation under which the action ran"* for a dispatch.
-#:
-#: Not a role: no human authorises an individual send. The human decision is the approval, which is
-#: recorded on its own event with its own principal, and this names the internal capability the
-#: deterministic path ran under. Written once so the trail stays filterable.
-POST_SCOPE = "ledger:post"
 
 #: Outcomes that end a dispatch. §13.3: the dispatcher will not initiate a second send for an
 #: operation already in a **known terminal state**, and these two are that state — the only two the
@@ -449,7 +442,7 @@ async def dispatch_once(
                 outcome=AuditOutcome.QUARANTINED,
                 correlation_id=correlation_id,
                 occurred_at=sent_at,
-                scope_granted=POST_SCOPE,
+                scope_granted=scope_for(AuditTool.POST),
             )
     except IntegrityError as exc:
         raise DispatchRefusedError(
@@ -506,7 +499,7 @@ async def dispatch_once(
             outcome=posting_audit_outcome(code),
             correlation_id=correlation_id,
             occurred_at=sent_at,
-            scope_granted=POST_SCOPE,
+            scope_granted=scope_for(AuditTool.POST),
         )
 
     return DispatchResult(

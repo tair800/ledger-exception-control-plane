@@ -199,6 +199,15 @@ jobs:
       - name: Verify UNKNOWN semantics, reconciliation and recovery against real PostgreSQL
         run: uv run pytest tests/test_reconcile_postgres.py -m integration --no-cov
 
+      # Audit-event contract v1. Three claims, all of them about a real database: what the
+      # services emitted when driven in order, whether the correlation id recomputes from the
+      # ingested artefact, and whether the least-privilege role is denied a write on the evidence
+      # tables. The last one is why this step provisions the role after migrating — grants die with
+      # the tables they were made on, and a grant test on an unprovisioned database passes by
+      # denying everything.
+      - name: Verify audit-event contract v1 against real PostgreSQL
+        run: uv run pytest tests/test_audit_contract_postgres.py -m integration --no-cov
+
       # The authoritative coverage gate, and the only place it can be honest.
       #
       # The unit job cannot see `matching.service` or `classification.service` — their entire

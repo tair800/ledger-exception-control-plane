@@ -34,12 +34,16 @@ dead-letter queue and the replay CLI** — an enumerated transport classifier wh
 `UNKNOWN`, two independent bounds on every retry, and a replay that re-reads the persisted
 instruction rather than rebuilding one (ADR-055); **5.1 delivered the human approval gate with role
 separation**, resolving OPEN-8 with a registry of hashed bearer tokens and moving the
-countersignature and single-use rules into database constraints (ADR-056); and **4.4 has delivered
+countersignature and single-use rules into database constraints (ADR-056); **4.4 delivered
 `UNKNOWN` semantics, bounded reconciliation and manual recovery** — the capability branch of §13.5
 executed rather than described, with both re-send bounds enforced, a negative answer trusted only
 after N consecutive observations and both declared windows, monotonic transitions held by triggers,
-the supersession interlock, and an operator queue that carries its own evidence procedure (ADR-057).
-**M5.2 is next**, then the 4.5 kill-test gate.
+the supersession interlock, and an operator queue that carries its own evidence procedure (ADR-057);
+and **5.2 has delivered audit-event contract v1** — all ten verbs emitting inside the transaction of
+the state change they describe, a closed `scope_granted` vocabulary, a correlation id derived from
+the ingested artefact rather than threaded through, and a `provenance()` read that answers §5.2's
+five questions while keeping what the trail attests apart from what the domain tables hold
+(ADR-058). **The 4.5 kill-test gate is next**, and it is the flagship claim.
 
 The model layer still makes **no live call**: no provider SDK is a dependency, nothing under `llm/`
 imports an HTTP client, and no transport that speaks HTTP exists — the flow is exercised entirely
@@ -79,8 +83,16 @@ original send recorded. Where it can do neither, the automatic path stops and an
 Every query is appended as evidence, `UNKNOWN` is never overwritten in place, and the transitions are
 held by database triggers rather than by application discipline.
 
-What still does not exist is the audit contract extended to *every* state transition (5.2), the
-`naive/` baseline and the chaos suite (4.5), and everything from M6 onwards.
+5.2 made the trail complete. Every ledger-affecting action emits at least one event under one of ten
+verbs; a refused action records the authority it actually **held** rather than the one it attempted;
+a reconciliation emits twice, separating what the ledger answered from what was concluded; and two
+of §11's ten fields are deliberately null here, with the reason recorded rather than the field
+quietly left blank — this system is not an agent, and it makes no model call whose region could be
+recorded.
+
+What still does not exist is the `naive/` baseline and the chaos suite (4.5) — **the flagship claim
+is unproven until that gate runs** — and everything from M6 onwards. There is also no wired
+pipeline: nothing calls the stages in sequence, which is M7's orchestration.
 `PROJECT_STATUS.md` is the authority on exactly what exists.
 
 ---
@@ -147,6 +159,15 @@ What still does not exist is the audit contract extended to *every* state transi
 
 - Every decision — model proposal, human approval, computed amount, posting attempt, retry, DLQ entry,
   replay — emits an audit event under the portfolio audit-event contract v1.
+- **`audit.emit` is the only thing that builds an event**, and a guard test enforces it. One shape
+  means one constructor: the contract is copied by six later repositories, so a second builder is a
+  second shape in the one table that cannot be corrected afterwards.
+- **A new `tool` verb needs a specification clause behind it.** §11's list is a gloss, not a closed
+  set, but widening it is a portfolio decision — add a verb only when a clause requires an event for
+  an action the existing verbs cannot name (ADR-058).
+- **Never record a field the system cannot know.** `region_jurisdiction` stays null while no model
+  call is made; `agent_identity` stays null because this system is not an agent. Name the gap, do
+  not fill it.
 - Audit events are append-only. No update, no delete, no soft-delete-then-rewrite.
 - Every record carries a correlation id that survives the full path from ingestion to ledger posting.
 - A posted adjustment must always answer: what evidence, which model and version, who approved, when,
@@ -314,6 +335,7 @@ composite foreign key refusing a write, and 4.4's transitions are triggers, so b
 ```bash
 make approval-verify   # roles, countersignature, single use, and the gate blocking the write
 make reconcile-verify  # the UNKNOWN branch across all three capability configurations
+make audit-verify      # contract v1, the correlation span, and the provenance read
 ```
 
 Adding a dependency: `uv add <pkg>` for runtime, `uv add --dev <pkg>` for tooling. Both update

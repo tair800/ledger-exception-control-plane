@@ -111,6 +111,17 @@ async def _wipe() -> None:
         # ``exception`` first. It references the settlement line under RESTRICT (ADR-044), so a
         # control record left by another module blocks the line's own deletion — which is the
         # foreign key working, not clutter.
+        # 5.2 emits a `match` event for every line that changes state, so this table now
+        # accumulates across tests. Cleared with its append-only trigger suspended — the harness
+        # explicitly overriding a control it also tests, which `assert_target_is_disposable` has
+        # already established is safe here because the target is a throwaway database.
+        await connection.execute(
+            "ALTER TABLE audit_event DISABLE TRIGGER audit_event_append_only_row"
+        )
+        await connection.execute("DELETE FROM audit_event")
+        await connection.execute(
+            "ALTER TABLE audit_event ENABLE TRIGGER audit_event_append_only_row"
+        )
         await connection.execute("DELETE FROM exception")
         await connection.execute("DELETE FROM match_result")
         await connection.execute("DELETE FROM settlement_line")

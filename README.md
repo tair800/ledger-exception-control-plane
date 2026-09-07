@@ -104,10 +104,21 @@ double-post against a RED baseline that does.
 > and is recorded as an abstention, because there is no terminal outcome meaning "a human judged
 > without evidence" and inventing one would be the coercion the design forbids under a new name.
 >
-> **What does not exist:** no audit emission at *every* state transition yet — 4.4 emits for its own
-> attempts, ambiguities, query results and operator decisions, and 5.2 extends that; **no naive
-> baseline and no chaos suite — the kill-test gate is at 4.5 and has not run**; and no console,
-> evaluation or deployment.
+> And as of M5.2 — **audit-event contract v1 across the whole pipeline**. All ten verbs emit, each
+> inside the transaction of the state change it describes, so an event and the change it records
+> commit together or not at all. `scope_granted` is a closed vocabulary rather than free text, and a
+> refused action records the authority it actually **held** — an operator whose approval is blocked
+> because their role may not approve no longer writes a permanent row claiming otherwise. A
+> reconciliation emits twice: what the ledger answered, and what was concluded from it.
+> `provenance()` answers the exit criterion's five questions from one adjustment, keeping what the
+> audit trail attests structurally apart from what the domain tables hold — and **naming what
+> neither holds** rather than rendering it blank.
+>
+> **What does not exist:** **no naive baseline and no chaos suite — the kill-test gate is at 4.5 and
+> has not run**; and no console, evaluation, observability or deployment. There is also no wired
+> pipeline: nothing calls ingestion, matching, classification, approval, enqueue and dispatch in
+> sequence — that orchestration is M7's, and 5.2's end-to-end test composes the real service entry
+> points itself rather than observing a running system.
 >
 > **An `UNKNOWN` is still never retried.** The retry path cannot see one: an operation whose last
 > outcome is ambiguous, or which carries an unresolved in-flight attempt from a crash mid-send, is
@@ -488,6 +499,35 @@ itself is not configured for.
 | `dlq` | An exhausted dispatch and the envelope needed to replay it |
 | `recovery_queue` | An ambiguous outcome awaiting reconciliation or an operator decision |
 | `audit_event` | Append-only, contract v1 |
+| `reconciliation_query` | Append-only: every question put to a ledger about an ambiguous operation |
+
+### Audit-event contract v1
+
+> **Agent actions in regulated environments must be attributable, scoped, approvable and
+> jurisdiction-provable.**
+
+That is the thesis, and the ten-field contract in
+[`PROJECT_SPEC.md` §11](PROJECT_SPEC.md) is what makes each word of it a column rather than an
+aspiration: *attributable* is `principal` and `approver`, *scoped* is `scope_granted`, *approvable*
+is `approval_decision`, *jurisdiction-provable* is `region_jurisdiction`. Six later repositories
+re-implement the same shape — copied, never imported.
+
+Every ledger-affecting action emits at least one event, under one of ten verbs, in the same
+transaction as the state change it describes. `scope_granted` comes from a closed vocabulary, so the
+authorisation question is answerable by filtering rather than by reading. The correlation id is
+*derived* from the ingested artefact — the content hash of the file a line arrived in and its
+position in it — so the span from ingestion to posting is a property of the data rather than a value
+some layer has to remember to pass on.
+
+**Two of the ten fields are null in this repository, and that is the honest answer rather than an
+omission.** `agent_identity` is null because §2 states this system is *not* an agent: the model
+proposes a treatment code from a closed set and takes no action, so there is nothing to identify.
+`region_jurisdiction` is null because §11 defines it as the processing region of *the model call*,
+and no model call is made here at all — no transport ships, no provider SDK is a dependency, and
+every committed cassette is marked synthesised. Recording a region would describe a request that
+never happened, in the one record an auditor trusts. Both gaps are *named* by the provenance read
+rather than rendered as blank cells, because "no model was involved" and "a model was involved and
+we failed to record which" are different states.
 
 Six properties are enforced by the database rather than described in prose, because each is a claim
 the project makes, and a claim asserted only in application code is a claim on trust:
@@ -504,7 +544,9 @@ the project makes, and a claim asserted only in application code is a claim on t
 - **`audit_event` is append-only**, enforced by a trigger that refuses `UPDATE`, `DELETE` and
   `TRUNCATE` from *any* role including the table owner. The insert-only grant to the least-privilege
   application role is defence in depth, not the primary control: a grant does not constrain the
-  owner, and the owner is the identity a migration or a maintenance script runs as.
+  owner, and the owner is the identity a migration or a maintenance script runs as. The same pair
+  protects `reconciliation_query`, which holds the observations that justify declaring an ambiguous
+  financial write un-applied — a count reconstructible only from rows nobody can edit.
 - **An adjustment cannot be authorised by a rejection.** `adjustment` references
   `(approval.id, approved_treatment, principal)`, not just `approval.id`. A plain foreign key proves
   an approval *exists*; it does not prove the approval said yes. A rejection carries

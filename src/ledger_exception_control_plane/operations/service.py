@@ -61,10 +61,17 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger_exception_control_plane.audit import (
+    correlation_for_adjustment,
+    emit,
+    scope_for,
+)
 from ledger_exception_control_plane.db.control import (
     Adjustment,
     Approval,
     ApprovalDecision,
+    AuditOutcome,
+    AuditTool,
     Outbox,
     TreatmentCode,
 )
@@ -316,6 +323,28 @@ async def record_operation(
     )
     session.add(adjustment)
     await session.flush()
+
+    # §11's `compute_amount` event, emitted where the computed amount becomes durable rather than
+    # where it is computed. The calculator is a pure function with no session and no clock, and it
+    # stays that way — the money path's purity is the property the whole AI/money firewall rests on.
+    #
+    # **The event is stamped with the database's own record of when the row appeared**, and that is
+    # not a stylistic choice. This module feeds the operation-identifier derivation, so a committed
+    # guard bans it from importing a clock, naming an attempt counter, or taking a parameter called
+    # `occurred_at` — the ban that makes §12.1's retry-independence checkable rather than asserted.
+    # Adding a caller-supplied timestamp here would have meant exempting this module from that
+    # guard, which trades the project's strongest guarantee for an audit field. Reading back the
+    # server default costs one round trip and asks the database when it recorded the row, which is
+    # the more truthful answer for this transition anyway: the amount became durable then.
+    await session.refresh(adjustment, ["created_at"])
+    await emit(
+        session,
+        tool=AuditTool.COMPUTE_AMOUNT,
+        outcome=AuditOutcome.SUCCESS,
+        correlation_id=await correlation_for_adjustment(session, adjustment.id),
+        occurred_at=adjustment.created_at,
+        scope_granted=scope_for(AuditTool.COMPUTE_AMOUNT),
+    )
 
     return OperationRecord(adjustment_id=adjustment.id, identity=identity, created=True)
 

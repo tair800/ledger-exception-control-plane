@@ -38,7 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from ledger_exception_control_plane.audit import correlation_for_adjustment, emit
+from ledger_exception_control_plane.audit import correlation_for_adjustment, emit, scope_for
 from ledger_exception_control_plane.db.control import (
     Adjustment,
     AuditOutcome,
@@ -54,7 +54,6 @@ from ledger_exception_control_plane.ledger.port import MAX_POSTING_REF
 from ledger_exception_control_plane.security import OPERATIONS_ROLES, Principal
 
 __all__ = [
-    "RECOVERY_SCOPE",
     "EvidenceProcedure",
     "RecoveryReason",
     "RecoveryRefusal",
@@ -66,9 +65,6 @@ __all__ = [
     "resolve_item",
     "stale_items",
 ]
-
-#: §11's *"authorisation under which the action ran"* for an operator's recovery decision.
-RECOVERY_SCOPE: Final = "operations:recover"
 
 
 class RecoveryReason(enum.StrEnum):
@@ -312,7 +308,7 @@ async def open_item(
         outcome=AuditOutcome.QUARANTINED,
         correlation_id=await correlation_for_adjustment(session, adjustment_id),
         occurred_at=opened_at,
-        scope_granted=RECOVERY_SCOPE,
+        scope_granted=scope_for(AuditTool.RECOVER),
     )
     return item.id
 
@@ -495,7 +491,7 @@ async def resolve_item(
             outcome=_RESOLUTION_AUDIT_OUTCOME[resolution],
             correlation_id=await correlation_for_adjustment(session, item.adjustment_id),
             occurred_at=now,
-            scope_granted=RECOVERY_SCOPE,
+            scope_granted=scope_for(AuditTool.RECOVER),
             principal=principal.id,
         )
         view = _view(item, operation_id, now=now)

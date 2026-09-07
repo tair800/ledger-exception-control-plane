@@ -63,7 +63,7 @@ from typing import Final
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from ledger_exception_control_plane.audit import correlation_for_adjustment, emit
+from ledger_exception_control_plane.audit import correlation_for_adjustment, emit, scope_for
 from ledger_exception_control_plane.config import Settings
 from ledger_exception_control_plane.db.control import (
     Adjustment,
@@ -105,7 +105,6 @@ from ledger_exception_control_plane.operations.recovery import RecoveryReason, o
 #: capability branch, and a unit test pins both the placement and the re-export.
 __all__ = [
     "AMBIGUOUS",
-    "RECONCILE_SCOPE",
     "ReconciliationPolicy",
     "ReconciliationReport",
     "ResendBound",
@@ -114,9 +113,6 @@ __all__ = [
     "resend_is_within_bounds",
     "visibility_bound_of",
 ]
-
-#: §11's *"authorisation under which the action ran"* for a reconciliation query.
-RECONCILE_SCOPE: Final = "ledger:reconcile"
 
 #: Outcomes that leave the ledger's state undetermined and therefore need this module.
 #:
@@ -581,6 +577,46 @@ async def reconcile_once(
     )
 
 
+#: How a *resolution* reads in the audit trail, as distinct from a query answer.
+#:
+#: Only the two terminal ones are here. An unresolved pass has nothing to conclude, and the
+#: query event already records what was observed.
+_RESOLUTION_AUDIT_OUTCOME: Final[dict[Resolution, AuditOutcome]] = {
+    Resolution.CONFIRMED: AuditOutcome.SUCCESS,
+    Resolution.REJECTED: AuditOutcome.FAILURE,
+}
+
+
+async def _emit_resolution(
+    session: AsyncSession, state: _State, resolution: Resolution, now: dt.datetime
+) -> None:
+    """Record the conclusion, in the same transaction as the state change it justifies.
+
+    **A second event, not a different one**, and the distinction is the whole reason this exists.
+    The query event says *what the ledger answered*: a ``NotFound`` is recorded as ``quarantined``
+    because that is what a negative answer is — not visible to this query, nothing concluded. This
+    event says *what we concluded from it*, and for ``REJECTED`` that conclusion is the most
+    consequential inference the system makes: an irreversible financial write is being declared
+    never to have happened, after which the operation settles and no automatic path will touch it
+    again.
+
+    Without this row the trail for such a pass reads ``reconcile / quarantined`` and stops — an
+    auditor could see the last question asked and never find the answer acted on. §19.1's
+    completeness assertion names *"the final resolution"* as its own item for exactly that reason.
+
+    Both events carry the same ``occurred_at``: they describe one pass, and the query event is
+    appended first, so the ordering is in the sequence rather than in the clock.
+    """
+    await emit(
+        session,
+        tool=AuditTool.RECONCILE,
+        outcome=_RESOLUTION_AUDIT_OUTCOME[resolution],
+        correlation_id=state.correlation_id,
+        occurred_at=now,
+        scope_granted=scope_for(AuditTool.RECONCILE),
+    )
+
+
 async def _reconcile_by_query(
     engine: AsyncEngine,
     *,
@@ -650,7 +686,7 @@ async def _reconcile_by_query(
             outcome=_ANSWER_AUDIT_OUTCOME[code],
             correlation_id=state.correlation_id,
             occurred_at=now,
-            scope_granted=RECONCILE_SCOPE,
+            scope_granted=scope_for(AuditTool.RECONCILE),
         )
 
         consecutive = await _consecutive_not_found(session, adjustment_id)
@@ -673,6 +709,7 @@ async def _reconcile_by_query(
                 await session.execute(select(Adjustment).where(Adjustment.id == adjustment_id))
             ).scalar_one()
             applied.posting_ref = posting_ref
+            await _emit_resolution(session, state, Resolution.CONFIRMED, now)
             return dataclasses.replace(
                 outcome,
                 resolution=Resolution.CONFIRMED,
@@ -692,6 +729,7 @@ async def _reconcile_by_query(
             ).scalar_one()
             intent.last_outcome = OutcomeCode.REJECTED
             intent.state = DispatchState.SETTLED
+            await _emit_resolution(session, state, Resolution.REJECTED, now)
             return dataclasses.replace(
                 outcome,
                 resolution=Resolution.REJECTED,

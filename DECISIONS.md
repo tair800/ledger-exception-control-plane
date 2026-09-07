@@ -228,6 +228,14 @@ output consequential, contradicting ADR-001 and ADR-002.
 granted, approval decision and approver, model, region/jurisdiction, outcome, correlation id).
 Append-only, enforced by database grant rather than convention.
 
+> **Superseded in part by ADR-026 and completed by ADR-058.** "Enforced by database grant" was the
+> wrong primary control and ADR-026 replaced it with a trigger, for a reason worth repeating: a
+> grant does not bind the table owner, and the owner is precisely the role a migration or a
+> maintenance script runs as. The trigger refuses `UPDATE`, `DELETE` and `TRUNCATE` to every role;
+> the grant is defence in depth. ADR-058 fills in what this decision left to interpretation — what
+> `agent_identity` means as distinct from `model`, which of the ten fields this repository can fill
+> truthfully, and when a new tool verb may be added.
+
 **Consequences.** This repository defines the canonical shape for six later projects. They
 **re-implement** it independently — repositories stay independent, with no shared library and no
 submodules.
@@ -3199,6 +3207,163 @@ test asserts both directions.
 
 Both were found by tests failing, not by review, which is the argument for the tests being what they
 are.
+
+
+## ADR-058 — Audit-event contract v1: what each field means, and what this repository cannot fill (M5.2)
+
+**Status:** Accepted. Establishes the portfolio's canonical audit shape, ratifies the two verbs 4.4
+added, resolves the two §11 fields the specification leaves ambiguous, records the fields that
+cannot be filled truthfully here, and corrects one claim in ADR-008. Resolves no OPEN item.
+
+`PROJECT_SPEC.md` §11 is one table and three sentences, and it is copied — *not imported* — by six
+later repositories. That makes every ambiguity in it a decision this increment has to take on
+everyone's behalf, in writing, before a second repository takes a different one.
+
+### 1. §11 has ten fields, not eleven
+
+The table has ten rows. `occurred_at` is a column M1.2 added and the specification never names, and
+the emitter's docstring called the set "eleven fields" for two increments. Recorded because a
+repository copying "contract v1" needs to be told which fields are the contract and which are this
+schema's bookkeeping — `id`, `occurred_at` and `created_at` are ours.
+
+### 2. The tool vocabulary: a gloss, closed locally, widened only by a clause
+
+§11 lists eight verbs in a parenthetical. It is a **gloss, not a closed set**: the specification
+writes "closed" explicitly wherever it means it — §6.1's treatment codes, §10.1's outcome unions —
+and does not write it here. Closure is a *local* choice, enforced by `ck_audit_event_tool_valid`.
+
+So 4.4's `reconcile` and `recover` were permitted rather than required, and the justification sat in
+a code comment. Ratified here, with the rule that governs the next one:
+
+> **A verb is added only when a specification clause requires an event for an action the existing
+> verbs cannot name.**
+
+`reconcile` and `recover` qualify: §13.5 clause 6 requires an event for *"every reconciliation query
+and result, and every manual decision"*, and neither `post` nor `approve` names those acts — folding
+them in would have made the segregation of duties unreadable, since authorising a posting and
+judging what happened to one are different acts by different roles.
+
+**Ingestion, quarantine, classification and evidence assembly get no verb**, and that is the same
+rule applied in the other direction. §11's coverage sentence is *"every **ledger-affecting** action
+has at least one event"*, acceptance criterion 11 repeats it, and a quarantined batch never reaches
+a ledger. Their provenance already lives in their own tables — `settlement_batch.quarantine_reason`,
+`exception.rule_id` and `classifier_version`, `evidence` — which the correlation id joins to.
+Inventing a verb for them would widen a portfolio contract on our own authority, and the plan's
+"emission at every state transition" is bounded by the vocabulary §11 provides.
+
+### 3. `agent_identity` stays null, permanently, in this repository
+
+§11's rows for `agent_identity` (*"Model identifier and version, or null for deterministic steps"*)
+and `model` (*"Model id and version, where a model was involved"*) are near-duplicates, and nothing
+in the specification, the plan or any earlier ADR distinguishes them.
+
+Resolved from §2, which states this system is **not an agent**: the model proposes a treatment code
+from a closed set and takes no action. There is no agent to identify. §11 explicitly sanctions null
+here, so null is the answer — and it is *the honest* answer rather than an unfilled field, which is
+why the provenance report names it as a recorded gap with the reason attached rather than rendering
+a blank cell.
+
+`model` carries the pinned pair `"<id>@<version>"`, built in one helper so it is never joined two
+ways across six repositories. It asserts that the proposal is **attributed** to that model under
+that version — the model the deployment configured, the contract the answer was validated against,
+the pair persisted on `treatment_proposal`. It does not assert that bytes crossed a network.
+
+### 4. `region_jurisdiction` is null here, and the reason is the honest one
+
+§11 defines it as *"processing region of the model call"*. **No model call is made anywhere in this
+repository**: `llm/port.py` ships no transport, no provider SDK is a dependency, `.env.example`
+carries no provider key, and every committed cassette is marked synthesised rather than captured.
+
+The value handed to `propose_for_exception` is a *deployment declaration* about where calls would be
+processed — which is why `treatment_proposal.region_jurisdiction` is NOT NULL and stores it. Copying
+it onto an audit event would put a fact about a network request that never happened into the one
+record an auditor trusts, and §11's own thesis is that agent actions must be **jurisdiction-provable**
+— a field that describes an imagined call proves nothing.
+
+So the audit field is null, the gap is named in the provenance report with this reasoning, and it
+becomes populated when a live transport ships. The two records disagreeing is not an inconsistency:
+the proposal row says where the deployment declares it processes, the audit row says where a call
+happened, and today the second has no answer.
+
+### 5. `scope_granted` is a closed vocabulary, and a refused action records the authority it held
+
+§11 asks for *"the authorisation under which the action ran"*. Free text makes that unqueryable —
+an auditor asking "what ran under the model's authority" would be filtering on spelling — so there
+are three shapes and no others: a member of `Scope`, `approval:<role>`, or `none`. The emitter
+refuses anything else.
+
+**`none` exists because the first version recorded a lie.** 4.4's refusal path stamped
+`approval:<role>` on every refused approval, *including one refused precisely because that role may
+not approve*. An operator's blocked attempt wrote a permanent, undeletable row asserting an
+authorisation §16 does not grant, in the one field provided for answering that question. A refusal
+for some other reason — a replayed token, the supersession interlock — keeps the real scope, because
+there the authority was genuinely held and the refusal was about something else.
+
+### 6. Where each event is emitted, and two placements that were forced
+
+Ten verbs, ten emission sites, all inside the transaction of the state change they describe — so the
+event and the change commit together or not at all. Two were not free:
+
+- **`compute_amount` is emitted where the amount becomes durable, not where it is computed**, and it
+  is stamped with the database's own `created_at` rather than a caller's clock. `money/calculator.py`
+  is a pure function and stays that way; `operations/service.py` feeds the operation-identifier
+  derivation, and a committed guard bans it from importing a clock, naming an attempt counter, or
+  taking a parameter called `occurred_at` — the ban that makes §12.1's retry-independence checkable.
+  A caller-supplied timestamp would have meant exempting that module from the guard, trading the
+  project's strongest guarantee for an audit field. Reading back the server default costs one round
+  trip and is the truer answer anyway: the amount became durable then.
+
+- **`propose_treatment` is emitted on the unusable branch too**, in a transaction of its own, because
+  nothing is persisted there and §11 still requires the trail to say a model was asked and what came
+  back. `CitationError`'s docstring has promised since 3.3 that *"the reason survives into the audit
+  trail"*; until now it did not.
+
+`replay` gained a **required** `principal`. 4.3 shipped the command with none, so every event a
+replay produced recorded `system` — §11 offers *"authenticated human, or `system`"* and a human at a
+command line is the first half. There is no default: a caller with nobody to name cannot replay.
+
+### 7. Reconciliation emits twice, and the second event is the consequential one
+
+A query event records what the ledger *answered*; a `NotFound` is `quarantined` because that is what
+a negative answer is. A separate event records what was *concluded*, and for `REJECTED` that
+conclusion is the most consequential inference this system makes: an irreversible financial write is
+being declared never to have happened. Without it the trail reads `reconcile / quarantined` and
+stops — the last question asked, and never the answer acted on. §19.1's completeness assertion names
+*"the final resolution"* as its own item.
+
+### 8. Emission is orthogonal to the write discipline, and that is why it could go everywhere
+
+This project asserts, per guarded entity, that exactly one module may construct it. 5.2 added
+emission to six modules and widened **no** entity-writer fence, because none of them builds the row:
+they call `emit`. `AuditEvent` joins the fence map with `audit.py` as its sole writer.
+
+It is deliberately not added to the mutation fence's guarded columns. Mutation is already impossible
+— a trigger refuses `UPDATE`, `DELETE` and `TRUNCATE` to every role including the owner — and a lint
+over attribute names like `outcome` and `model` would flag ordinary locals across the package while
+adding nothing the database does not already guarantee.
+
+### 9. Corrections carried by this increment
+
+- **ADR-008 said "Append-only, enforced by database grant rather than convention."** ADR-026 replaced
+  that with the trigger and never marked ADR-008 superseded. The primary control is the trigger,
+  because a grant does not bind the table owner — which is precisely the role a migration or a
+  maintenance script runs as. The grant is defence in depth. ADR-008 now points here.
+- **`reconciliation_query` had the trigger and not the grant.** 4.4 added the table and left the
+  provisioning script behind, so the application role still held `UPDATE` and `DELETE` on the rows
+  that justify declaring an ambiguous financial write un-applied. Fixed, and tested as the role.
+- The correlation-id derivation **moved from `classification` to `audit`**. §11 owns that value and
+  three stages now need it; leaving it where it was first needed would have made matching import
+  classification, which is the pipeline running backwards. `classification` re-exports it and a test
+  asserts the two names are one object.
+
+### 10. What this increment does not demonstrate
+
+**There is no wired pipeline.** Nothing in `src/` calls ingestion, matching, classification,
+approval, enqueue and dispatch in sequence — that orchestration is M7's. So the claim *"every
+ledger-affecting action has at least one event"* is demonstrated by a test that composes the real
+service entry points in order, not by observing a running system. Every event it asserts is one the
+services emitted and nothing is seeded, but the distinction is stated in the test's own docstring
+rather than left for a reader to discover.
 
 ---
 

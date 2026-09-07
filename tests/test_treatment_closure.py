@@ -1030,6 +1030,18 @@ ENTITY_WRITERS: Final = {
     #: makes a second dead letter for one outbox row impossible at the database; this makes a second
     #: *writer* impossible in the code, which is the half a constraint cannot cover.
     "DeadLetter": "operations/retry.py",
+    #: 5.2. The audit trail is contract v1, copied by seven later repositories, so what matters
+    #: most is that every event has one shape — and one shape means one constructor. 5.2 added
+    #: emission to six more modules and widened no other fence in this map, precisely because
+    #: none of them builds the row: they call ``audit.emit``. A second constructor would be a
+    #: second shape, in the one table that cannot be corrected afterwards.
+    #:
+    #: Deliberately **not** added to :data:`GUARDED_COLUMNS`. Mutation of this table is already
+    #: impossible — a trigger refuses ``UPDATE``, ``DELETE`` and ``TRUNCATE`` to every role
+    #: including the owner — and a lint over attribute names like ``outcome`` and ``model``
+    #: would flag ordinary locals across the package while adding nothing the database does not
+    #: already guarantee.
+    "AuditEvent": "audit.py",
 }
 
 #: Kept as its own name because several tests and their kill tests read it directly.
@@ -1043,6 +1055,7 @@ WRITE_SIDE_TABLES: Final = {
     "Outbox": "outbox",
     "PostingAttempt": "posting_attempt",
     "DeadLetter": "dlq",
+    "AuditEvent": "audit_event",
 }
 
 #: Verbs that turn a mapped class into a write, matched as a substring of the callee's name.

@@ -570,6 +570,12 @@ def test_the_matching_package_imports_nothing_that_could_make_it_a_classifier() 
         "ledger_exception_control_plane.matching",
         "ledger_exception_control_plane.db.models",
         "ledger_exception_control_plane.db.control",
+        # 5.2. `audit` is the one module every stage is permitted to reach, and admitting it
+        # widens nothing that matters: it exposes an emitter and two pure helpers, constructs
+        # the audit row itself so no per-entity writer fence moves, and gives this package no
+        # route to any table it could not already reach. §11 requires an event at every state
+        # transition, so a boundary that excluded the emitter would exclude the contract.
+        "ledger_exception_control_plane.audit",
     }
     for name, tree in _matching_sources():
         for node in ast.walk(tree):

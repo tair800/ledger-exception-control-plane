@@ -1595,8 +1595,14 @@ async def test_the_query_branch_leaves_a_complete_trail(engine: AsyncEngine) -> 
     )
 
     assert await _events("lecp:trail1") == [
+        # The adjustment's own transition, added at 5.2.
+        ("compute_amount", "success", "system"),
         ("post", "quarantined", "system"),
         ("post", "quarantined", "system"),
+        # **Two reconcile events, and the pair is the point.** The first records what the ledger
+        # answered; the second records what was concluded from it. A trail with only the answer
+        # would show the last question asked and never the decision acted on.
+        ("reconcile", "success", "system"),
         ("reconcile", "success", "system"),
     ]
 
@@ -1614,6 +1620,7 @@ async def test_the_resend_branch_leaves_a_complete_trail(engine: AsyncEngine) ->
     )
 
     assert await _events("lecp:trail2") == [
+        ("compute_amount", "success", "system"),
         ("post", "quarantined", "system"),
         ("post", "quarantined", "system"),
         ("post", "quarantined", "system"),
@@ -1641,6 +1648,7 @@ async def test_the_manual_branch_leaves_a_complete_trail_naming_the_operator(
     )
 
     assert await _events("lecp:trail3") == [
+        ("compute_amount", "success", "system"),
         ("post", "quarantined", "system"),
         ("post", "quarantined", "system"),
         ("recover", "abstained", "operator-a"),

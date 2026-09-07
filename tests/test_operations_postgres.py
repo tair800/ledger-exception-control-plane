@@ -136,6 +136,17 @@ async def _wipe() -> None:
     """
     connection = await asyncpg.connect(DSN)
     try:
+        # 5.2 emits an audit event at every state transition, so this table now accumulates
+        # across tests. Cleared with its append-only trigger suspended — the harness explicitly
+        # overriding a control it also tests, which `assert_target_is_disposable` has already
+        # established is safe here because the target is a throwaway database.
+        await connection.execute(
+            "ALTER TABLE audit_event DISABLE TRIGGER audit_event_append_only_row"
+        )
+        await connection.execute("DELETE FROM audit_event")
+        await connection.execute(
+            "ALTER TABLE audit_event ENABLE TRIGGER audit_event_append_only_row"
+        )
         for table in (
             "adjustment",
             "approval",
@@ -1298,9 +1309,19 @@ async def test_recording_creates_no_row_in_any_later_increment_table(
 
     connection = await asyncpg.connect(DSN)
     try:
-        for table in ("outbox", "posting_attempt", "dlq", "recovery_queue", "audit_event"):
+        for table in ("outbox", "posting_attempt", "dlq", "recovery_queue"):
             count = await connection.fetchval(f"SELECT count(*) FROM {table}")
-            assert count == 0, f"4.1 wrote to {table}, which belongs to a later increment"
+            assert count == 0, f"recording an operation wrote to {table}, which it must not touch"
         assert await connection.fetchval("SELECT count(*) FROM adjustment") == 1
+
+        # **Narrowed at 5.2, not relaxed.** This asserted `audit_event` was empty too, which was
+        # right while nothing was entitled to write an event. §11 requires one at every state
+        # transition and an adjustment coming into existence is the `compute_amount` transition, so
+        # the claim moved from "must be empty" to "must hold exactly this one" — a fence that had
+        # simply dropped the table from its list would have stopped watching it.
+        events = await connection.fetch("SELECT tool, outcome, principal FROM audit_event")
+        assert [(row["tool"], row["outcome"], row["principal"]) for row in events] == [
+            ("compute_amount", "success", "system")
+        ]
     finally:
         await connection.close()

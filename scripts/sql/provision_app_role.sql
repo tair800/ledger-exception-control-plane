@@ -35,6 +35,16 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO lecp_app;
 REVOKE ALL ON TABLE audit_event FROM lecp_app;
 GRANT SELECT, INSERT ON TABLE audit_event TO lecp_app;
 
+-- reconciliation_query is append-only for the same reason and was missed for one increment.
+--
+-- 4.4 added it with the same trigger and left this script behind, so the trigger protected the
+-- table while the grant still handed the application UPDATE and DELETE — defence in depth with one
+-- layer missing. The rows here are the observations that justify declaring an ambiguous financial
+-- write un-applied; §13.5 requires the count of consecutive negative answers to be reconstructible
+-- from them, which it is not if they can be edited.
+REVOKE ALL ON TABLE reconciliation_query FROM lecp_app;
+GRANT SELECT, INSERT ON TABLE reconciliation_query TO lecp_app;
+
 -- Sequences: none today (all primary keys are application-generated UUIDs). Included so a
 -- future sequence does not silently break the application on the first release that adds one.
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO lecp_app;

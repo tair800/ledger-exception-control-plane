@@ -43,6 +43,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from ledger_exception_control_plane.audit import correlation_id_for
 from ledger_exception_control_plane.classification.engine import (
     Classification,
     SettlementMovement,
@@ -84,22 +85,6 @@ class _Residual:
     movement: SettlementMovement
     line_number: int
     content_hash: str
-
-
-def correlation_id_for(content_hash: str, line_number: int) -> str:
-    """The correlation id an exception for this line carries (§11).
-
-    Derived from the ingested artefact rather than taken from an ambient request context, and that
-    is deliberate. §11 requires the id to span ingestion through to posting; deriving it from the
-    content hash of the file the line arrived in and its position within that file makes the span a
-    property of the data instead of a value some caller has to remember to thread through. It also
-    makes it *stable*: re-running classification after a crash produces the same id, where a
-    request-scoped id would produce a new one for the same economic event.
-
-    Content hash rather than batch id because the hash is the identity of the payload (FR-1), so a
-    re-delivery of the same file yields the same correlation id for the same line.
-    """
-    return f"lecp:{content_hash}:{line_number:06d}"
 
 
 async def run_classification(

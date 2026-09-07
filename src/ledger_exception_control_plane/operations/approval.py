@@ -43,7 +43,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ledger_exception_control_plane.audit import emit
+from ledger_exception_control_plane.audit import approval_scope, emit
 from ledger_exception_control_plane.db.control import (
     Adjustment,
     Approval,
@@ -64,19 +64,12 @@ from ledger_exception_control_plane.db.control import PostingOutcome as OutcomeC
 from ledger_exception_control_plane.security import Principal, Role
 
 __all__ = [
-    "APPROVAL_SCOPE",
     "ApprovalRecord",
     "ApprovalRefusedError",
     "RefusalReason",
     "record_decision",
     "supersession_is_blocked",
 ]
-
-#: §11's *"authorisation under which the action ran"* for a human decision.
-#:
-#: The role, not a capability name: this is the one place in the system where a *person* is the
-#: authority, and the trail has to say which kind of person. Rendered as ``approval:<role>``.
-APPROVAL_SCOPE = "approval"
 
 #: How an approval decision reads in the audit trail. Total over the enum by construction — the
 #: fourth audit value, ``n_a``, is for events that are not decisions at all.
@@ -366,7 +359,7 @@ async def record_decision(
         outcome=AuditOutcome.SUCCESS,
         correlation_id=exception_row.correlation_id,
         occurred_at=now,
-        scope_granted=f"{APPROVAL_SCOPE}:{principal.role.value}",
+        scope_granted=approval_scope(principal.role.value),
         principal=principal.id,
         approval_decision=_DECISION_AUDIT[decision],
         approver=principal.id,

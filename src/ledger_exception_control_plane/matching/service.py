@@ -38,11 +38,17 @@ from sqlalchemy import Date, cast, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from ledger_exception_control_plane.db.control import ExceptionRecord
+from ledger_exception_control_plane.audit import (
+    correlation_id_for,
+    emit,
+    scope_for,
+)
+from ledger_exception_control_plane.db.control import AuditOutcome, AuditTool, ExceptionRecord
 from ledger_exception_control_plane.db.models import (
     LedgerEntry,
     MatchResult,
     MatchState,
+    SettlementBatch,
     SettlementLine,
 )
 from ledger_exception_control_plane.matching.engine import (
@@ -274,5 +280,46 @@ async def _persist(
                 .where(SettlementLine.id.in_(inserted))
                 .values(match_state=MatchState.MATCHED)
             )
+            await _audit(session, inserted, matched_at)
 
     return inserted
+
+
+async def _audit(session: AsyncSession, line_ids: list[uuid.UUID], matched_at: dt.datetime) -> None:
+    """One §11 ``match`` event per line that actually changed state, inside the same transaction.
+
+    **Per transition, not per run and not per candidate pair.** A run-level event could not say
+    which line was matched, which is the only thing an auditor would ask; a per-candidate event
+    would record the matcher thinking rather than the system deciding, and the volume difference is
+    large — the engine considers every eligible pair. What happened here is that these lines moved
+    from unmatched to matched, and that is one fact per line.
+
+    **Nothing is emitted for a line that stayed unmatched**, and that is the same rule seen from the
+    other side: no transition occurred. Matching deliberately re-considers residual and ambiguous
+    lines on every run, so emitting for them would append a fresh event on every pass for a line
+    nothing had happened to — an audit trail that grows with the number of times it was asked rather
+    than with the number of things that changed. The residual's own record is the ``exception`` row
+    M2.3 creates for it.
+
+    The correlation id is *derived* from the batch's content hash and the line's number rather than
+    read from anywhere, which is what lets a stage that runs before any ``exception`` exists carry
+    the same id the exception will later be written with. §18 asks for an id that spans ingestion to
+    posting; deriving it from the ingested artefact is what makes that true here.
+    """
+    rows = (
+        await session.execute(
+            select(SettlementBatch.content_hash, SettlementLine.line_number)
+            .join(SettlementLine, SettlementLine.settlement_batch_id == SettlementBatch.id)
+            .where(SettlementLine.id.in_(line_ids))
+        )
+    ).all()
+
+    for content_hash, line_number in rows:
+        await emit(
+            session,
+            tool=AuditTool.MATCH,
+            outcome=AuditOutcome.SUCCESS,
+            correlation_id=correlation_id_for(content_hash, line_number),
+            occurred_at=matched_at,
+            scope_granted=scope_for(AuditTool.MATCH),
+        )

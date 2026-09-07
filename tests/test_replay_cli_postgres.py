@@ -125,6 +125,17 @@ async def clean_slate() -> AsyncIterator[None]:
 async def _wipe() -> None:
     connection = await asyncpg.connect(DSN)
     try:
+        # 5.2 emits an audit event at every state transition, so this table now accumulates
+        # across tests. Cleared with its append-only trigger suspended — the harness explicitly
+        # overriding a control it also tests, which `assert_target_is_disposable` has already
+        # established is safe here because the target is a throwaway database.
+        await connection.execute(
+            "ALTER TABLE audit_event DISABLE TRIGGER audit_event_append_only_row"
+        )
+        await connection.execute("DELETE FROM audit_event")
+        await connection.execute(
+            "ALTER TABLE audit_event ENABLE TRIGGER audit_event_append_only_row"
+        )
         for table in (
             "dlq",
             "posting_attempt",
@@ -208,6 +219,15 @@ def _instruction(exception_id: uuid.UUID, **overrides: Any) -> AdjustmentInstruc
     return dataclasses.replace(base, **overrides) if overrides else base
 
 
+#: The operator a replay is recorded against.
+#:
+#: 5.2 made ``--principal`` required for a replay that actually sends. A re-send is an
+#: irreversible financial write ordered by a human, and §11 offers "authenticated human, or
+#: `system`" — 4.3 shipped the command with no way to say which, so every event it produced
+#: answered with the wrong half.
+OPERATOR = ["--principal", "operator-a"]
+
+
 async def run_cli(argv: list[str]) -> int:
     """Drive ``main`` exactly as a shell would, from inside an async test.
 
@@ -286,7 +306,7 @@ async def test_the_cli_replays_a_dead_letter_and_applies_exactly_one_posting(
     ledger = SimulatedLedger()
     monkeypatch.setitem(ADAPTERS, "simulated", lambda: ledger)
 
-    code = await run_cli(["replay", "--id", str(dlq_id)])
+    code = await run_cli(["replay", "--id", str(dlq_id), *OPERATOR])
 
     assert code == 0
     assert ledger.applied_count(operation_id) == 1, "measured at the ledger, not at us"
@@ -311,7 +331,7 @@ async def test_the_cli_sends_nothing_for_an_already_confirmed_operation(
     ledger = SimulatedLedger()
     monkeypatch.setitem(ADAPTERS, "simulated", lambda: ledger)
 
-    assert await run_cli(["replay", "--id", str(dlq_id)]) == 0
+    assert await run_cli(["replay", "--id", str(dlq_id), *OPERATOR]) == 0
     assert ledger.posts_received == 1
 
     # A second dead letter for the same, now-confirmed, operation.
@@ -321,7 +341,7 @@ async def test_the_cli_sends_nothing_for_an_already_confirmed_operation(
     finally:
         await connection.close()
 
-    assert await run_cli(["replay", "--id", str(dlq_id)]) == 0
+    assert await run_cli(["replay", "--id", str(dlq_id), *OPERATOR]) == 0
 
     assert ledger.applied_count(operation_id) == 1
     assert ledger.posts_received == 1, "the second invocation sent something"
@@ -348,7 +368,7 @@ async def test_one_bad_entry_does_not_abandon_the_rest_of_the_batch(
     monkeypatch.setitem(ADAPTERS, "simulated", lambda: ledger)
 
     forged = uuid.uuid4()
-    code = await run_cli(["replay", "--id", str(forged), "--id", str(first)])
+    code = await run_cli(["replay", "--id", str(forged), "--id", str(first), *OPERATOR])
 
     captured = capsys.readouterr().out
     assert str(forged) in captured and "skipped" in captured
@@ -366,6 +386,41 @@ async def test_replay_needs_a_target(engine: AsyncEngine) -> None:
     with pytest.raises(SystemExit) as exit_info:
         await run_cli(["replay"])
     assert exit_info.value.code == 2
+
+
+@pytest.mark.asyncio
+async def test_replay_needs_a_principal(engine: AsyncEngine) -> None:
+    """**A re-send that nobody is recorded as ordering is a re-send with no audit trail (§11).**
+
+    4.3 shipped this command without one, so every event a replay produced recorded ``system`` —
+    §11 offers *"authenticated human, or `system`"* and a human at a command line is the first half.
+    Required rather than defaulted, because a default is exactly what kept the trail compiling and
+    lying: a caller with nobody to name cannot replay.
+    """
+    dlq_id, _ = await _dead_letter_one(engine, "noprincipal")
+
+    with pytest.raises(SystemExit) as exit_info:
+        await run_cli(["replay", "--id", str(dlq_id)])
+    assert exit_info.value.code == 2
+
+    (entry,) = await _rows("dlq")
+    assert entry["replay_state"] == "pending", "nothing was replayed"
+    assert all(row["outcome"] != "confirmed" for row in await _rows("posting_attempt")), (
+        "and nothing was posted"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_needs_no_principal(engine: AsyncEngine) -> None:
+    """It sends nothing, so there is no financial act to attribute.
+
+    The complement of the test above, and the reason the requirement is scoped to sends rather than
+    to the subcommand: a control that refused a harmless inspection would be one an operator learns
+    to work around.
+    """
+    await _dead_letter_one(engine, "dryprincipal")
+
+    assert await run_cli(["replay", "--all", "--dry-run"]) == 0
 
 
 @pytest.mark.asyncio
@@ -402,7 +457,7 @@ async def test_list_reports_the_pending_queue(
 async def test_an_empty_queue_is_reported_as_empty(
     engine: AsyncEngine, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert await run_cli(["replay", "--all"]) == 0
+    assert await run_cli(["replay", "--all", *OPERATOR]) == 0
     assert "no pending dead letters" in capsys.readouterr().out
 
 
@@ -442,7 +497,7 @@ async def test_the_cli_never_prints_the_ledgers_own_rejection_text(
 
     ledger = SimulatedLedger()
     monkeypatch.setitem(ADAPTERS, "simulated", lambda: ledger)
-    await run_cli(["replay", "--id", str(entry["id"])])
+    await run_cli(["replay", "--id", str(entry["id"]), *OPERATOR])
 
     captured = capsys.readouterr()
     assert secret not in captured.out
@@ -486,7 +541,9 @@ async def test_a_rejected_dead_letter_leaves_the_queue(
     ledger = SimulatedLedger()
     monkeypatch.setitem(ADAPTERS, "simulated", lambda: ledger)
 
-    assert await run_cli(["replay", "--all"]) == 0, "a rejection is resolved, not left undone"
+    assert await run_cli(["replay", "--all", *OPERATOR]) == 0, (
+        "a rejection is resolved, not left undone"
+    )
     assert ledger.posts_received == 0, "nothing was sent for an operation the ledger declined"
 
     (entry,) = await _rows("dlq")
@@ -494,7 +551,7 @@ async def test_a_rejected_dead_letter_leaves_the_queue(
     assert entry["replayed_at"] is not None
 
     # And the queue is now genuinely empty, so a second pass has nothing to starve on.
-    assert await run_cli(["replay", "--all"]) == 0
+    assert await run_cli(["replay", "--all", *OPERATOR]) == 0
 
 
 @pytest.mark.asyncio

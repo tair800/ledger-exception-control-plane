@@ -92,6 +92,11 @@ DSN = os.environ.get(
 )
 
 EPOCH = dt.datetime(2026, 6, 1, 9, 0, tzinfo=dt.UTC)
+
+#: The operator a replay is recorded against. 5.2 made `principal` required on
+#: `replay_dead_letter`: a re-send is an irreversible financial write ordered by a human, and
+#: §11 offers "authenticated human, or `system`" — 4.3 was answering with the wrong half.
+OPERATOR = "operator-a"
 REBOOK_ACCOUNT = "4100"
 
 #: A policy with the smallest bounds that still exercise every branch: three sends, then exhaustion.
@@ -958,6 +963,7 @@ async def test_an_outbox_row_dead_letters_at_most_once(engine: AsyncEngine) -> N
                 envelope={"operation_id": "x"},
                 attempts=1,
                 mark_state=True,
+                dead_lettered_at=EPOCH,
             )
 
     assert len(await _rows("dlq")) == 1
@@ -993,7 +999,11 @@ async def test_replay_applies_the_posting_exactly_once(engine: AsyncEngine) -> N
     ledger = SimulatedLedger()
 
     report = await replay_dead_letter(
-        engine, dlq_id=entry["id"], adapter=ledger, now=EPOCH + dt.timedelta(hours=1)
+        engine,
+        dlq_id=entry["id"],
+        adapter=ledger,
+        now=EPOCH + dt.timedelta(hours=1),
+        principal=OPERATOR,
     )
 
     assert report.outcome is ReplayOutcome.APPLIED
@@ -1049,13 +1059,18 @@ async def test_replaying_an_already_confirmed_operation_applies_nothing_further(
             envelope={"operation_id": operation_id},
             attempts=1,
             mark_state=False,
+            dead_lettered_at=EPOCH,
         )
 
     (entry,) = await _rows("dlq")
     posts_before = ledger.posts_received
 
     report = await replay_dead_letter(
-        engine, dlq_id=entry["id"], adapter=ledger, now=EPOCH + dt.timedelta(hours=1)
+        engine,
+        dlq_id=entry["id"],
+        adapter=ledger,
+        now=EPOCH + dt.timedelta(hours=1),
+        principal=OPERATOR,
     )
 
     assert report.outcome is ReplayOutcome.ALREADY_CONFIRMED
@@ -1098,6 +1113,7 @@ async def test_replay_never_re_derives_the_identifier_or_the_amount(
         dlq_id=entry["id"],
         adapter=SimulatedLedger(responder=watch),
         now=EPOCH + dt.timedelta(hours=1),
+        principal=OPERATOR,
     )
 
     ((sent_operation_id, sent),) = seen
@@ -1138,10 +1154,14 @@ async def test_a_replayed_entry_cannot_be_replayed_again(engine: AsyncEngine) ->
     (entry,) = await _rows("dlq")
     ledger = SimulatedLedger()
 
-    await replay_dead_letter(engine, dlq_id=entry["id"], adapter=ledger, now=EPOCH)
+    await replay_dead_letter(
+        engine, dlq_id=entry["id"], adapter=ledger, now=EPOCH, principal=OPERATOR
+    )
 
     with pytest.raises(ValueError, match="only a pending entry"):
-        await replay_dead_letter(engine, dlq_id=entry["id"], adapter=ledger, now=EPOCH)
+        await replay_dead_letter(
+            engine, dlq_id=entry["id"], adapter=ledger, now=EPOCH, principal=OPERATOR
+        )
 
 
 @pytest.mark.asyncio
@@ -1170,6 +1190,7 @@ async def test_a_failed_replay_leaves_the_entry_pending_and_keeps_its_evidence(
         dlq_id=entry["id"],
         adapter=_RefusesToConnect(),
         now=EPOCH + dt.timedelta(hours=1),
+        principal=OPERATOR,
     )
 
     assert report.outcome is ReplayOutcome.NOT_SENT
@@ -1224,13 +1245,18 @@ async def test_replaying_an_ambiguous_operation_is_refused_without_proven_capabi
             envelope={"operation_id": operation_id},
             attempts=1,
             mark_state=True,
+            dead_lettered_at=EPOCH,
         )
 
     (entry,) = await _rows("dlq")
     unproven = _ResetsAfterSending()
 
     report = await replay_dead_letter(
-        engine, dlq_id=entry["id"], adapter=unproven, now=EPOCH + dt.timedelta(hours=1)
+        engine,
+        dlq_id=entry["id"],
+        adapter=unproven,
+        now=EPOCH + dt.timedelta(hours=1),
+        principal=OPERATOR,
     )
 
     assert report.outcome is ReplayOutcome.REFUSED
@@ -1322,12 +1348,17 @@ async def test_replaying_an_ambiguous_operation_under_a_proven_key_applies_it_on
             envelope={"operation_id": operation_id},
             attempts=1,
             mark_state=True,
+            dead_lettered_at=EPOCH,
         )
 
     (entry,) = await _rows("dlq")
 
     report = await replay_dead_letter(
-        engine, dlq_id=entry["id"], adapter=ledger, now=EPOCH + dt.timedelta(hours=1)
+        engine,
+        dlq_id=entry["id"],
+        adapter=ledger,
+        now=EPOCH + dt.timedelta(hours=1),
+        principal=OPERATOR,
     )
 
     assert report.outcome is ReplayOutcome.APPLIED
@@ -1451,8 +1482,12 @@ async def test_the_retry_path_writes_no_row_a_later_increment_owns(
 
         events = await connection.fetch("SELECT tool, outcome FROM audit_event ORDER BY created_at")
         assert [(row["tool"], row["outcome"]) for row in events] == [
+            # 5.2: the adjustment's own transition, then the send, then the verdict that closed
+            # it, then the dead letter. Every verb §11 names for this path, in order.
+            ("compute_amount", "success"),
             ("post", "quarantined"),
             ("post", "failure"),
+            ("dlq", "failure"),
         ], "the send was recorded before the socket write, and the not_sent verdict closed it"
     finally:
         await connection.close()
@@ -1754,7 +1789,11 @@ async def test_a_rejected_dead_letter_can_leave_the_queue(engine: AsyncEngine) -
 
     ledger = SimulatedLedger()
     report = await replay_dead_letter(
-        engine, dlq_id=entry["id"], adapter=ledger, now=EPOCH + dt.timedelta(hours=1)
+        engine,
+        dlq_id=entry["id"],
+        adapter=ledger,
+        now=EPOCH + dt.timedelta(hours=1),
+        principal=OPERATOR,
     )
 
     assert report.outcome is ReplayOutcome.REJECTED
@@ -1862,7 +1901,11 @@ async def test_a_replay_that_comes_back_ambiguous_stays_in_the_queue(engine: Asy
 
     ambiguous = SimulatedLedger(responder=lambda _op, _i: Unknown(detail="no answer"))
     report = await replay_dead_letter(
-        engine, dlq_id=entry["id"], adapter=ambiguous, now=EPOCH + dt.timedelta(hours=1)
+        engine,
+        dlq_id=entry["id"],
+        adapter=ambiguous,
+        now=EPOCH + dt.timedelta(hours=1),
+        principal=OPERATOR,
     )
 
     assert report.outcome is ReplayOutcome.HELD

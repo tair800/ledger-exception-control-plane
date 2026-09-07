@@ -35,7 +35,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ledger_exception_control_plane.audit import UNRECORDED_CORRELATION_ID, emit
+from ledger_exception_control_plane.audit import (
+    NO_AUTHORITY,
+    UNRECORDED_CORRELATION_ID,
+    approval_scope,
+    emit,
+    scope_for,
+)
 from ledger_exception_control_plane.db.control import (
     Adjustment,
     Approval,
@@ -52,13 +58,11 @@ from ledger_exception_control_plane.db.control import (
 )
 from ledger_exception_control_plane.db.models import SettlementLine
 from ledger_exception_control_plane.operations.approval import (
-    APPROVAL_SCOPE,
     ApprovalRefusedError,
     RefusalReason,
     record_decision,
 )
 from ledger_exception_control_plane.operations.recovery import (
-    RECOVERY_SCOPE,
     RecoveryRefusal,
     RecoveryRefusedError,
     open_items,
@@ -267,7 +271,16 @@ async def _decide(
         await _audit_refusal(
             request,
             tool=AuditTool.APPROVE,
-            scope_granted=f"{APPROVAL_SCOPE}:{principal.role.value}",
+            # **The scope a refused action ran under is the one actually held, never the one
+            # attempted.** An operator whose approval is refused because their role may not approve
+            # held no approval authority at all, and stamping `approval:operator` on that row would
+            # assert an authorisation §16 does not grant — permanently, in an append-only table, in
+            # the one field §11 provides for answering this question. A refusal for some other
+            # reason keeps the real scope: there the authority was held and the refusal was about
+            # something else.
+            scope_granted=(
+                approval_scope(principal.role.value) if principal.may_approve() else NO_AUTHORITY
+            ),
             principal=principal,
             correlation_id=await _correlation_of(session, exception_id),
         )
@@ -661,7 +674,11 @@ async def resolve_recovery(
         await _audit_refusal(
             request,
             tool=AuditTool.RECOVER,
-            scope_granted=RECOVERY_SCOPE,
+            scope_granted=(
+                scope_for(AuditTool.RECOVER)
+                if principal.may_work_operations_queues()
+                else NO_AUTHORITY
+            ),
             principal=principal,
             correlation_id=item_correlation,
         )

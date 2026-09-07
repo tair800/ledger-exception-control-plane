@@ -33,6 +33,11 @@ Callable without HTTP::
     run = await run_classification(engine)
 """
 
+# Re-exported. The derivation moved to `audit` at 5.2, because §11 owns the correlation id and
+# three stages now need it — leaving it here would have made matching import classification,
+# which is the pipeline running backwards. The name stays importable from where it has always
+# been, and a test asserts both resolve to one object.
+from ledger_exception_control_plane.audit import correlation_id_for
 from ledger_exception_control_plane.classification.engine import (
     RULES,
     Classification,
@@ -41,7 +46,6 @@ from ledger_exception_control_plane.classification.engine import (
 )
 from ledger_exception_control_plane.classification.service import (
     ClassificationRun,
-    correlation_id_for,
     run_classification,
 )
 from ledger_exception_control_plane.classification.taxonomy import (

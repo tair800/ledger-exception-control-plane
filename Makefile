@@ -5,7 +5,7 @@
         fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify \
         money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
         operations-verify dispatch-verify ledger-verify retry-verify approval-verify \
-        reconcile-verify
+        reconcile-verify audit-verify
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -188,6 +188,16 @@ retry-verify: test-db-init ## Prove bounded retry, the DLQ and replay against re
 
 reconcile-verify: test-db-init ## Prove the UNKNOWN branch, reconciliation and recovery against real PostgreSQL
 	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_reconcile.py tests/test_reconcile_postgres.py -m "integration or not integration" -p no:cacheprovider --no-cov
+
+# --- audit-event contract v1 (M5.2) ---
+#
+# The vocabularies and the mappings are pure and run in the default suite. The three tests §5.2
+# names are all database claims: what the services actually emitted, whether the correlation id
+# recomputes from the ingested artefact, and whether the least-privilege role is denied a write it
+# must not have.
+
+audit-verify: test-db-init ## Prove audit-event contract v1 and the provenance read against real PostgreSQL
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_audit_contract.py tests/test_audit_contract_postgres.py -m "integration or not integration" -p no:cacheprovider --no-cov
 
 # --- recorded cassettes (M3.4) ---
 #

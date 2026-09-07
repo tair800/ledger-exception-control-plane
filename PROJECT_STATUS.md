@@ -3,10 +3,10 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M4.4 complete — `UNKNOWN` semantics, bounded reconciliation and manual
-recovery. M5.1 (the human approval gate) landed immediately before it.
-**Next:** M5.2 (audit-event contract v1 at every state transition), then the **4.5 kill-test gate**.
-See ADR-056 for the build order and ADR-057 for what 4.4 decided.
+**Current milestone:** M5.2 complete — audit-event contract v1, emitted at every state transition.
+**Next:** the **4.5 kill-test gate** — the `naive/` RED baseline and the chaos suite. It is the
+flagship claim and it has not run. See ADR-056 for the build order, ADR-057 for what 4.4 decided and
+ADR-058 for what contract v1 means.
 **The whole deterministic core exists.** A settlement file is ingested, normalised and either
 accepted or quarantined; its lines are matched deterministically against ledger entries with
 tolerance; every line that fails to match becomes exactly one classified exception; and an approved
@@ -26,9 +26,15 @@ bounded by the declared idempotency window *and* a scope proven against the endp
 send recorded, and where the adapter offers neither suppression nor a query the automatic path stops
 and an operator takes it with an evidence procedure in hand.
 
-What still does not exist: the audit contract extended to *every* state transition (5.2); the
-`naive/` baseline and the chaos suite — **the 4.5 kill-test gate has not run**; and no console,
-evaluation, observability or deployment.
+**Every ledger-affecting action now leaves a trace.** 5.2 emits under all ten verbs, inside the
+transaction of the state change each records; a refused action records the authority it actually
+held; a reconciliation separates what the ledger answered from what was concluded; and the two §11
+fields this repository cannot fill truthfully are null with the reason named rather than blank.
+`provenance()` answers §5.2's five questions from one adjustment.
+
+What still does not exist: the `naive/` baseline and the chaos suite — **the 4.5 kill-test gate has
+not run, and the flagship claim is unproven until it does**; no console, evaluation, observability or
+deployment; and no wired pipeline — nothing calls the stages in sequence, which is M7's.
 
 ---
 
@@ -54,7 +60,8 @@ evaluation, observability or deployment.
 | **4.3 Bounded retry, DLQ and replay CLI** | **DONE** | Enumerated transport classifier defaulting to `UNKNOWN`; full-jitter backoff under an attempt ceiling *and* a wall-clock budget; dead-letter queue with a money-free envelope; replay proven to apply exactly one posting, measured at the ledger |
 | **5.1 Approval gate with role separation** | **DONE** | OPEN-8 resolved; hashed bearer tokens, three roles, countersignature and single use enforced by database constraints; the gate proven to block the write |
 | **4.4 `UNKNOWN` semantics, reconciliation and recovery** | **DONE** | §13.5's capability branch executed across all three configurations; query before re-send; both re-send bounds enforced; the consecutive-negative count derived from an append-only table; monotonic transitions and the supersession interlock held by triggers; operator queue with evidence procedure, SLA and segregation of duties; `/recovery` endpoints |
-| 4.5, 5.2 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **5.2 Audit-event contract v1** | **DONE** | All ten verbs emit inside the transaction they describe; closed `scope_granted` vocabulary with a refusal recording the authority actually held; correlation id derived from the ingested artefact and proven by recomputation; `provenance()` answers the exit criterion and names the two fields this repository cannot fill |
+| 4.5, 6.1 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -739,6 +746,172 @@ skipped its database gate.
   PostgreSQL refuse it.
 
 Recorded as **ADR-056**, which also set the build order 5.1 → 4.4 → 5.2 → 4.5 and why.
+
+## What M5.2 delivered
+
+*"The portfolio's canonical audit shape, established here."* Six later repositories re-implement
+§11 — copied, never imported — so every ambiguity in a one-table specification is a decision this
+increment had to take on their behalf, in writing, before a second repository took a different one.
+ADR-058 is that writing.
+
+**No migration.** M1.2 built the table and its append-only trigger; 4.4 added the two verbs §13.5
+required. 5.2 is emission, vocabulary and one read.
+
+### All ten verbs emit, each inside the transaction it describes
+
+4.4 emitted for four of them. 5.2 added `match`, `propose_treatment`, `compute_amount`, `retry`,
+`dlq` and `replay`, and split reconciliation into two. Every event is written into the transaction
+of the state change it records, so the two commit together or not at all — the alternative produces
+an event for a change that rolled back, or a change with no event, and §11 requires the second never
+to happen.
+
+Two placements were forced rather than chosen, and both are the interesting ones:
+
+- **`compute_amount` is emitted where the amount becomes durable, not where it is computed**, and is
+  stamped with the database's own `created_at` rather than a caller's clock. `money/calculator.py`
+  is pure and stays pure; `operations/service.py` feeds the operation-identifier derivation, and a
+  committed guard bans it from importing a clock or naming an `occurred_at` parameter — the ban that
+  makes §12.1's retry-independence checkable rather than asserted. A caller-supplied timestamp would
+  have meant exempting that module from the guard, trading the project's strongest guarantee for an
+  audit field. Reading back the server default costs one round trip and is the truer answer anyway.
+- **`propose_treatment` is emitted on the unusable branch too**, in a transaction of its own, because
+  nothing is persisted there and §11 still requires the trail to say a model was asked and what came
+  back. `CitationError`'s docstring has promised since 3.3 that *"the reason survives into the audit
+  trail"*; until now it did not.
+
+### `scope_granted` is a closed vocabulary, and a refused action records the authority it held
+
+§11's authorisation field was six free-text literals declared in four modules. It is now three
+shapes and no others — a `Scope` member, `approval:<role>`, or `none` — validated in the emitter,
+because an auditor asking *"what ran under the model's authority"* is filtering, and a filter over
+strings each call site invented is a filter over spelling.
+
+**`none` exists because the first version recorded a lie.** 4.4's refusal path stamped
+`approval:<role>` on every refused approval, *including one refused precisely because that role may
+not approve*. An operator's blocked attempt wrote a permanent, undeletable row asserting an
+authorisation §16 does not grant, in the one field provided for answering that question. Found by an
+adversarial review of this increment's own scope, not by a test.
+
+### Reconciliation emits twice, and the second event is the consequential one
+
+A query event records what the ledger *answered* — a `NotFound` is `quarantined`, because that is
+what a negative answer is. A separate event records what was *concluded*, and for `REJECTED` that is
+the most consequential inference this system makes: an irreversible financial write declared never
+to have happened. Without it the trail read `reconcile / quarantined` and stopped, showing the last
+question asked and never the answer acted on.
+
+### The correlation id is derived, and it moved to where §11 owns it
+
+`correlation_id_for(content_hash, line_number)` moved from `classification` to `audit`, because by
+5.2 three stages need it and leaving it where it was first needed would have made matching import
+classification — the pipeline running backwards. `classification` re-exports it; a test asserts the
+two names are one object, because two definitions would be two spans and the failure would look like
+a trail that simply had no other members.
+
+The end-to-end test proves the span by **recomputation**: it recomputes the id from the content hash
+of the ingested file and the line's position in it, and asserts the events carry that. Comparing the
+events to each other would only prove they agree; recomputing proves they agree *with ingestion*.
+
+### `provenance()` answers the exit criterion, and names what it cannot answer
+
+*"A posted adjustment answers: what evidence, which model, who approved, what was computed, by which
+code path."* A criterion phrased as a question is met only when something can be asked, so there is
+one anchored read returning one typed answer, with `answers_the_exit_criterion` as a property a test
+evaluates rather than a claim a reader takes on trust.
+
+It keeps two halves structurally apart. §11 carries no amount and no evidence — an audit trail
+duplicating the amount would be a second copy of a number with exactly one owner — so three of the
+five answers come from the domain tables, and a report that blurred the two would let a reader
+believe the trail proved a figure it never recorded.
+
+The third field is the honest one. **Two of §11's ten fields are null in this repository and the
+report says why**, rather than rendering a blank cell:
+
+- `agent_identity` — §11 admits null *"for deterministic steps"* and §2 states this system is **not
+  an agent**: the model proposes a treatment code and takes no action, so there is nothing to
+  identify.
+- `region_jurisdiction` — §11 defines it as the processing region of *the model call*, and no model
+  call is made here at all: no transport ships, no provider SDK is a dependency, every committed
+  cassette is marked synthesised. Recording a region would describe a request that never happened.
+
+"No model was involved" and "a model was involved and we failed to record which" are different
+states, and an artefact that rendered both as an empty cell would look like evidence and not be.
+
+### Emission is orthogonal to the write discipline
+
+5.2 added emission to six modules and widened **no** entity-writer fence, because none of them
+builds the row — they call `emit`. `AuditEvent` joined the fence map with `audit.py` as its sole
+writer. Two import boundaries were widened, honestly and narrowly: `matching` and `classification`
+may now reach `audit`, which exposes an emitter and two pure helpers and gives neither package a
+route to a table it could not already reach.
+
+### Three corrections carried by this increment
+
+- **ADR-008 said append-only was "enforced by database grant".** ADR-026 replaced that with the
+  trigger and never marked ADR-008 superseded. A grant does not bind the table owner — which is
+  precisely the role a migration runs as. ADR-008 now points at the correction.
+- **`reconciliation_query` had the trigger and not the grant.** 4.4 added the table and left the
+  provisioning script behind, so the application role still held `UPDATE` and `DELETE` on the rows
+  that justify declaring an ambiguous financial write un-applied. Fixed, and tested *as the role* —
+  with a `has_table_privilege` pre-check, because a grant test on an unprovisioned database passes
+  by denying everything.
+- **The replay command had no principal.** Every event a replay produced recorded `system`, while
+  §11 offers *"authenticated human, or `system`"* and a human at a command line is the first half.
+  `--principal` is now required, with no default: a caller with nobody to name cannot replay.
+
+### What this increment does not demonstrate
+
+**There is no wired pipeline.** Nothing in `src/` calls ingestion, matching, classification,
+approval, enqueue and dispatch in sequence — that orchestration is M7's. So *"every ledger-affecting
+action has at least one event"* is demonstrated by a test that composes the real service entry
+points itself. Every event it asserts is one the services emitted and nothing is seeded, but the
+test's own docstring says this rather than letting a green result imply a running system.
+
+The second of §5.2's three named tests — *append-only enforced by database grant* — **was already
+discharged at M1.2** and is not rebuilt. `test_schema_postgres.py` runs `SET LOCAL ROLE lecp_app`
+against the real grant and distinguishes `InsufficientPrivilegeError` from the trigger's
+`RestrictViolationError`. Duplicating it elsewhere would have been worse than redundant: only that
+module provisions the role, so a copy would have run against a database where it holds nothing.
+
+## M5.2 verification
+
+```
+audit contract suite:  22 passed, no database (tests/test_audit_contract.py)
+audit contract, real PostgreSQL:  9 passed (tests/test_audit_contract_postgres.py)
+unit suite:           1478 passed, 392 deselected (no Docker required)
+whole suite:          1864 passed, coverage 96.57% (gate 90%)
+```
+
+**The whole-suite run is reported with a caveat, because it earned one.** It took 11h10m against a
+normal 1h50m — the machine was heavily throttled part-way through — and four tests failed inside it,
+every one of them with `asyncio.CancelledError` or `TimeoutError` on a database connection rather
+than on an assertion:
+
+| Test | Failure | Re-run |
+|---|---|---|
+| `test_approval_postgres::test_a_consumed_approval_token_is_refused_on_replay` | `CancelledError` | passes |
+| `test_approval_postgres::test_one_decision_per_resolution_version` | `TimeoutError` in setup | passes |
+| `test_reconcile_postgres::test_only_the_operator_role_may_work_the_queue` | `CancelledError` | passes |
+| `test_retry_postgres::test_the_budget_is_measured_from_the_first_send_not_from_enqueueing` | `TimeoutError` | passes |
+
+Each affected module was re-run in full afterwards and passed completely — `test_approval_postgres`
+and `test_retry_postgres` together at 53/53, `test_reconcile_postgres` at 52/52. **No assertion in
+the suite failed.** Recorded rather than smoothed over: a green number obtained by re-running until
+the timeouts stopped would be a worse artefact than a red one with its cause named, and the honest
+statement is that the gate's assertions all pass while the run itself was not clean.
+
+Every event asserted anywhere in this increment is one the services emitted. Nothing is seeded, and
+the end-to-end test drives the production entry points in sequence rather than a test double of
+them — which is also why it cannot claim to observe a running system, and says so.
+
+Two defects were found by review rather than by test, both in this increment's own subject:
+
+- **the refusal path recorded an authorisation that does not exist.** 4.4 stamped
+  `approval:<role>` on every refused approval, including one refused *because that role may not
+  approve* — a permanent, undeletable row asserting a grant §16 withholds, in the one field §11
+  provides for answering that question. Fixed, with `none` as the honest value and a test.
+- **`reconciliation_query` had the append-only trigger and not the grant.** 4.4 added the table and
+  left the provisioning script behind. Fixed, and tested *as the least-privilege role*.
 
 ## What M4.4 delivered
 
@@ -2237,12 +2410,12 @@ Not deployed. Deployment is increment 10.1 (Fly.io + Neon). No cloud resources e
 ## Last verification results
 
 ```
-whole suite:  1833 passed against a real database (0 failed, 1h48m11s)
-default gate: 1454 passed, 383 deselected (no Docker required)
-coverage:     96.84% (gate 90%, whole suite against the real database)
-ruff format:  121 files already formatted
+whole suite:  1864 passed against a real database, coverage 96.57% (see the M5.2 caveat above)
+default gate: 1478 passed, 392 deselected (no Docker required)
+coverage:     96.57% (gate 90%, whole suite against the real database)
+ruff format:  124 files already formatted
 ruff check:   All checks passed!
-mypy:         Success: no issues found in 112 source files
+mypy:         Success: no issues found in 115 source files
 uv lock:      up to date (--check)
 alembic:      No new upgrade operations detected; upgrade, downgrade and re-upgrade all exercised
 corpus:       matches the generator byte for byte
@@ -2271,14 +2444,19 @@ Python 3.12.13, Windows, uv 0.11.15, Docker 27.4.0 / Compose v2.31.0, recorded 2
 
 ## Open decisions carried from planning
 
-`DECISIONS.md` holds 59 ADR entries (001-057, plus 004a and 004b) and 9 OPEN items.
+`DECISIONS.md` holds 60 ADR entries (001-058, plus 004a and 004b) and 9 OPEN items.
 **OPEN-8** (authentication for the console) was resolved at M5.1 as **ADR-056**, which also
 corrected the build order to 5.1 → 4.4 → 5.2 → 4.5 and said why: §4.4's `/recovery` endpoints need authenticated principals, and §19's chaos list includes
 a replayed approval token, so running 4.4 first would have meant deciding the 4.5 kill-test gate on
 five of seven scenarios. **ADR-057** records what M4.4 decided — the three numbers §13.5 leaves to
 the project, where each monotonicity control lives, why the scope bound needed a recorded endpoint,
 and the limit of what the manual branch can honestly claim. It opens nothing and narrows **OPEN-11**
-by making the capability branch executable rather than described.
+by making the capability branch executable rather than described. **ADR-058** establishes
+audit-event contract v1 for the whole portfolio: it fixes the field set at ten rather than eleven,
+states the rule for adding a `tool` verb, resolves `agent_identity` against `model` from §2's "not
+an agent", records why `region_jurisdiction` must be null while no model call is made, and corrects
+**ADR-008**, whose "enforced by database grant" was replaced by a trigger at ADR-026 and never
+marked superseded.
 
 M4.1 recorded **ADR-052** and opened nothing; it raised, without resolving, a **three-way disagreement about when the `naive/` kill-test gate runs**,
 and **ADR-053 has since closed it** — as a documentation correction, before M4.2 began and without

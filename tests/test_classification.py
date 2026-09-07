@@ -675,6 +675,13 @@ def test_the_classification_package_never_imports_the_matcher() -> None:
         "ledger_exception_control_plane.classification",
         "ledger_exception_control_plane.db.models",
         "ledger_exception_control_plane.db.control",
+        # 5.2. `audit` is the one module every stage is permitted to reach, and admitting it widens
+        # nothing that matters: it exposes an emitter and two pure helpers, constructs the audit row
+        # itself so no per-entity writer fence moves, and gives this package no route to any table
+        # it could not already reach. It is also where the correlation-id derivation now lives —
+        # §11 owns that value, and three stages need it — so excluding `audit` here would mean this
+        # package could no longer compute the id it writes onto every exception.
+        "ledger_exception_control_plane.audit",
     }
     for name, tree in _classification_sources():
         for node in ast.walk(tree):

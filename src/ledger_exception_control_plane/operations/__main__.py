@@ -110,6 +110,7 @@ async def _replay(
     adapter_name: str,
     dry_run: bool,
     now: dt.datetime,
+    principal: str,
 ) -> int:
     engine = create_async_engine(dsn)
     try:
@@ -146,7 +147,13 @@ async def _replay(
         failures = 0
         for target in targets:
             try:
-                report = await replay_dead_letter(engine, dlq_id=target, adapter=adapter, now=now)
+                report = await replay_dead_letter(
+                    engine,
+                    dlq_id=target,
+                    adapter=adapter,
+                    now=now,
+                    principal=principal,
+                )
             except (LookupError, ValueError) as refusal:
                 # A forged id, or an entry somebody has already worked. Reported and skipped: one
                 # bad row in a batch is not a reason to abandon the rest of the queue.
@@ -201,6 +208,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run", action="store_true", help="report what would be replayed and send nothing"
     )
+    parser.add_argument(
+        "--principal",
+        help=(
+            "the operator replaying. Required for replay: a re-send is an irreversible "
+            "financial write and the audit trail records who ordered it (PROJECT_SPEC 11)."
+        ),
+    )
     arguments = parser.parse_args(argv)
 
     settings = Settings()
@@ -212,6 +226,16 @@ def main(argv: list[str] | None = None) -> int:
     if not arguments.ids and not arguments.all:
         parser.error("replay needs --id <uuid> (repeatable) or --all")
 
+    # Required rather than defaulted, and the default is what made it worth requiring. 4.3
+    # shipped this command with no principal, so every event a replay produced recorded
+    # `system` — §11 offers "authenticated human, or `system`" and a human running a command
+    # line is the first half. A default would have kept the trail compiling and lying.
+    if not arguments.dry_run and not arguments.principal:
+        parser.error(
+            "replay needs --principal <id>: a re-send is an irreversible financial write and "
+            "the trail has to say who ordered it"
+        )
+
     return asyncio.run(
         _replay(
             dsn,
@@ -219,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
             adapter_name=arguments.adapter,
             dry_run=arguments.dry_run,
             now=dt.datetime.now(tz=dt.UTC),
+            principal=arguments.principal or "",
         )
     )
 
