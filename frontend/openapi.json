@@ -1,615 +1,10 @@
 {
-  "openapi": "3.1.0",
-  "info": {
-    "title": "ledger-exception-control-plane",
-    "version": "0.1.0"
-  },
-  "paths": {
-    "/api/v1/exceptions/{exception_id}/approve": {
-      "post": {
-        "tags": [
-          "control-plane"
-        ],
-        "summary": "Approve",
-        "description": "Authorise the proposed treatment. An edit is a different verb, below.",
-        "operationId": "approve_api_v1_exceptions__exception_id__approve_post",
-        "parameters": [
-          {
-            "name": "exception_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Exception Id"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DecisionRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DecisionResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/exceptions/{exception_id}/edit": {
-      "post": {
-        "tags": [
-          "control-plane"
-        ],
-        "summary": "Edit",
-        "description": "Authorise a treatment **different** from the one proposed.\n\nA separate route rather than a flag on ``approve``, because it carries a different authorisation\nrule: controller only, and never the principal who requested it. A flag would have made the\nstricter path reachable by forgetting to set it.",
-        "operationId": "edit_api_v1_exceptions__exception_id__edit_post",
-        "parameters": [
-          {
-            "name": "exception_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Exception Id"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DecisionRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DecisionResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/exceptions/{exception_id}/reject": {
-      "post": {
-        "tags": [
-          "control-plane"
-        ],
-        "summary": "Reject",
-        "description": "Decline. Authorises nothing, and must not name a treatment.",
-        "operationId": "reject_api_v1_exceptions__exception_id__reject_post",
-        "parameters": [
-          {
-            "name": "exception_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Exception Id"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DecisionRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DecisionResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/exceptions": {
-      "get": {
-        "tags": [
-          "control-plane"
-        ],
-        "summary": "List Exceptions",
-        "description": "The queue. Every configured role may read it; only some may act on it.",
-        "operationId": "list_exceptions_api_v1_exceptions_get",
-        "parameters": [
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/ExceptionSummary"
-                  },
-                  "title": "Response List Exceptions Api V1 Exceptions Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/exceptions/{exception_id}": {
-      "get": {
-        "tags": [
-          "control-plane"
-        ],
-        "summary": "Exception Detail",
-        "description": "Full provenance for one exception: evidence, proposal, decision, money, dispatch.\n\n\u00a710: *\"full provenance: evidence, proposal, approval, adjustment, audit trail\"*. This is the\nread the console's detail view is built on, and the reason it is one request rather than six is\nthat a reviewer following a posting backwards should not have to assemble it themselves.",
-        "operationId": "exception_detail_api_v1_exceptions__exception_id__get",
-        "parameters": [
-          {
-            "name": "exception_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Exception Id"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ExceptionDetail"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/recovery": {
-      "get": {
-        "tags": [
-          "control-plane"
-        ],
-        "summary": "List Recovery",
-        "description": "The operator queue, most urgent first. ``?stale=true`` returns only items past their SLA.\n\nReadable by every configured role, like the exception queue: seeing that an operation is stuck\nis not the same authority as judging what happened to it, and an analyst who cannot see it\ncannot escalate it either.",
-        "operationId": "list_recovery_api_v1_recovery_get",
-        "parameters": [
-          {
-            "name": "stale",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false,
-              "title": "Stale"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/RecoveryItemView"
-                  },
-                  "title": "Response List Recovery Api V1 Recovery Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/recovery/{recovery_id}/resolve": {
-      "post": {
-        "tags": [
-          "control-plane"
-        ],
-        "summary": "Resolve Recovery",
-        "description": "Record what the operator found. **This never causes a posting.**\n\nTakes the engine rather than the request-scoped session because the service opens its own\ntransaction \u2014 it locks the queue row, settles the dispatch and appends the audit event\ntogether, and a handler-owned session would let the route commit half of that.",
-        "operationId": "resolve_recovery_api_v1_recovery__recovery_id__resolve_post",
-        "parameters": [
-          {
-            "name": "recovery_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Recovery Id"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ResolveRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RecoveryItemView"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/dlq": {
-      "get": {
-        "tags": [
-          "control-plane"
-        ],
-        "summary": "List Dead Letters",
-        "description": "The dead-letter queue. **Operator work, so an approver may not see it as their queue.**\n\n\u00a716 separates the roles: the principal who authorises a posting is not the principal who works\nthe failure queues, and 4.4 already enforces the mirror of this rule for recovery. Refusing\nhere rather than filtering keeps the reason legible \u2014 an analyst is told they lack the\nauthority, instead of being shown an empty queue and left to conclude nothing failed.\n\n``pending_only`` defaults to true because a replayed entry is history and an operator opening\nthe queue wants work. The full list stays reachable, which is what makes the default a\nconvenience rather than a hidden filter.",
-        "operationId": "list_dead_letters_api_v1_dlq_get",
-        "parameters": [
-          {
-            "name": "pending_only",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": true,
-              "title": "Pending Only"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/DeadLetterView"
-                  },
-                  "title": "Response List Dead Letters Api V1 Dlq Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/healthz": {
-      "get": {
-        "tags": [
-          "health"
-        ],
-        "summary": "Liveness",
-        "description": "Liveness: is this process alive and serving?\n\nChecks nothing external, by design. It must stay green while PostgreSQL or Redis is\ndown, otherwise a dependency outage becomes a restart loop.",
-        "operationId": "liveness_healthz_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LivenessResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/readyz": {
-      "get": {
-        "tags": [
-          "health"
-        ],
-        "summary": "Readiness",
-        "description": "Readiness: can this instance accept work that needs its dependencies?\n\nProbes PostgreSQL and Redis under a bounded timeout, read-only. Returns 503 if\neither is unavailable, with per-dependency status and no diagnostic detail.",
-        "operationId": "readiness_readyz_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReadinessResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  },
   "components": {
     "schemas": {
       "AuditEventView": {
+        "additionalProperties": false,
+        "description": "One row of the append-only trail, as \u00a711 recorded it.\n\nFields the system cannot truthfully know are returned as ``null`` rather than omitted or\nfilled: ``agent_identity`` is null because this system is not an agent, and\n``region_jurisdiction`` is null because no model call is made. ADR-058 took that decision and\nthe console must not quietly hide it \u2014 a trail that renders an absent field as blank space\nlooks like a trail with nothing to say.",
         "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Id"
-          },
-          "occurred_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Occurred At"
-          },
-          "principal": {
-            "type": "string",
-            "title": "Principal"
-          },
           "agent_identity": {
             "anyOf": [
               {
@@ -621,17 +16,9 @@
             ],
             "title": "Agent Identity"
           },
-          "tool": {
-            "type": "string",
-            "title": "Tool"
-          },
-          "scope_granted": {
-            "type": "string",
-            "title": "Scope Granted"
-          },
           "approval_decision": {
-            "type": "string",
-            "title": "Approval Decision"
+            "title": "Approval Decision",
+            "type": "string"
           },
           "approver": {
             "anyOf": [
@@ -644,6 +31,15 @@
             ],
             "title": "Approver"
           },
+          "correlation_id": {
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
           "model": {
             "anyOf": [
               {
@@ -654,6 +50,19 @@
               }
             ],
             "title": "Model"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "principal": {
+            "title": "Principal",
+            "type": "string"
           },
           "region_jurisdiction": {
             "anyOf": [
@@ -666,17 +75,15 @@
             ],
             "title": "Region Jurisdiction"
           },
-          "outcome": {
-            "type": "string",
-            "title": "Outcome"
+          "scope_granted": {
+            "title": "Scope Granted",
+            "type": "string"
           },
-          "correlation_id": {
-            "type": "string",
-            "title": "Correlation Id"
+          "tool": {
+            "title": "Tool",
+            "type": "string"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "id",
           "occurred_at",
@@ -692,51 +99,53 @@
           "correlation_id"
         ],
         "title": "AuditEventView",
-        "description": "One row of the append-only trail, as \u00a711 recorded it.\n\nFields the system cannot truthfully know are returned as ``null`` rather than omitted or\nfilled: ``agent_identity`` is null because this system is not an agent, and\n``region_jurisdiction`` is null because no model call is made. ADR-058 took that decision and\nthe console must not quietly hide it \u2014 a trail that renders an absent field as blank space\nlooks like a trail with nothing to say."
+        "type": "object"
       },
       "DeadLetterView": {
+        "additionalProperties": false,
+        "description": "One dead-lettered dispatch, with the envelope an operator judges it by.\n\n**No monetary amount, and that is a schema guarantee rather than a choice made here.** The\n`dlq` table's envelope is JSONB and a check constraint rejects amount-like keys in it, because\nmoney in JSONB would bypass the money constraints and become the numeric escape hatch the\nschema forbids everywhere else. The amount is reconstructed from `adjustment` at replay time,\nso the console shows an operator *what failed and why* and never invites them to re-price it.\n\n``adjustment_id`` is resolved through the outbox row so the console can link a dead letter back\nto the exception it came from in one hop; without it the queue is a list of identifiers an\noperator cannot navigate.",
         "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Id"
-          },
-          "outbox_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Outbox Id"
-          },
           "adjustment_id": {
-            "type": "string",
             "format": "uuid",
-            "title": "Adjustment Id"
-          },
-          "operation_id": {
-            "type": "string",
-            "title": "Operation Id"
-          },
-          "reason": {
-            "type": "string",
-            "title": "Reason"
+            "title": "Adjustment Id",
+            "type": "string"
           },
           "attempts": {
-            "type": "integer",
-            "title": "Attempts"
-          },
-          "replay_state": {
-            "type": "string",
-            "title": "Replay State"
+            "title": "Attempts",
+            "type": "integer"
           },
           "created_at": {
-            "type": "string",
             "format": "date-time",
-            "title": "Created At"
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "outbox_id": {
+            "format": "uuid",
+            "title": "Outbox Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "replay_state": {
+            "title": "Replay State",
+            "type": "string"
           },
           "replayed_at": {
             "anyOf": [
               {
-                "type": "string",
-                "format": "date-time"
+                "format": "date-time",
+                "type": "string"
               },
               {
                 "type": "null"
@@ -745,8 +154,6 @@
             "title": "Replayed At"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "id",
           "outbox_id",
@@ -759,20 +166,34 @@
           "replayed_at"
         ],
         "title": "DeadLetterView",
-        "description": "One dead-lettered dispatch, with the envelope an operator judges it by.\n\n**No monetary amount, and that is a schema guarantee rather than a choice made here.** The\n`dlq` table's envelope is JSONB and a check constraint rejects amount-like keys in it, because\nmoney in JSONB would bypass the money constraints and become the numeric escape hatch the\nschema forbids everywhere else. The amount is reconstructed from `adjustment` at replay time,\nso the console shows an operator *what failed and why* and never invites them to re-price it.\n\n``adjustment_id`` is resolved through the outbox row so the console can link a dead letter back\nto the exception it came from in one hop; without it the queue is a list of identifiers an\noperator cannot navigate."
+        "type": "object"
       },
       "DecisionRequest": {
+        "additionalProperties": false,
+        "description": "What a caller may say. Note what is absent: the principal.\n\n``extra=\"forbid\"`` so a client cannot smuggle a ``principal`` field past the model and have some\nlater refactor read it. The actor is resolved from the token, always.",
         "properties": {
-          "resolution_version": {
-            "type": "integer",
-            "minimum": 1.0,
-            "title": "Resolution Version"
-          },
           "approval_token": {
-            "type": "string",
             "maxLength": 64,
             "minLength": 8,
-            "title": "Approval Token"
+            "title": "Approval Token",
+            "type": "string"
+          },
+          "requested_by": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested By"
+          },
+          "resolution_version": {
+            "minimum": 1.0,
+            "title": "Resolution Version",
+            "type": "integer"
           },
           "treatment": {
             "anyOf": [
@@ -787,56 +208,34 @@
           "treatment_proposal_id": {
             "anyOf": [
               {
-                "type": "string",
-                "format": "uuid"
+                "format": "uuid",
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
             "title": "Treatment Proposal Id"
-          },
-          "requested_by": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 128
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Requested By"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "resolution_version",
           "approval_token"
         ],
         "title": "DecisionRequest",
-        "description": "What a caller may say. Note what is absent: the principal.\n\n``extra=\"forbid\"`` so a client cannot smuggle a ``principal`` field past the model and have some\nlater refactor read it. The actor is resolved from the token, always."
+        "type": "object"
       },
       "DecisionResponse": {
+        "additionalProperties": false,
         "properties": {
           "approval_id": {
-            "type": "string",
             "format": "uuid",
-            "title": "Approval Id"
+            "title": "Approval Id",
+            "type": "string"
           },
-          "exception_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Exception Id"
-          },
-          "resolution_version": {
-            "type": "integer",
-            "title": "Resolution Version"
-          },
-          "decision": {
-            "type": "string",
-            "title": "Decision"
+          "approval_token": {
+            "title": "Approval Token",
+            "type": "string"
           },
           "approved_treatment": {
             "anyOf": [
@@ -849,17 +248,24 @@
             ],
             "title": "Approved Treatment"
           },
-          "principal": {
-            "type": "string",
-            "title": "Principal"
+          "decision": {
+            "title": "Decision",
+            "type": "string"
           },
-          "approval_token": {
-            "type": "string",
-            "title": "Approval Token"
+          "exception_id": {
+            "format": "uuid",
+            "title": "Exception Id",
+            "type": "string"
+          },
+          "principal": {
+            "title": "Principal",
+            "type": "string"
+          },
+          "resolution_version": {
+            "title": "Resolution Version",
+            "type": "integer"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "approval_id",
           "exception_id",
@@ -869,50 +275,51 @@
           "principal",
           "approval_token"
         ],
-        "title": "DecisionResponse"
+        "title": "DecisionResponse",
+        "type": "object"
       },
       "DependencyReport": {
+        "additionalProperties": false,
+        "description": "One dependency's readiness result: a name and a status, never a reason string.",
         "properties": {
           "name": {
-            "type": "string",
-            "title": "Name"
+            "title": "Name",
+            "type": "string"
           },
           "status": {
-            "type": "string",
-            "title": "Status"
+            "title": "Status",
+            "type": "string"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "name",
           "status"
         ],
         "title": "DependencyReport",
-        "description": "One dependency's readiness result: a name and a status, never a reason string."
+        "type": "object"
       },
       "EvidenceView": {
+        "additionalProperties": false,
+        "description": "One addressable evidence record, and whether the proposal actually cited it.\n\n``cited`` is the field a reviewer needs and the one a naive read would omit. \u00a76.1 requires a\nproposal to reference the evidence it used, and 3.3 validates that every citation is a subset\nof the pack the model was shown \u2014 so the interesting question in the console is not *what\nevidence existed* but *which of it the model claimed to rely on*. Returning the pack without\nthat distinction would show a reviewer a list and let them assume all of it was cited.",
         "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Id"
-          },
-          "kind": {
-            "type": "string",
-            "title": "Kind"
+          "cited": {
+            "title": "Cited",
+            "type": "boolean"
           },
           "content": {
-            "type": "string",
-            "title": "Content"
+            "title": "Content",
+            "type": "string"
           },
-          "cited": {
-            "type": "boolean",
-            "title": "Cited"
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "id",
           "kind",
@@ -920,58 +327,18 @@
           "cited"
         ],
         "title": "EvidenceView",
-        "description": "One addressable evidence record, and whether the proposal actually cited it.\n\n``cited`` is the field a reviewer needs and the one a naive read would omit. \u00a76.1 requires a\nproposal to reference the evidence it used, and 3.3 validates that every citation is a subset\nof the pack the model was shown \u2014 so the interesting question in the console is not *what\nevidence existed* but *which of it the model claimed to rely on*. Returning the pack without\nthat distinction would show a reviewer a list and let them assume all of it was cited."
+        "type": "object"
       },
       "ExceptionDetail": {
+        "additionalProperties": false,
         "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Id"
-          },
-          "classification": {
-            "type": "string",
-            "title": "Classification"
-          },
-          "status": {
-            "type": "string",
-            "title": "Status"
-          },
-          "correlation_id": {
-            "type": "string",
-            "title": "Correlation Id"
-          },
-          "line": {
-            "additionalProperties": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "type": "object",
-            "title": "Line"
-          },
-          "evidence": {
-            "items": {
-              "$ref": "#/components/schemas/EvidenceView"
-            },
-            "type": "array",
-            "title": "Evidence"
-          },
-          "proposal": {
+          "adjustment": {
             "anyOf": [
               {
                 "additionalProperties": {
                   "anyOf": [
                     {
                       "type": "string"
-                    },
-                    {
-                      "type": "boolean"
                     },
                     {
                       "type": "null"
@@ -984,7 +351,7 @@
                 "type": "null"
               }
             ],
-            "title": "Proposal"
+            "title": "Adjustment"
           },
           "approval": {
             "anyOf": [
@@ -1007,26 +374,53 @@
             ],
             "title": "Approval"
           },
-          "adjustment": {
-            "anyOf": [
-              {
-                "additionalProperties": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/PostingAttemptView"
+            },
+            "title": "Attempts",
+            "type": "array"
+          },
+          "audit": {
+            "items": {
+              "$ref": "#/components/schemas/AuditEventView"
+            },
+            "title": "Audit",
+            "type": "array"
+          },
+          "classification": {
+            "title": "Classification",
+            "type": "string"
+          },
+          "correlation_id": {
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceView"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "line": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
                 },
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Adjustment"
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Line",
+            "type": "object"
           },
           "outbox": {
             "anyOf": [
@@ -1052,23 +446,35 @@
             ],
             "title": "Outbox"
           },
-          "attempts": {
-            "items": {
-              "$ref": "#/components/schemas/PostingAttemptView"
-            },
-            "type": "array",
-            "title": "Attempts"
+          "proposal": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal"
           },
-          "audit": {
-            "items": {
-              "$ref": "#/components/schemas/AuditEventView"
-            },
-            "type": "array",
-            "title": "Audit"
+          "status": {
+            "title": "Status",
+            "type": "string"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "id",
           "classification",
@@ -1083,24 +489,13 @@
           "attempts",
           "audit"
         ],
-        "title": "ExceptionDetail"
+        "title": "ExceptionDetail",
+        "type": "object"
       },
       "ExceptionSummary": {
+        "additionalProperties": false,
         "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Id"
-          },
-          "classification": {
-            "type": "string",
-            "title": "Classification"
-          },
-          "status": {
-            "type": "string",
-            "title": "Status"
-          },
-          "psp_reference": {
+          "amount": {
             "anyOf": [
               {
                 "type": "string"
@@ -1109,7 +504,15 @@
                 "type": "null"
               }
             ],
-            "title": "Psp Reference"
+            "title": "Amount"
+          },
+          "classification": {
+            "title": "Classification",
+            "type": "string"
+          },
+          "correlation_id": {
+            "title": "Correlation Id",
+            "type": "string"
           },
           "currency": {
             "anyOf": [
@@ -1122,7 +525,20 @@
             ],
             "title": "Currency"
           },
-          "amount": {
+          "decided": {
+            "title": "Decided",
+            "type": "boolean"
+          },
+          "has_proposal": {
+            "title": "Has Proposal",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "psp_reference": {
             "anyOf": [
               {
                 "type": "string"
@@ -1131,23 +547,13 @@
                 "type": "null"
               }
             ],
-            "title": "Amount"
+            "title": "Psp Reference"
           },
-          "correlation_id": {
-            "type": "string",
-            "title": "Correlation Id"
-          },
-          "has_proposal": {
-            "type": "boolean",
-            "title": "Has Proposal"
-          },
-          "decided": {
-            "type": "boolean",
-            "title": "Decided"
+          "status": {
+            "title": "Status",
+            "type": "string"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "id",
           "classification",
@@ -1159,7 +565,8 @@
           "has_proposal",
           "decided"
         ],
-        "title": "ExceptionSummary"
+        "title": "ExceptionSummary",
+        "type": "object"
       },
       "HTTPValidationError": {
         "properties": {
@@ -1167,47 +574,155 @@
             "items": {
               "$ref": "#/components/schemas/ValidationError"
             },
-            "type": "array",
-            "title": "Detail"
+            "title": "Detail",
+            "type": "array"
           }
         },
-        "type": "object",
-        "title": "HTTPValidationError"
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IdentityView": {
+        "additionalProperties": false,
+        "description": "Who the bearer token belongs to, and what they may do.\n\nReturned as **capabilities rather than a role string alone**, because a client that has to map\nrole names to permissions is a second copy of \u00a716's table \u2014 and the copy drifts. The console\nrenders a control when the answer here says the principal may use it, so the authority and the\nbutton come from the same place.\n\nThe role is returned too, for display. Nothing here is derived by the client.",
+        "properties": {
+          "may_authorise": {
+            "title": "May Authorise",
+            "type": "boolean"
+          },
+          "may_edit_treatment": {
+            "title": "May Edit Treatment",
+            "type": "boolean"
+          },
+          "may_record_decision": {
+            "title": "May Record Decision",
+            "type": "boolean"
+          },
+          "may_work_operations_queues": {
+            "title": "May Work Operations Queues",
+            "type": "boolean"
+          },
+          "principal": {
+            "title": "Principal",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal",
+          "role",
+          "may_record_decision",
+          "may_authorise",
+          "may_edit_treatment",
+          "may_work_operations_queues"
+        ],
+        "title": "IdentityView",
+        "type": "object"
+      },
+      "InjectedFaultReport": {
+        "additionalProperties": false,
+        "description": "What the injected fault did to the books, and what the system did about it.\n\nThe two are reported separately because their difference is the entire demonstration.\n``ledger_applied_count`` is the **simulated ledger's own count** for this operation identifier;\n``recorded_outcome`` is what this system concluded. \u00a719.1's whole subject is that a client\ncannot infer the first from the second, so a report that showed only one of them would be\nshowing the visitor the wrong thing.",
+        "properties": {
+          "adjustment_id": {
+            "format": "uuid",
+            "title": "Adjustment Id",
+            "type": "string"
+          },
+          "explanation": {
+            "title": "Explanation",
+            "type": "string"
+          },
+          "fault": {
+            "title": "Fault",
+            "type": "string"
+          },
+          "ledger_applied_count": {
+            "title": "Ledger Applied Count",
+            "type": "integer"
+          },
+          "ledger_posts_received": {
+            "title": "Ledger Posts Received",
+            "type": "integer"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "recorded_outcome": {
+            "title": "Recorded Outcome",
+            "type": "string"
+          }
+        },
+        "required": [
+          "adjustment_id",
+          "operation_id",
+          "fault",
+          "recorded_outcome",
+          "ledger_applied_count",
+          "ledger_posts_received",
+          "explanation"
+        ],
+        "title": "InjectedFaultReport",
+        "type": "object"
       },
       "LivenessResponse": {
+        "additionalProperties": false,
+        "description": "Liveness payload. Carries nothing that could be sensitive.",
         "properties": {
-          "status": {
-            "type": "string",
-            "title": "Status"
-          },
           "service": {
-            "type": "string",
-            "title": "Service"
+            "title": "Service",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
           },
           "version": {
-            "type": "string",
-            "title": "Version"
+            "title": "Version",
+            "type": "string"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "status",
           "service",
           "version"
         ],
         "title": "LivenessResponse",
-        "description": "Liveness payload. Carries nothing that could be sensitive."
+        "type": "object"
+      },
+      "MetaView": {
+        "additionalProperties": false,
+        "description": "What kind of instance this is. Unauthenticated, and carries nothing that could be sensitive.\n\nUnauthenticated deliberately: the console needs to know whether to render the demo controls\n*before* a principal has authenticated, and version plus a demo flag are not facts worth\nprotecting. Nothing here names a dependency, an origin, a principal or a configuration value.",
+        "properties": {
+          "demo_mode": {
+            "title": "Demo Mode",
+            "type": "boolean"
+          },
+          "ledger_adapter": {
+            "title": "Ledger Adapter",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "demo_mode",
+          "ledger_adapter"
+        ],
+        "title": "MetaView",
+        "type": "object"
       },
       "PostingAttemptView": {
+        "additionalProperties": false,
         "properties": {
           "attempt_no": {
-            "type": "integer",
-            "title": "Attempt No"
-          },
-          "state": {
-            "type": "string",
-            "title": "State"
+            "title": "Attempt No",
+            "type": "integer"
           },
           "outcome": {
             "anyOf": [
@@ -1220,11 +735,6 @@
             ],
             "title": "Outcome"
           },
-          "sent_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Sent At"
-          },
           "posting_ref": {
             "anyOf": [
               {
@@ -1235,10 +745,17 @@
               }
             ],
             "title": "Posting Ref"
+          },
+          "sent_at": {
+            "format": "date-time",
+            "title": "Sent At",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "attempt_no",
           "state",
@@ -1246,76 +763,77 @@
           "sent_at",
           "posting_ref"
         ],
-        "title": "PostingAttemptView"
+        "title": "PostingAttemptView",
+        "type": "object"
       },
       "ReadinessResponse": {
+        "additionalProperties": false,
+        "description": "Readiness payload.",
         "properties": {
-          "status": {
-            "type": "string",
-            "title": "Status"
-          },
           "dependencies": {
             "items": {
               "$ref": "#/components/schemas/DependencyReport"
             },
-            "type": "array",
-            "title": "Dependencies"
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "status",
           "dependencies"
         ],
         "title": "ReadinessResponse",
-        "description": "Readiness payload."
+        "type": "object"
       },
       "RecoveryItemView": {
+        "additionalProperties": false,
+        "description": "One queue entry, with the procedure attached rather than referenced.\n\n``evidence_procedure`` is returned in full because \u00a713.5's point is that the operator is told\nwhat to inspect and what would be sufficient. A queue that returned a reason code and expected\nthe operator to look the procedure up somewhere is the \"queue is not a control\" failure with an\nextra step.",
         "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Id"
-          },
           "adjustment_id": {
-            "type": "string",
             "format": "uuid",
-            "title": "Adjustment Id"
-          },
-          "operation_id": {
-            "type": "string",
-            "title": "Operation Id"
-          },
-          "reason": {
-            "type": "string",
-            "title": "Reason"
-          },
-          "evidence_procedure": {
-            "type": "string",
-            "title": "Evidence Procedure"
-          },
-          "opened_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Opened At"
-          },
-          "sla_due_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Sla Due At"
+            "title": "Adjustment Id",
+            "type": "string"
           },
           "approving_principal": {
-            "type": "string",
-            "title": "Approving Principal"
+            "title": "Approving Principal",
+            "type": "string"
+          },
+          "evidence_procedure": {
+            "title": "Evidence Procedure",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "opened_at": {
+            "format": "date-time",
+            "title": "Opened At",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
           },
           "overdue": {
-            "type": "boolean",
-            "title": "Overdue"
+            "title": "Overdue",
+            "type": "boolean"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "sla_due_at": {
+            "format": "date-time",
+            "title": "Sla Due At",
+            "type": "string"
           }
         },
-        "additionalProperties": false,
-        "type": "object",
         "required": [
           "id",
           "adjustment_id",
@@ -1328,47 +846,101 @@
           "overdue"
         ],
         "title": "RecoveryItemView",
-        "description": "One queue entry, with the procedure attached rather than referenced.\n\n``evidence_procedure`` is returned in full because \u00a713.5's point is that the operator is told\nwhat to inspect and what would be sufficient. A queue that returned a reason code and expected\nthe operator to look the procedure up somewhere is the \"queue is not a control\" failure with an\nextra step."
+        "type": "object"
       },
       "RecoveryResolution": {
-        "type": "string",
+        "description": "The three permitted operator resolutions (\u00a713.5 clause 5).\n\n``RESOLVED_UNVERIFIED`` exists so that a judgement made without obtainable evidence is\n*visible* to an auditor rather than indistinguishable from a verified one.",
         "enum": [
           "confirmed_by_evidence",
           "rejected_by_evidence",
           "resolved_unverified"
         ],
         "title": "RecoveryResolution",
-        "description": "The three permitted operator resolutions (\u00a713.5 clause 5).\n\n``RESOLVED_UNVERIFIED`` exists so that a judgement made without obtainable evidence is\n*visible* to an auditor rather than indistinguishable from a verified one."
+        "type": "string"
       },
-      "ResolveRequest": {
+      "ReplayReportView": {
+        "additionalProperties": false,
+        "description": "What a replay did, in exactly the terms 4.3 recorded it.\n\n**Every field here exists on ``ReplayReport``.** The first version of this model carried an\n``applied_count`` read \"off the ledger\", which sounded like the right thing and was not a field\nthe report has \u2014 mypy refused it. Worth recording, because a response model that invents a\nfield is how a console ends up displaying a number the system never measured.\n\n``detail`` is returned because 4.3 writes it for the outcomes it owns, and an operator deciding\nwhether to escalate needs the reason rather than only the verdict.",
         "properties": {
-          "resolution": {
-            "$ref": "#/components/schemas/RecoveryResolution"
+          "adjustment_id": {
+            "format": "uuid",
+            "title": "Adjustment Id",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "dlq_id": {
+            "format": "uuid",
+            "title": "Dlq Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
           },
           "posting_ref": {
             "anyOf": [
               {
-                "type": "string",
-                "maxLength": 128,
-                "minLength": 1
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
             "title": "Posting Ref"
+          },
+          "resolved": {
+            "title": "Resolved",
+            "type": "boolean"
           }
         },
+        "required": [
+          "dlq_id",
+          "adjustment_id",
+          "operation_id",
+          "outcome",
+          "posting_ref",
+          "detail",
+          "resolved"
+        ],
+        "title": "ReplayReportView",
+        "type": "object"
+      },
+      "ResolveRequest": {
         "additionalProperties": false,
-        "type": "object",
+        "description": "An operator's judgement. Note what is absent: the principal, and any instruction to re-send.\n\n``posting_ref`` is required by ``confirmed_by_evidence`` and refused by everything else \u2014 it is\nthe evidence, not a note. The service enforces that; this model does not, because a 422 from\nPydantic would not say *why* and this refusal is one an operator has to understand.",
+        "properties": {
+          "posting_ref": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posting Ref"
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/RecoveryResolution"
+          }
+        },
         "required": [
           "resolution"
         ],
         "title": "ResolveRequest",
-        "description": "An operator's judgement. Note what is absent: the principal, and any instruction to re-send.\n\n``posting_ref`` is required by ``confirmed_by_evidence`` and refused by everything else \u2014 it is\nthe evidence, not a note. The service enforces that; this model does not, because a 422 from\nPydantic would not say *why* and this refusal is one an operator has to understand."
+        "type": "object"
       },
       "TreatmentCode": {
-        "type": "string",
+        "description": "The closed treatment set (\u00a76.1). The *only* channel from model to money path.\n\n**This is the canonical declaration.** Every other place a treatment appears \u2014 the three columns\nbelow, the account policy, the calculator \u2014 refers to it rather than repeating its values, with\nexactly one exception: the two check constraints below spell ``'escalate'`` in SQL, because a\ncheck constraint cannot import Python. A test asserts both strings against ``ESCALATE.value``,\nso that repetition cannot drift, and another fails if a second treatment vocabulary is ever\ndeclared anywhere in the package. One declaration is what makes \"closed\" checkable rather than\nmerely intended.\n\nA treatment is a **categorical instruction and nothing else**. It selects *what to do*, never\n*how much*: the amount, the account and the period all come from deterministic context, and a\ntreatment carrying a number \u2014 ``write_off_125_50``, ``adjust_by_0_7_percent`` \u2014 would be the\nnumeric escape hatch the whole containment argument exists to prevent. A guard test asserts no\nmember's name or value contains a digit.\n\nBeing a *valid* treatment and being *deterministically priceable* are different contracts, and\nconflating them is how a vocabulary grows. Every member below is always valid; whether M2.4 can\nprice it depends on the exception it is applied to, and where it cannot the outcome is\n``ESCALATE`` rather than a guess (\u00a77) or a new member.\n\n``REBOOK``\n    Post the movement the ledger is missing, in the period it settled. Priceable wherever the\n    exception's class has a configured account (ADR-047).\n\n``ACCRUE``\n    Recognise the same movement in the period it economically belongs to \u2014 the period of the\n    movement it reverses. Priceable on the same classes as ``REBOOK``, and only when that\n    originating period is known; without one there is nothing to accrue into and it refuses.\n\n``WRITE_OFF``\n    Recognise the residual as a loss rather than as the movement it appeared to be. Priceable\n    wherever an account is configured for it.\n\n``ESCALATE``\n    Refer the case to a human because it cannot be resolved deterministically. **This is the\n    member that closes the set.** Without it, every condition the system cannot price would\n    need its own treatment and the vocabulary would grow with the taxonomy; with it, the set of\n    *actions* stays at four while the set of *conditions* can grow freely. It is never priced\n    and never posted \u2014 ``adjustment`` refuses a row for it outright, and the account policy\n    refuses to map one.\n\nAbstention is **not** a fifth member. ``treatment_proposal`` carries a separate ``abstained``\nflag, and a check constraint requires an abstaining proposal to carry ``ESCALATE``: a model that\ndeclines to answer has still not chosen an action, and giving that its own code would let a\nrefusal to decide masquerade as a decision.",
         "enum": [
           "rebook",
           "accrue",
@@ -1376,10 +948,17 @@
           "escalate"
         ],
         "title": "TreatmentCode",
-        "description": "The closed treatment set (\u00a76.1). The *only* channel from model to money path.\n\n**This is the canonical declaration.** Every other place a treatment appears \u2014 the three columns\nbelow, the account policy, the calculator \u2014 refers to it rather than repeating its values, with\nexactly one exception: the two check constraints below spell ``'escalate'`` in SQL, because a\ncheck constraint cannot import Python. A test asserts both strings against ``ESCALATE.value``,\nso that repetition cannot drift, and another fails if a second treatment vocabulary is ever\ndeclared anywhere in the package. One declaration is what makes \"closed\" checkable rather than\nmerely intended.\n\nA treatment is a **categorical instruction and nothing else**. It selects *what to do*, never\n*how much*: the amount, the account and the period all come from deterministic context, and a\ntreatment carrying a number \u2014 ``write_off_125_50``, ``adjust_by_0_7_percent`` \u2014 would be the\nnumeric escape hatch the whole containment argument exists to prevent. A guard test asserts no\nmember's name or value contains a digit.\n\nBeing a *valid* treatment and being *deterministically priceable* are different contracts, and\nconflating them is how a vocabulary grows. Every member below is always valid; whether M2.4 can\nprice it depends on the exception it is applied to, and where it cannot the outcome is\n``ESCALATE`` rather than a guess (\u00a77) or a new member.\n\n``REBOOK``\n    Post the movement the ledger is missing, in the period it settled. Priceable wherever the\n    exception's class has a configured account (ADR-047).\n\n``ACCRUE``\n    Recognise the same movement in the period it economically belongs to \u2014 the period of the\n    movement it reverses. Priceable on the same classes as ``REBOOK``, and only when that\n    originating period is known; without one there is nothing to accrue into and it refuses.\n\n``WRITE_OFF``\n    Recognise the residual as a loss rather than as the movement it appeared to be. Priceable\n    wherever an account is configured for it.\n\n``ESCALATE``\n    Refer the case to a human because it cannot be resolved deterministically. **This is the\n    member that closes the set.** Without it, every condition the system cannot price would\n    need its own treatment and the vocabulary would grow with the taxonomy; with it, the set of\n    *actions* stays at four while the set of *conditions* can grow freely. It is never priced\n    and never posted \u2014 ``adjustment`` refuses a row for it outright, and the account policy\n    refuses to map one.\n\nAbstention is **not** a fifth member. ``treatment_proposal`` carries a separate ``abstained``\nflag, and a check constraint requires an abstaining proposal to carry ``ESCALATE``: a model that\ndeclines to answer has still not chosen an action, and giving that its own code would let a\nrefusal to decide masquerade as a decision."
+        "type": "string"
       },
       "ValidationError": {
         "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
           "loc": {
             "items": {
               "anyOf": [
@@ -1391,32 +970,810 @@
                 }
               ]
             },
-            "type": "array",
-            "title": "Location"
+            "title": "Location",
+            "type": "array"
           },
           "msg": {
-            "type": "string",
-            "title": "Message"
+            "title": "Message",
+            "type": "string"
           },
           "type": {
-            "type": "string",
-            "title": "Error Type"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "ctx": {
-            "type": "object",
-            "title": "Context"
+            "title": "Error Type",
+            "type": "string"
           }
         },
-        "type": "object",
         "required": [
           "loc",
           "msg",
           "type"
         ],
-        "title": "ValidationError"
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "ledger-exception-control-plane",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/demo/exceptions/{exception_id}/inject-fault": {
+      "post": {
+        "description": "Dispatch one approved adjustment through a ledger that commits and then loses the response.\n\n**This is M7.2's exit criterion made reachable: a visitor triggers the failure \u00a719.1 names and\nsees that no second financial effect is applied.** It reuses 4.5's fault-injection port rather\nthan simulating a crash, so what the visitor watches is the same mechanism the kill test\nmeasures \u2014 not a re-enactment of it.\n\nTwo guards, both refusals rather than filters:\n\n* **It exists only in demo mode.** A fault injector reachable in a deployment doing real work\n  is a defect however carefully it is documented, so this returns 404 \u2014 not 403 \u2014 when\n  ``demo_mode`` is false. 403 would confirm the route exists and invite someone to find the\n  credential for it; 404 says there is nothing here, which is true.\n* **It is an operator action.** Injecting a fault dispatches a financial write, and \u00a716 puts\n  that on the role that works the failure queues rather than on the role that authorises\n  postings.\n\nThe count returned is read from the ledger, never from our own rows.",
+        "operationId": "inject_fault_api_v1_demo_exceptions__exception_id__inject_fault_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "exception_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Exception Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InjectedFaultReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Inject Fault",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/dlq": {
+      "get": {
+        "description": "The dead-letter queue. **Operator work, so an approver may not see it as their queue.**\n\n\u00a716 separates the roles: the principal who authorises a posting is not the principal who works\nthe failure queues, and 4.4 already enforces the mirror of this rule for recovery. Refusing\nhere rather than filtering keeps the reason legible \u2014 an analyst is told they lack the\nauthority, instead of being shown an empty queue and left to conclude nothing failed.\n\n``pending_only`` defaults to true because a replayed entry is history and an operator opening\nthe queue wants work. The full list stays reachable, which is what makes the default a\nconvenience rather than a hidden filter.",
+        "operationId": "list_dead_letters_api_v1_dlq_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "pending_only",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Pending Only",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DeadLetterView"
+                  },
+                  "title": "Response List Dead Letters Api V1 Dlq Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Dead Letters",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/dlq/{dlq_id}/replay": {
+      "post": {
+        "description": "Re-send one dead-lettered dispatch. **An irreversible financial write, on a human's order.**\n\nEvery safety property is inherited rather than re-implemented here, which is the point:\n:func:`~ledger_exception_control_plane.operations.retry.replay_dead_letter` reads the persisted\noperation identifier instead of re-deriving one, re-reads the persisted instruction instead of\nrebuilding it, and applies the dispatcher's own gates. This route adds authority and a name to\nthe order, and nothing else.\n\n**The principal is required and is the caller's own.** 4.3 made ``--principal`` mandatory on the\nreplay command after every event a human-ordered re-send produced recorded ``system``; an HTTP\nroute that omitted it would reintroduce exactly that. It is taken from the authenticated\nidentity rather than from the request body, so an operator cannot order a replay in someone\nelse's name.\n\nDeliberately not idempotent at the HTTP layer, and deliberately not made so: a second POST is a\nsecond *order*, and the protection against it duplicating a financial effect is the operation\nidentifier and the ledger's capability contract, not a request cache. Making this endpoint\nswallow a repeat would move a financial guarantee into HTTP plumbing, where \u00a713 says it must\nnever live.",
+        "operationId": "replay_dead_letter_entry_api_v1_dlq__dlq_id__replay_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dlq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Dlq Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayReportView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Replay Dead Letter Entry",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/exceptions": {
+      "get": {
+        "description": "The queue. Every configured role may read it; only some may act on it.",
+        "operationId": "list_exceptions_api_v1_exceptions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ExceptionSummary"
+                  },
+                  "title": "Response List Exceptions Api V1 Exceptions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Exceptions",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/exceptions/{exception_id}": {
+      "get": {
+        "description": "Full provenance for one exception: evidence, proposal, decision, money, dispatch.\n\n\u00a710: *\"full provenance: evidence, proposal, approval, adjustment, audit trail\"*. This is the\nread the console's detail view is built on, and the reason it is one request rather than six is\nthat a reviewer following a posting backwards should not have to assemble it themselves.",
+        "operationId": "exception_detail_api_v1_exceptions__exception_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "exception_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Exception Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExceptionDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Exception Detail",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/exceptions/{exception_id}/approve": {
+      "post": {
+        "description": "Authorise the proposed treatment. An edit is a different verb, below.",
+        "operationId": "approve_api_v1_exceptions__exception_id__approve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "exception_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Exception Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Approve",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/exceptions/{exception_id}/edit": {
+      "post": {
+        "description": "Authorise a treatment **different** from the one proposed.\n\nA separate route rather than a flag on ``approve``, because it carries a different authorisation\nrule: controller only, and never the principal who requested it. A flag would have made the\nstricter path reachable by forgetting to set it.",
+        "operationId": "edit_api_v1_exceptions__exception_id__edit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "exception_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Exception Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/exceptions/{exception_id}/reject": {
+      "post": {
+        "description": "Decline. Authorises nothing, and must not name a treatment.",
+        "operationId": "reject_api_v1_exceptions__exception_id__reject_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "exception_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Exception Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reject",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "description": "The authenticated principal's own identity and authority.\n\nAuthenticated, unlike ``/meta``: it answers a question about the caller, so an unauthenticated\nrequest has no answer to receive. It reads no database \u2014 the principal is already resolved from\nthe registry by the time this runs.\n\n**It reports what the server will actually enforce**, not a client-side reading of the role.\nThat distinction earned itself: an analyst was able to authorise a posting for months because\n`APPROVAL_ROLES` and ADR-056 disagreed and nothing compared them. A console that computed\nauthority from the role name would have shown the correct controls while the server allowed the\nwrong ones \u2014 which is worse than showing the wrong controls, because it hides the defect.",
+        "operationId": "me_api_v1_me_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Me",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/meta": {
+      "get": {
+        "description": "This instance's identity. No authentication, no dependencies, no secrets.",
+        "operationId": "meta_api_v1_meta_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetaView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Meta",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/recovery": {
+      "get": {
+        "description": "The operator queue, most urgent first. ``?stale=true`` returns only items past their SLA.\n\nReadable by every configured role, like the exception queue: seeing that an operation is stuck\nis not the same authority as judging what happened to it, and an analyst who cannot see it\ncannot escalate it either.",
+        "operationId": "list_recovery_api_v1_recovery_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "stale",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Stale",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RecoveryItemView"
+                  },
+                  "title": "Response List Recovery Api V1 Recovery Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Recovery",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/recovery/{recovery_id}/resolve": {
+      "post": {
+        "description": "Record what the operator found. **This never causes a posting.**\n\nTakes the engine rather than the request-scoped session because the service opens its own\ntransaction \u2014 it locks the queue row, settles the dispatch and appends the audit event\ntogether, and a handler-owned session would let the route commit half of that.",
+        "operationId": "resolve_recovery_api_v1_recovery__recovery_id__resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recovery_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Recovery Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryItemView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve Recovery",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Liveness: is this process alive and serving?\n\nChecks nothing external, by design. It must stay green while PostgreSQL or Redis is\ndown, otherwise a dependency outage becomes a restart loop.",
+        "operationId": "liveness_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivenessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Liveness",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "Readiness: can this instance accept work that needs its dependencies?\n\nProbes PostgreSQL and Redis under a bounded timeout, read-only. Returns 503 if\neither is unavailable, with per-dependency status and no diagnostic detail.",
+        "operationId": "readiness_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Readiness",
+        "tags": [
+          "health"
+        ]
       }
     }
   }

@@ -143,16 +143,18 @@ describe("capability detection", () => {
    * The console asks the control plane which optional endpoints exist rather than hard-coding the
    * answer, so a disabled control enables itself when the route is built.
    *
-   * The snapshot records what was true when it was taken: none of the four. **When one of these
-   * endpoints is implemented, regenerate the snapshot and flip the expectation here** — that is the
-   * moment to check that the control's disabled copy has been removed too.
+   * **The snapshot has moved once, and this is what that looked like.** When it was first taken
+   * none of the five existed. Four have since shipped — replay, the demo fault control, identity
+   * and instance metadata — and `request_edit` has not. Flipping these four was the moment to
+   * check that each control's disabled copy had been removed, which is exactly why the expectation
+   * is written out rather than derived from the document it is checking.
    */
   it("reports what the committed snapshot actually publishes", () => {
     expect(capabilitiesFromDocument(document)).toEqual({
-      dlq_replay: false,
-      demo_inject_crash: false,
-      identity: false,
-      meta: false,
+      dlq_replay: true,
+      demo_inject_crash: true,
+      identity: true,
+      meta: true,
       request_edit: false,
     });
   });
@@ -160,8 +162,8 @@ describe("capability detection", () => {
   it("detects each capability when the path is present", () => {
     const detected = capabilitiesFromDocument({
       paths: {
-        "/api/v1/dlq/{dead_letter_id}/replay": {},
-        "/api/v1/demo/inject-crash": {},
+        "/api/v1/dlq/{dlq_id}/replay": {},
+        "/api/v1/demo/exceptions/{exception_id}/inject-fault": {},
         "/api/v1/me": {},
         "/api/v1/meta": {},
         "/api/v1/exceptions/{exception_id}/request-edit": {},
@@ -174,6 +176,20 @@ describe("capability detection", () => {
       meta: true,
       request_edit: true,
     });
+  });
+
+  it("does not mistake the old contract for the shipped one", () => {
+    // The paths this console was first written against. Keeping them as a negative case pins the
+    // reconciliation: if someone reverts the probe to the guessed spelling, the snapshot test above
+    // goes red rather than the console silently disabling two working controls.
+    const superseded = capabilitiesFromDocument({
+      paths: {
+        "/api/v1/dlq/{dead_letter_id}/replay": {},
+        "/api/v1/demo/inject-crash": {},
+      },
+    });
+    expect(superseded.dlq_replay).toBe(false);
+    expect(superseded.demo_inject_crash).toBe(false);
   });
 
   it("fails closed on an unreachable or unparseable document", () => {

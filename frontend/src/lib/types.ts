@@ -274,6 +274,51 @@ export interface DeadLetterView {
   replayed_at: string | null;
 }
 
+/**
+ * What a replay did, in the control plane's own terms.
+ *
+ * Every field exists on the server's `ReplayReportView`. Note what is *not* here: no applied count.
+ * The server's own note records that an earlier version invented one, and a response type that
+ * invents a field is how a console displays a number the system never measured.
+ */
+export interface ReplayReportView {
+  dlq_id: string;
+  adjustment_id: string;
+  operation_id: string;
+  outcome: string;
+  posting_ref: string | null;
+  detail: string;
+  resolved: boolean;
+}
+
+/**
+ * What an injected fault did to the books, and what the system concluded.
+ *
+ * The two are separate fields because their difference *is* the demonstration:
+ * `recorded_outcome` is what the system was able to conclude (`unknown` — it refused to guess),
+ * and `ledger_applied_count` is the simulated ledger's own count for that operation identifier.
+ * Rendering only one of them would show a visitor the wrong thing.
+ */
+export interface InjectedFaultReport {
+  adjustment_id: string;
+  operation_id: string;
+  fault: string;
+  recorded_outcome: string;
+  ledger_applied_count: number;
+  ledger_posts_received: number;
+  explanation: string;
+}
+
+/** The authenticated principal, with the authority the *server* will enforce. */
+export interface IdentityView {
+  principal: string;
+  role: string;
+  may_record_decision: boolean;
+  may_authorise: boolean;
+  may_edit_treatment: boolean;
+  may_work_operations_queues: boolean;
+}
+
 export const DEAD_LETTER_VIEW_KEYS = [
   "id",
   "outbox_id",

@@ -1167,3 +1167,48 @@ async def inject_fault(
             "and it is one."
         ),
     )
+
+
+class IdentityView(BaseModel):
+    """Who the bearer token belongs to, and what they may do.
+
+    Returned as **capabilities rather than a role string alone**, because a client that has to map
+    role names to permissions is a second copy of §16's table — and the copy drifts. The console
+    renders a control when the answer here says the principal may use it, so the authority and the
+    button come from the same place.
+
+    The role is returned too, for display. Nothing here is derived by the client.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    principal: str
+    role: str
+    may_record_decision: bool
+    may_authorise: bool
+    may_edit_treatment: bool
+    may_work_operations_queues: bool
+
+
+@router.get("/me", response_model=IdentityView)
+async def me(principal: Annotated[Principal, Depends(current_principal)]) -> IdentityView:
+    """The authenticated principal's own identity and authority.
+
+    Authenticated, unlike ``/meta``: it answers a question about the caller, so an unauthenticated
+    request has no answer to receive. It reads no database — the principal is already resolved from
+    the registry by the time this runs.
+
+    **It reports what the server will actually enforce**, not a client-side reading of the role.
+    That distinction earned itself: an analyst was able to authorise a posting for months because
+    `APPROVAL_ROLES` and ADR-056 disagreed and nothing compared them. A console that computed
+    authority from the role name would have shown the correct controls while the server allowed the
+    wrong ones — which is worse than showing the wrong controls, because it hides the defect.
+    """
+    return IdentityView(
+        principal=principal.id,
+        role=principal.role.value,
+        may_record_decision=principal.may_record_decision(),
+        may_authorise=principal.may_authorise(),
+        may_edit_treatment=principal.may_edit_treatment(),
+        may_work_operations_queues=principal.may_work_operations_queues(),
+    )

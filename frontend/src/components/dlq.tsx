@@ -77,10 +77,10 @@ export function DeadLetterQueue() {
       {!replayAvailable ? (
         <p className="rounded border border-edge bg-panel-raised px-3 py-2.5 text-ink-dim">
           <span className="font-medium text-ink">Replay is not available on this control plane.</span>{" "}
-          The replay path exists as a command-line tool; the HTTP endpoint is specified but not
-          implemented, so the button below is disabled. It will enable itself when the control plane
-          publishes <code className="tabular">POST /api/v1/dlq/{"{id}"}/replay</code> — the console
-          reads the endpoint list rather than assuming.
+          Replay is also a command-line tool, and this deployment publishes no HTTP endpoint for it,
+          so the button below is disabled. It enables itself when the control plane publishes{" "}
+          <code className="tabular">POST /api/v1/dlq/{"{dlq_id}"}/replay</code> — the console reads
+          the endpoint list rather than assuming.
         </p>
       ) : null}
 
@@ -158,7 +158,7 @@ export function DeadLetterQueue() {
                       title={
                         replayAvailable
                           ? undefined
-                          : "POST /api/v1/dlq/{id}/replay does not exist on this control plane."
+                          : "This control plane publishes no replay endpoint."
                       }
                       onClick={() => void replay(row.id)}
                       className="rounded border border-edge px-2.5 py-1 text-ink-dim enabled:hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"

@@ -1,11 +1,15 @@
 /**
  * What the *connected* control plane can actually do.
  *
- * Three controls this console needs have no endpoint on the control plane yet: replaying a dead
- * letter, injecting a fault in demo mode, and asking who the bearer token belongs to. The lazy
- * options were both wrong — hard-code the buttons as disabled forever, or render them and let the
- * click fail — so the console *asks*. FastAPI publishes its own `/openapi.json`, and this module
- * reads the path list from it.
+ * The console does not assume what the control plane can do — it *asks*. FastAPI publishes its
+ * own `/openapi.json`, and this module reads the path list from it. The lazy options were both
+ * wrong: hard-code the buttons as disabled forever, or render them and let the click fail.
+ *
+ * Three of these were unimplemented when this console was written and have since shipped —
+ * replaying a dead letter, injecting a fault in demo mode, and asking who the bearer token belongs
+ * to. `request_edit` has not, and stays honestly disabled. The probe is what made that transition
+ * cost nothing: the paths below were corrected to the ones the server actually publishes and the
+ * controls turned themselves on.
  *
  * The consequence is worth stating: when the endpoints below are implemented, the console enables
  * their controls with no frontend change. Until then a disabled control carries the reason, which
@@ -18,9 +22,9 @@
 import { callControlPlane } from "@/lib/server/backend";
 
 export interface ControlPlaneCapabilities {
-  /** `POST /api/v1/dlq/{dead_letter_id}/replay` — see `frontend/README.md`. */
+  /** `POST /api/v1/dlq/{dlq_id}/replay` — an operator re-sends a dead-lettered dispatch. */
   dlq_replay: boolean;
-  /** `POST /api/v1/demo/inject-crash` — demo-mode fault injection. */
+  /** `POST /api/v1/demo/exceptions/{exception_id}/inject-fault` — demo-mode fault injection. */
   demo_inject_crash: boolean;
   /** `GET /api/v1/me` — the identity of the bearer token's principal, and its role. */
   identity: boolean;
@@ -40,8 +44,8 @@ export const NO_CAPABILITIES: ControlPlaneCapabilities = {
 
 /** Paths whose presence in the document means the capability exists. Exact, templated form. */
 const CAPABILITY_PATHS: Record<keyof ControlPlaneCapabilities, string> = {
-  dlq_replay: "/api/v1/dlq/{dead_letter_id}/replay",
-  demo_inject_crash: "/api/v1/demo/inject-crash",
+  dlq_replay: "/api/v1/dlq/{dlq_id}/replay",
+  demo_inject_crash: "/api/v1/demo/exceptions/{exception_id}/inject-fault",
   identity: "/api/v1/me",
   meta: "/api/v1/meta",
   request_edit: "/api/v1/exceptions/{exception_id}/request-edit",

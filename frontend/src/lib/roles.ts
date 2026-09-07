@@ -16,13 +16,17 @@ import type { Role } from "@/lib/types";
 /**
  * Only a controller authorises a proposed treatment. The operator holds no approval right at all.
  *
- * **This is stricter than what the connected control plane currently enforces**, and the difference
- * is recorded rather than papered over: `security.py::APPROVAL_ROLES` contains both `ANALYST` and
- * `CONTROLLER`, and `POST /exceptions/{id}/approve` checks only `may_approve()`, so an analyst token
- * is presently accepted there. The documented rule — in that module's own docstring and in §16 — is
- * that an analyst may reject and may request an edit but never authorise. The console renders the
- * documented rule, because offering an analyst a button that authorises money would advertise a
- * gap; `frontend/README.md` lists it as a backend defect to close.
+ * **This rule was once stricter than the server's, and that turned out to be a real defect rather
+ * than a difference of opinion.** `security.py::APPROVAL_ROLES` held both `ANALYST` and
+ * `CONTROLLER` and `record_decision` checked it once, so an analyst token was accepted at
+ * `POST /exceptions/{id}/approve` — contradicting ADR-056 §2, which states in a table that an
+ * analyst may not approve. This console rendered the documented rule and reported the mismatch
+ * instead of following the code, which is how the hole was found.
+ *
+ * The server now separates `may_record_decision` from `may_authorise` and refuses the analyst the
+ * second. `GET /api/v1/me` returns both, so a future version of this file can read the authority
+ * the server will actually enforce rather than restating it — which is the better arrangement, and
+ * the reason the endpoint returns capabilities and not just a role name.
  */
 export function mayApprove(role: Role): boolean {
   return role === "controller";

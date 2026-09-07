@@ -284,6 +284,10 @@ def test_generation_succeeds_from_a_clean_checkout(tmp_path: pathlib.Path) -> No
 _NOT_THE_SNAPSHOT: Final = frozenset({"seed.py"})
 
 
+#: Where the committed snapshot lives. Named so the guard above can check what sits beside it.
+ARTIFACTS: Final = REPO_ROOT / "artifacts"
+
+
 def _demo_sources() -> list[tuple[str, ast.Module]]:
     paths = [p for p in sorted(DEMO_ROOT.rglob("*.py")) if p.name not in _NOT_THE_SNAPSHOT]
     assert len(paths) >= 4, "the guards must be walking real files"
@@ -459,19 +463,35 @@ def test_fixture_ground_truth_never_reaches_a_production_boundary() -> None:
     assert "intended_classification" not in render(build())
 
 
-def test_the_demo_introduced_no_frontend_tooling_and_still_involves_no_model() -> None:
-    """M7 stays unstarted, and the snapshot stays a pipeline artifact. One HTML file is not a
-    console, and the page must keep saying so.
+def test_the_snapshot_needs_no_build_step_and_still_involves_no_model() -> None:
+    """The snapshot stays a pipeline artifact: one HTML file, rendered by Python, no build.
 
-    The ``llm``/``providers`` clause here expired at M3.2, which built the first of those on
-    purpose — the third copy of a fence that also lived in ``test_money.py`` and
-    ``test_treatment_closure.py``, and the one that made the default gate red because it was
-    missed. What replaces it is the claim that actually matters for *this* artifact: the demo
-    renders deterministic pipeline output, so it must not reach the model layer even now that one
-    exists.
+    **This guard has expired twice and been narrowed twice, which is the honest way for a fence to
+    age.** Its first clause forbade the `llm` package, and M3.2 built that on purpose. Its second
+    forbade `frontend/` on the grounds that "M7 stays unstarted" — and M7 has now shipped the
+    operations console, so that reading is simply out of date.
+
+    What survives is the claim that still matters about *this* artifact, and it is narrower than
+    either: `artifacts/m2-demo.html` is a self-contained page produced by
+    ``python -m ledger_exception_control_plane.demo render``, and it must not acquire a toolchain of
+    its own or start reaching the model layer. A snapshot that needed `npm` to build would stop
+    being a thing a reviewer can open from a checkout, which is its whole purpose.
+
+    The console has its own tooling under `frontend/`, declared and tested there. What must never
+    happen is the *snapshot* growing one — so the check is that no build manifest sits beside it,
+    not that no build manifest exists in the repository.
     """
-    for forbidden in ("package.json", "package-lock.json", "node_modules", "frontend", "web", "ui"):
-        assert not (REPO_ROOT / forbidden).exists(), f"{forbidden} was introduced"
+    # Nothing beside the artifact, and nothing at the repository root that would make the snapshot
+    # itself a built thing. `frontend/` is permitted and is checked by its own suite.
+    for forbidden in ("package.json", "package-lock.json", "node_modules", "web", "ui"):
+        assert not (REPO_ROOT / forbidden).exists(), (
+            f"{forbidden} was introduced at the repository root: the M2 snapshot must stay a "
+            "single rendered file with no build step. The console's tooling belongs in frontend/."
+        )
+    assert not list(ARTIFACTS.glob("package*.json")), "the snapshot has acquired a build manifest"
+    assert (REPO_ROOT / "frontend" / "package.json").exists(), (
+        "the console's tooling has moved or gone; this guard's exemption now protects nothing"
+    )
 
     # Scoped to the snapshot, like the guards above. The M2 snapshot's headline claim is that no
     # AI is involved in it at all, and that must not erode. `seed.py` is excluded because the

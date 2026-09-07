@@ -1,42 +1,46 @@
 /**
  * Replay one dead-lettered dispatch.
  *
- * **The control plane does not implement this yet.** `PROJECT_SPEC.md` §10 lists
- * `POST /dlq/{id}/replay` beside `GET /dlq`, and increment 4.3 built a replay *CLI*; the HTTP route
- * has not been added. So this handler forwards only when the connected control plane publishes the
- * path, and otherwise answers `501` with the contract it is waiting for.
+ * The control plane implements this at `POST /api/v1/dlq/{dlq_id}/replay`. This handler forwards
+ * only when the connected control plane publishes that path, and otherwise answers `501` with the
+ * contract — so a console pointed at an older deployment degrades honestly instead of failing on
+ * click.
  *
  * It does **not** fabricate a success. A console that reported a replay it never requested would be
- * lying about a financial dispatch, which is worse than a disabled button by a wide margin. The
- * control in the UI is disabled for the same reason and says the same thing.
+ * lying about a financial dispatch, which is worse than a disabled button by a wide margin.
  *
- * The contract this expects, for whoever implements it:
+ * The contract:
  *
- *     POST /api/v1/dlq/{dead_letter_id}/replay
+ *     POST /api/v1/dlq/{dlq_id}/replay
  *     auth   operator only (the queue is operator work; an approver may not replay their own posting)
- *     body   {"replay_token": "<8-64 chars>"}   idempotency key, claimed by the caller
- *     200    DeadLetterView with replay_state == "replayed" and replayed_at set
- *     403    {"detail": {"reason": "role_may_not_recover"}}
- *     409    {"detail": {"reason": "already_replayed"}} | {"reason": "token_already_used"}
- *     404    {"detail": {"reason": "unknown_item"}}
+ *     body   none — see below
+ *     200    ReplayReportView {dlq_id, adjustment_id, operation_id, outcome, posting_ref,
+ *                              detail, resolved}
+ *     403    {"detail": "a replay is an operator action"}
  *
- * The response being a `DeadLetterView` matters: the console re-renders the row from the answer
- * rather than assuming what changed, and `replay_state` is the field that proves it happened.
+ * **No idempotency key, deliberately.** An earlier version of this handler sent a caller-claimed
+ * `replay_token`. The control plane refuses that design: a second POST is a second *order*, and
+ * what stops it duplicating a financial effect is the retry-independent operation identifier and
+ * the ledger's declared capability — not an HTTP request cache. §13 keeps financial guarantees out
+ * of transport plumbing, and a token here would have put one there.
+ *
+ * The response reports what the ledger answered, so the console re-renders from the answer rather
+ * than assuming what changed. `resolved` is 4.3's own definition of closure, derived there.
  */
 
 import { NextResponse } from "next/server";
 
 import { callControlPlane } from "@/lib/server/backend";
 import { probeCapabilities } from "@/lib/server/capabilities";
-import type { DeadLetterView } from "@/lib/types";
+import type { ReplayReportView } from "@/lib/types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const NOT_IMPLEMENTED_MESSAGE =
-  "This control plane has no replay endpoint. Replay is available from the command line " +
-  "(the 4.3 replay CLI); the HTTP route is specified in this handler and not yet built.";
+  "This control plane publishes no replay endpoint. Replay is available from the command " +
+  "line (the 4.3 replay CLI). Upgrade the control plane to enable it here.";
 
-export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
+export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
   if (!UUID.test(id)) {
     return NextResponse.json(
@@ -58,27 +62,18 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     );
   }
 
-  let replayToken: unknown;
-  try {
-    replayToken = (await request.json())?.replay_token;
-  } catch {
-    replayToken = undefined;
-  }
-  if (typeof replayToken !== "string" || replayToken.length < 8 || replayToken.length > 64) {
-    return NextResponse.json(
-      {
-        status: 400,
-        message: "A replay token of 8 to 64 characters is required.",
-        authority: false,
-        not_implemented: false,
-      },
-      { status: 400 },
-    );
-  }
-
-  const upstream = await callControlPlane<DeadLetterView>(`/api/v1/dlq/${id}/replay`, {
+  // **No request body, and no caller-claimed idempotency key.**
+  //
+  // This console originally sent a `replay_token`, on the reasonable assumption that a re-send
+  // needed one. The control plane refuses that design and says why: a second POST is a second
+  // *order*, and what protects against it duplicating a financial effect is the retry-independent
+  // operation identifier and the ledger's declared capability — not an HTTP request cache.
+  // Accepting a token here would move a financial guarantee into browser plumbing, which
+  // `PROJECT_SPEC.md` §13 says it must never live in.
+  //
+  // So the console sends the order and renders the answer. It does not retry on its own.
+  const upstream = await callControlPlane<ReplayReportView>(`/api/v1/dlq/${id}/replay`, {
     method: "POST",
-    body: { replay_token: replayToken },
   });
   if (!upstream.ok) {
     return NextResponse.json(upstream.failure, { status: upstream.failure.status || 502 });

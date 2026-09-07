@@ -149,7 +149,7 @@ export function DemoControl() {
               disabled={!enabled}
               title={
                 endpointMissing
-                  ? "POST /api/v1/demo/inject-crash does not exist on this control plane."
+                  ? "This control plane publishes no demo fault-injection endpoint."
                   : demoMode !== true
                     ? "Fault injection runs only on an instance configured as a demonstration."
                     : undefined

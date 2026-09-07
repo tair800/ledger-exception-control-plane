@@ -36,6 +36,7 @@ import { NextResponse } from "next/server";
 
 import { callControlPlane } from "@/lib/server/backend";
 import { probeCapabilities } from "@/lib/server/capabilities";
+import type { InjectedFaultReport } from "@/lib/types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -72,10 +73,14 @@ export async function POST(request: Request) {
     );
   }
 
-  const upstream = await callControlPlane<unknown>("/api/v1/demo/inject-crash", {
-    method: "POST",
-    body: { exception_id: exceptionId, fault: FAULT },
-  });
+  // The exception is addressed in the path and the fault is not a parameter: the control plane
+  // injects exactly §19.1's lost-response fault, because that is the failure the whole reliability
+  // layer exists for and a demo control that let a visitor pick from a menu would be inviting them
+  // to find the one the system handles worst.
+  const upstream = await callControlPlane<InjectedFaultReport>(
+    `/api/v1/demo/exceptions/${exceptionId}/inject-fault`,
+    { method: "POST" },
+  );
   if (!upstream.ok) {
     return NextResponse.json(upstream.failure, { status: upstream.failure.status || 502 });
   }
