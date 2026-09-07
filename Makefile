@@ -266,7 +266,7 @@ cassette-verify: ## Prove the harness replays the whole corpus offline (no key, 
 #
 # A second `.PHONY` rather than an edit to the one at the top of the file. Make accumulates them,
 # and a block that declares its own targets can be added or removed in one piece.
-.PHONY: eval-gate eval-gate-update eval-gate-verify
+.PHONY: eval-gate eval-gate-update eval-gate-verify label-packet label-packet-verify
 #
 # 6.2's gate and 6.3's comparison harness. Both replay the committed cassette offline, so neither
 # needs a database, a credential or a network — and neither can reach a provider: no module they
@@ -291,3 +291,14 @@ eval-gate-update: ## Deliberately rewrite tests/golden/replay-baseline.json from
 
 eval-gate-verify: ## Prove the gate passes on the baseline and fails on an injected regression
 	uv run pytest tests/test_evaluation_gate.py -p no:cacheprovider --no-cov
+
+# The hold-out label packet (§20's human-labelled slice, OPEN-15). `label-packet` writes the
+# question; nothing in this repository writes the answer. `import-labels` is not a target on
+# purpose — it takes a path to a file the owner filled in, so it belongs on a command line rather
+# than behind a `make` verb that would need a variable to be useful.
+
+label-packet: ## Write the human-label packet for the frozen hold-out slice (writes no label)
+	uv run python -m tests.evaluation packet
+
+label-packet-verify: ## Prove the packet leaks no ground truth and the import validator refuses bad input
+	uv run pytest tests/test_human_labels.py -p no:cacheprovider --no-cov
