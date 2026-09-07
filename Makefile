@@ -6,7 +6,7 @@
         money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
         operations-verify dispatch-verify ledger-verify retry-verify approval-verify \
         reconcile-verify audit-verify chaos-verify chaos-table chaos-check \
-        golden golden-check eval-verify
+        golden golden-check eval-verify observability-verify
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -272,7 +272,9 @@ cassette-verify: ## Prove the harness replays the whole corpus offline (no key, 
 # The exit criterion §18 states — a single exception traceable end to end in Langfuse — is **not**
 # discharged by this command and cannot be from this branch: it needs the OTel dependency, a
 # provider bootstrap and a running collector. `docs/observability.md` §9 says what remains.
-.PHONY: observability-verify
-
+#
+# The target is declared on the file's single `.PHONY` line above rather than in a second one: the
+# guard in `tests/test_tooling_bootstrap.py` reads the first declaration only, so a second block
+# would be invisible to it and the target would fail the check it exists to satisfy.
 observability-verify: ## Prove the telemetry conventions, the redaction gate and the correlation contract
 	uv run pytest tests/test_observability.py -p no:cacheprovider --no-cov
