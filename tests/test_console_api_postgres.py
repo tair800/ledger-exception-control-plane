@@ -15,7 +15,7 @@ Marked ``integration``: needs PostgreSQL.
 
 from __future__ import annotations
 
-import datetime as dt
+import asyncio
 import json
 import os
 import pathlib
@@ -97,8 +97,6 @@ def migrated_database() -> Iterator[None]:
 
 
 def _clear_audit_trail() -> None:
-    import asyncio
-
     async def clear() -> None:
         connection = await asyncpg.connect(DSN)
         try:
@@ -126,17 +124,57 @@ async def engine() -> AsyncIterator[AsyncEngine]:
         await created.dispose()
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def seeded(engine: AsyncEngine) -> AsyncIterator[None]:
-    """One seeded demonstration per test. ``seed_demo`` resets before it seeds, so this is total."""
-    await seed_demo(engine)
+@pytest.fixture(scope="module", autouse=True)
+def seeded() -> Iterator[None]:
+    """One seeded demonstration for the whole module, not one per test.
+
+    **A sync fixture driving the coroutine itself**, because this project configures
+    ``asyncio_default_fixture_loop_scope = "function"`` and a module-scoped *async* fixture is
+    therefore a ``ScopeMismatch`` — pytest-asyncio refuses to hand a function-scoped runner to a
+    module-scoped request. No loop is running at module setup, so ``asyncio.run`` is the correct
+    tool here and the one the sibling modules use for the same reason.
+
+    Per-test seeding was the first arrangement and it cost twenty-one minutes: the seeder drives
+    the real pipeline, so it is not cheap, and thirteen tests paid for it thirteen times. Almost
+    every test here is a *read*, and reads do not need their own database.
+
+    The two tests that consume the pending posting re-seed themselves through
+    :func:`_reseed`, which is honest about the coupling rather than hiding it behind an autouse
+    fixture that runs whether it is needed or not.
+    """
+    asyncio.run(_reseed())
     yield
+
+
+async def _reseed() -> None:
+    """Seed a fresh demonstration. ``seed_demo`` resets before it seeds, so this is total."""
+    engine = create_async_engine(async_dsn(_settings()), poolclass=NullPool)
+    try:
+        await seed_demo(engine)
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     with TestClient(create_app(_settings())) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def pending_target(client: TestClient) -> str:
+    """A freshly seeded exception whose posting is pending and unattempted.
+
+    **The pending posting is a scarce, consumable resource**, and scattering ``_reseed()`` calls
+    through the tests that want it made the module order-dependent: whichever test ran first
+    consumed it, and the rest failed on a 409 that was the dispatcher working correctly. Each of
+    them passed in isolation, which is the signature of shared state rather than a defect.
+
+    A fixture makes the dependency declared instead of remembered: a test that needs the target
+    asks for it, gets a fresh database, and cannot be affected by what ran before it.
+    """
+    asyncio.run(_reseed())
+    return _awaiting_dispatch(client)
 
 
 def _exceptions(client: TestClient) -> list[dict[str, object]]:
@@ -156,7 +194,8 @@ def _detail(client: TestClient, exception_id: str) -> dict[str, object]:
 # ======================================================================================
 
 
-def test_the_seeded_demonstration_reaches_every_state_the_console_renders() -> None:
+@pytest.mark.asyncio
+async def test_the_seeded_demonstration_reaches_every_state_the_console_renders() -> None:
     """**The demo's own exit criterion, asserted rather than eyeballed.**
 
     A console screen with nothing in it demonstrates nothing, and the states that matter are the
@@ -164,7 +203,6 @@ def test_the_seeded_demonstration_reaches_every_state_the_console_renders() -> N
     ambiguous posting or a dead letter, the console would still work and the demonstration would
     have quietly lost its point — so the counts are asserted here where that shows up as a failure.
     """
-    import asyncio
 
     async def counts() -> dict[str, int]:
         connection = await asyncpg.connect(DSN)
@@ -188,7 +226,7 @@ def test_the_seeded_demonstration_reaches_every_state_the_console_renders() -> N
         finally:
             await connection.close()
 
-    seen = asyncio.run(counts())
+    seen = await counts()
     assert seen["exception"] > 0, "no exception to show"
     assert seen["evidence"] > 0, "the evidence panel would be empty"
     assert seen["treatment_proposal"] > 0, "the proposal panel would be empty"
@@ -290,7 +328,7 @@ def test_meta_is_unauthenticated_and_names_the_ledger_it_is_talking_to(
 
 
 def test_injecting_the_lost_response_fault_applies_the_money_exactly_once(
-    client: TestClient,
+    client: TestClient, pending_target: str
 ) -> None:
     """**M7.2's exit criterion: a visitor triggers §19.1's failure and sees no second effect.**
 
@@ -310,7 +348,7 @@ def test_injecting_the_lost_response_fault_applies_the_money_exactly_once(
     assert report["ledger_posts_received"] == 1
 
 
-def test_the_fault_control_is_absent_outside_demo_mode(engine: AsyncEngine) -> None:
+def test_the_fault_control_is_absent_outside_demo_mode(pending_target: str) -> None:
     """**404, not 403.** A 403 confirms the route exists and invites a search for the credential.
 
     A fault injector reachable in a deployment doing real work is a defect however carefully it is
@@ -325,8 +363,11 @@ def test_the_fault_control_is_absent_outside_demo_mode(engine: AsyncEngine) -> N
     assert response.json()["detail"] == "not found"
 
 
-def test_the_fault_control_is_operator_work(client: TestClient) -> None:
-    """Injecting a fault dispatches a financial write, so it is not the approver's button."""
+def test_the_fault_control_is_operator_work(client: TestClient, pending_target: str) -> None:
+    """Injecting a fault dispatches a financial write, so it is not the approver's button.
+
+    No re-seed: a 403 is refused before anything is dispatched, so this consumes nothing.
+    """
     target = _awaiting_dispatch(client)
 
     response = client.post(f"/api/v1/demo/exceptions/{target}/inject-fault", headers=CONTROLLER)
@@ -335,35 +376,71 @@ def test_the_fault_control_is_operator_work(client: TestClient) -> None:
     assert "operator" in response.json()["detail"]
 
 
-def test_a_dispatch_the_system_will_not_send_is_a_conflict_rather_than_a_crash(
-    client: TestClient,
+def test_pressing_the_control_twice_still_applies_the_money_exactly_once(
+    client: TestClient, pending_target: str
 ) -> None:
-    """A refusal is the dispatcher working. It must not reach the console as a 500.
+    """**The demonstration's strongest moment, and it replaced a weaker expectation.**
 
-    The first version let ``DispatchRefusedError`` escape and the console received a 500 for a
-    correct decision — a rule being enforced, reported as a broken demo.
+    This test was first written to assert that a second injection is *refused* with a 409. It got a
+    200 instead — and the 200 was right. A re-send inside the adapter's declared idempotency window
+    is exactly what §13.5 clause 3 permits, so refusing it would have been the system being
+    over-cautious rather than correct.
+
+    What the 200 exposed was a defect in the endpoint: it built a fresh ledger per injection, so
+    the second send could not be suppressed by the first. Both calls reported an applied count of
+    one while the money had moved twice — the failure the whole repository exists to prevent,
+    reachable from a button.
+
+    So the endpoint uses the instance's own ledger, and this asserts the property that matters:
+    **press it twice and the ledger has applied the operation once.** The second send is permitted,
+    made, and suppressed on the operation identifier, which is a stronger thing to show a visitor
+    than a refusal.
     """
-    target = _awaiting_dispatch(client)
-    first = client.post(f"/api/v1/demo/exceptions/{target}/inject-fault", headers=OPERATOR)
+    first = client.post(f"/api/v1/demo/exceptions/{pending_target}/inject-fault", headers=OPERATOR)
     assert first.status_code == 200, first.text
+    assert first.json()["ledger_applied_count"] == 1
 
-    # The same posting again: now ambiguous, and §13.5 forbids re-sending it.
-    second = client.post(f"/api/v1/demo/exceptions/{target}/inject-fault", headers=OPERATOR)
+    second = client.post(f"/api/v1/demo/exceptions/{pending_target}/inject-fault", headers=OPERATOR)
+    assert second.status_code == 200, second.text
+    report = second.json()
 
-    assert second.status_code == 409, second.text
-    assert second.json()["detail"]["reason"] == "dispatch_refused"
+    assert report["ledger_applied_count"] == 1, (
+        "the same operation was applied more than once; the re-send was not suppressed"
+    )
+    assert report["ledger_posts_received"] == 1, (
+        "the request must actually reach the ledger — a count of zero would mean the demonstration "
+        "proved nothing was sent rather than that a duplicate was suppressed"
+    )
+    assert report["recorded_outcome"] == "unknown"
 
 
 def _awaiting_dispatch(client: TestClient) -> str:
-    """The exception whose posting the seeder deliberately left pending."""
+    """The exception whose posting the seeder deliberately left pending and unattempted.
+
+    **Both conditions, and the second one was missing.** The first version matched on
+    ``attempt_count == 0`` alone — and the *dead-lettered* posting also has zero attempts, because
+    it never reached the ledger. So this sometimes returned a posting the dispatcher correctly
+    refuses, and the fault-injection tests failed with a 409 that was the system working.
+
+    ``state == "pending"`` is what distinguishes "not yet sent" from "sent nowhere and given up
+    on", and the two are only alike in the count.
+    """
     for row in _exceptions(client):
         if not row["decided"]:
             continue
         detail = _detail(client, str(row["id"]))
         outbox = detail["outbox"]
-        if isinstance(outbox, dict) and outbox.get("attempt_count") == 0:
+        if (
+            isinstance(outbox, dict)
+            and outbox.get("state") == "pending"
+            and outbox.get("attempt_count") == 0
+            and outbox.get("last_outcome") is None
+        ):
             return str(row["id"])
-    raise AssertionError("the seeder left no posting awaiting dispatch")
+    raise AssertionError(
+        "the seeder left no posting pending and unattempted; the fault-injection control has "
+        "nothing to act on"
+    )
 
 
 def test_an_unknown_exception_is_a_404_not_a_500(client: TestClient) -> None:
@@ -378,16 +455,14 @@ def test_every_console_read_refuses_an_unauthenticated_caller(client: TestClient
     assert client.get("/api/v1/meta").status_code == 200
 
 
-def test_the_demo_seeder_is_repeatable(engine: AsyncEngine) -> None:
+@pytest.mark.asyncio
+async def test_the_demo_seeder_is_repeatable(engine: AsyncEngine) -> None:
     """A demonstration a reviewer cannot re-run is a demonstration they cannot check.
 
     ``seed_demo`` resets before it seeds — it cannot rely on ``alembic downgrade base``, because
     the 4.4 migration refuses to downgrade while the `recover` events this seeder writes exist.
     """
-    import asyncio
-
-    first = asyncio.run(seed_demo(engine))
-    second = asyncio.run(seed_demo(engine))
+    first = await seed_demo(engine)
+    second = await seed_demo(engine)
 
     assert first == second, "two seedings produced different databases"
-    assert dt.datetime.now(dt.UTC) is not None  # the seeder itself reads no clock

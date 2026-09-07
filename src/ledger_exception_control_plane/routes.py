@@ -67,7 +67,6 @@ from ledger_exception_control_plane.db.models import SettlementLine
 from ledger_exception_control_plane.ledger import (
     Fault,
     FaultInjectingLedger,
-    SimulatedLedger,
 )
 from ledger_exception_control_plane.operations import outcome_code
 from ledger_exception_control_plane.operations.approval import (
@@ -1123,10 +1122,21 @@ async def inject_fault(
             detail="the approved treatment has not been priced, so there is no posting to fault",
         )
 
-    # A fresh inner ledger per injection, so the count the visitor reads is this demonstration's
-    # and not an accumulation across everyone who pressed the button.
-    inner = SimulatedLedger()
+    # **The instance's own ledger, not a fresh one — and that was a defect worth recording.**
+    #
+    # The first version constructed a new `SimulatedLedger()` per injection, so that the count a
+    # visitor read was their own demonstration rather than an accumulation. It also destroyed the
+    # only thing that makes a bounded re-send safe. Press the button twice inside the declared
+    # idempotency window and §13.5 clause 3 *permits* the second send — correctly — but a ledger
+    # with no memory of the first cannot suppress it. Both responses then reported
+    # `ledger_applied_count: 1` while the money had moved twice, which is precisely the failure
+    # this endpoint exists to disprove. Found by a test that expected a refusal and got a success.
+    #
+    # Using the instance's ledger makes the suppression real, and the count is read **per operation
+    # identifier**, so it is still this operation's number and not a running total.
+    inner = request.app.state.ledger_adapter
     faulted = FaultInjectingLedger(inner, fault=Fault.COMMIT_THEN_LOSE_RESPONSE)
+    received_before = inner.posts_received
 
     # A refusal here is the dispatcher working, not failing: it declines an operation that is
     # already finished, already in flight, or whose last outcome was ambiguous — §13.5 forbids
@@ -1159,12 +1169,17 @@ async def inject_fault(
         fault=Fault.COMMIT_THEN_LOSE_RESPONSE.value,
         recorded_outcome=outcome_code(result.outcome).value,
         ledger_applied_count=inner.applied_count(adjustment.operation_id),
-        ledger_posts_received=inner.posts_received,
+        # A delta, not the instance total. The ledger is shared across injections so that
+        # suppression is real, which makes its cumulative counter meaningless to a visitor — while
+        # the difference across this one call is exactly the number that distinguishes a suppressed
+        # duplicate from a request that never arrived.
+        ledger_posts_received=inner.posts_received - received_before,
         explanation=(
             "The ledger committed the posting and the response was lost, so this system recorded "
             "the outcome as UNKNOWN rather than guessing. It did not retry: an ambiguous "
-            "irreversible write never enters the retry path. The count above is the ledger's own, "
-            "and it is one."
+            "irreversible write never enters the retry path. Press this again and watch the "
+            "applied count stay at one: a re-send inside the declared idempotency window is "
+            "permitted, and the ledger suppresses it because the operation identifier is the same."
         ),
     )
 
