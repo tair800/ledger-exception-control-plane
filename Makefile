@@ -6,7 +6,7 @@
         money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
         operations-verify dispatch-verify ledger-verify retry-verify approval-verify \
         reconcile-verify audit-verify chaos-verify chaos-table chaos-check \
-        golden golden-check eval-verify
+        golden golden-check eval-verify observability-verify
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -317,3 +317,20 @@ eval-compare: ## Render §20's three-arm comparison (NOT MEASURED where a live c
 
 eval-compare-verify: ## Prove the comparison harness fabricates no number and gates live capture
 	uv run pytest tests/test_three_arm_comparison.py -p no:cacheprovider --no-cov
+
+# --- observability (M8.1) ---
+#
+# `PROJECT_SPEC.md` §18. Conventions, the redaction gate and the correlation contract, none of
+# which needs a database, a network, a provider or an OpenTelemetry SDK — the sink is injected and
+# the default one emits nothing. So this runs in the default suite too, and is only broken out here
+# because the leak test and its kill test are the pair a reviewer will want to run on their own.
+#
+# The exit criterion §18 states — a single exception traceable end to end in Langfuse — is **not**
+# discharged by this command and cannot be from this branch: it needs the OTel dependency, a
+# provider bootstrap and a running collector. `docs/observability.md` §9 says what remains.
+#
+# The target is declared on the file's single `.PHONY` line above rather than in a second one: the
+# guard in `tests/test_tooling_bootstrap.py` reads the first declaration only, so a second block
+# would be invisible to it and the target would fail the check it exists to satisfy.
+observability-verify: ## Prove the telemetry conventions, the redaction gate and the correlation contract
+	uv run pytest tests/test_observability.py -p no:cacheprovider --no-cov
