@@ -449,18 +449,28 @@ def test_live_eval_refuses_even_with_the_opt_in_because_there_is_no_transport(
 def test_live_eval_names_the_variables_and_prints_no_value(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Names only. A tool that echoed a credential to explain itself would be the leak."""
+    """Names only. A tool that echoed a credential to explain itself would be the leak.
+
+    The stand-in values are **assembled at run time rather than written as literals**. They are
+    fake, but a committed string matching the scrubber's own ``sk-ant-`` shape is a false positive
+    waiting to happen in any repository secret scan — and a repository whose secret scan cries wolf
+    is one where the real hit gets waved through.
+    """
+    fake_anthropic = "sk-" + "ant-" + "n" * 24
+    fake_openai = "sk-" + "n" * 28
+
     monkeypatch.setenv(cli.LIVE_EVAL_OPT_IN, "1")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-thisisnotarealkey000000")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-thisisnotarealkey0000000000")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", fake_anthropic)
+    monkeypatch.setenv("OPENAI_API_KEY", fake_openai)
 
     cli.main(["live-eval"])
     stderr = capsys.readouterr().err
 
     for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CASSETTE_CAPTURE"):
         assert name in stderr
-    assert "sk-ant-" not in stderr and "sk-this" not in stderr
-    assert "thisisnotarealkey" not in stderr
+    assert fake_anthropic not in stderr
+    assert fake_openai not in stderr
+    assert "sk-" not in stderr, "nothing credential-shaped may reach the output at all"
 
 
 def _first_subject_offered_a_candidate() -> tuple[
