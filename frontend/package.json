@@ -1,0 +1,37 @@
+{
+  "name": "ledger-exception-console",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Operations console for the ledger exception control plane.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "next": "15.5.25",
+    "react": "19.1.9",
+    "react-dom": "19.1.9"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "3.3.1",
+    "@tailwindcss/postcss": "4.1.13",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "6.9.0",
+    "@testing-library/react": "16.3.0",
+    "@testing-library/user-event": "14.6.1",
+    "@types/node": "22.18.6",
+    "@types/react": "19.1.13",
+    "@types/react-dom": "19.1.9",
+    "@vitejs/plugin-react": "5.0.3",
+    "eslint": "9.39.5",
+    "eslint-config-next": "15.5.25",
+    "jsdom": "26.1.0",
+    "tailwindcss": "4.1.13",
+    "typescript": "5.9.2",
+    "vitest": "3.2.7"
+  }
+}
