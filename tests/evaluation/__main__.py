@@ -1,6 +1,4 @@
-"""The evaluation CLI: generate, verify and score (M6.1).
-
-Three commands, and the split between them is the same one the cassette harness uses:
+"""The evaluation CLI: generate, verify, score and gate (M6.1, M6.2).
 
 ``generate``
     Rebuild ``tests/golden/treatment-golden.jsonl`` from the seeded generator and write it.
@@ -15,8 +13,15 @@ Three commands, and the split between them is the same one the cassette harness 
     **required** argument with no default, because the one thing this harness must never do is
     present a synthesised run as an evaluation result.
 
-Nothing here can reach a provider. There is no HTTP client in the dependency graph of any module it
-imports, and no command takes a credential.
+``gate``
+    Replay the committed cassette through the shipped proposal path, recompute every figure the
+    scorer reports, and fail on **any** difference from ``tests/golden/replay-baseline.json``.
+    ``--update`` rewrites the baseline deliberately. This is a *reproduction* gate: the cassettes
+    are synthesised, so no number it compares is a statement about a model (see
+    :mod:`tests.evaluation.gate`).
+
+Every command is offline by construction: no HTTP client is in the dependency graph of any module
+they import, and none of them takes a credential.
 """
 
 from __future__ import annotations
@@ -27,6 +32,13 @@ import pathlib
 import sys
 
 from ledger_exception_control_plane.db.control import TreatmentCode
+from tests.evaluation.gate import (
+    BASELINE_PATH,
+    compare,
+    load_baseline,
+    measure,
+    render_baseline,
+)
 from tests.evaluation.golden import (
     GOLDEN_PATH,
     build_golden_set,
@@ -126,14 +138,90 @@ def _score(proposals_path: pathlib.Path, origin: CassetteOrigin) -> int:
     return 0
 
 
+def _gate(path: pathlib.Path, *, update: bool) -> int:
+    """Recompute the offline replay and compare it with the committed baseline.
+
+    Exits non-zero on **any** difference. Everything upstream is deterministic, so there is nothing
+    for a tolerance band to absorb except a behaviour change somebody would rather not discuss.
+    """
+    produced = measure()
+
+    if update:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_baseline(produced), encoding="utf-8", newline="\n")
+        print(f"wrote {path.name}")
+        for provider, metrics in sorted(produced.providers.items()):
+            print(
+                f"  {provider:10s} {metrics['scored']:3d} scored, "
+                f"{metrics['correct']:3d} agreeing, origin {metrics['response_origin']}"
+            )
+        print()
+        print(
+            "  This is a reproduction baseline over synthesised cassettes. It is not a model "
+            "measurement and none of its figures is a quality threshold."
+        )
+        return 0
+
+    if not path.is_file():
+        print(
+            f"{path} does not exist; run `make eval-gate-update` to create it",
+            file=sys.stderr,
+        )
+        return 1
+
+    differences = compare(load_baseline(path), produced)
+    if differences:
+        print(
+            f"the offline evaluation replay no longer matches {path.name}: "
+            f"{len(differences)} difference(s)",
+            file=sys.stderr,
+        )
+        for line in differences:
+            print(f"  {line}", file=sys.stderr)
+        print(
+            "\nThis gate protects the reproduction, not a model: evidence assembly, prompt "
+            "construction, request fingerprinting, response parsing, the golden labels and the "
+            "scorer's arithmetic. If the change above is intended, run "
+            "`make eval-gate-update` and put the new baseline in the review.",
+            file=sys.stderr,
+        )
+        return 1
+
+    for provider, metrics in sorted(produced.providers.items()):
+        print(
+            f"{provider:10s} {metrics['scored']:3d} scored, {metrics['correct']:3d} agreeing, "
+            f"{metrics['distinct_recordings_served']:3d} recordings served, origin "
+            f"{metrics['response_origin']}"
+        )
+    print(f"the offline evaluation replay matches {path.name}")
+    print(
+        "  (reproduction gate over synthesised cassettes: not a model measurement, and no "
+        "figure here is a quality threshold)"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="tests.evaluation", description="Generate, verify or score the §20 golden set."
+        prog="tests.evaluation",
+        description="Generate, verify, score and gate the §20 evaluation artefacts.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("generate", help="rebuild the committed golden set")
     sub.add_parser("verify", help="fail if the committed golden set has drifted")
+
+    gating = sub.add_parser(
+        "gate", help="fail if the offline cassette replay has drifted from the committed baseline"
+    )
+    gating.add_argument(
+        "--update",
+        action="store_true",
+        help=(
+            "rewrite the baseline from the current run instead of comparing. Deliberate: the new "
+            "file is what review then sees."
+        ),
+    )
 
     scoring = sub.add_parser("score", help="grade a JSONL file of proposals")
     scoring.add_argument("proposals", type=pathlib.Path)
@@ -152,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
         return _generate(GOLDEN_PATH)
     if arguments.command == "verify":
         return _verify(GOLDEN_PATH)
+    if arguments.command == "gate":
+        return _gate(BASELINE_PATH, update=arguments.update)
     return _score(arguments.proposals, CassetteOrigin(arguments.origin))
 
 

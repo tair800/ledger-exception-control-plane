@@ -261,3 +261,33 @@ cassettes-check: ## Fail if the committed cassette has drifted from its builder
 
 cassette-verify: ## Prove the harness replays the whole corpus offline (no key, no network)
 	uv run pytest tests/test_cassette_harness.py -p no:cacheprovider --no-cov
+
+# --- evaluation (M6.2/6.3) ---
+#
+# A second `.PHONY` rather than an edit to the one at the top of the file. Make accumulates them,
+# and a block that declares its own targets can be added or removed in one piece.
+.PHONY: eval-gate eval-gate-update eval-gate-verify
+#
+# 6.2's gate and 6.3's comparison harness. Both replay the committed cassette offline, so neither
+# needs a database, a credential or a network — and neither can reach a provider: no module they
+# import has an HTTP client in its dependency graph.
+#
+# **`eval-gate` is a reproduction gate, not a model-quality gate.** The committed cassettes are
+# synthesised and their treatments are assigned round-robin by position, so agreement with the
+# golden labels is arithmetic. What the gate protects is evidence assembly, prompt construction,
+# request fingerprinting, response parsing, the golden labels and the scorer's arithmetic. The
+# accuracy and abstention thresholds a build should fail on remain OPEN-6, and cannot be chosen
+# before a real capture exists.
+#
+# `live-eval` is deliberately absent from this file. It is the one command that would reach a paid
+# API, it is gated on an explicit environment opt-in, and putting it behind a `make` target would
+# make it one tab-completion away from a run nobody meant to pay for.
+
+eval-gate: ## Fail if the offline evaluation replay has drifted from its committed baseline
+	uv run python -m tests.evaluation gate
+
+eval-gate-update: ## Deliberately rewrite tests/golden/replay-baseline.json from the current run
+	uv run python -m tests.evaluation gate --update
+
+eval-gate-verify: ## Prove the gate passes on the baseline and fails on an injected regression
+	uv run pytest tests/test_evaluation_gate.py -p no:cacheprovider --no-cov
