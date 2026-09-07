@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+/*
+ * A dense, dark operations surface. The palette carries meaning and is kept small on purpose:
+ * neutral for facts, amber for anything the model produced, emerald for a deterministic
+ * computation, rose for a refusal or a failure, sky for an operator action. A reviewer should be
+ * able to tell at a glance which parts of the screen a language model touched.
+ */
+@theme {
+  --color-surface: #0b0f14;
+  --color-panel: #111823;
+  --color-panel-raised: #16202e;
+  --color-edge: #1f2b3a;
+  --color-ink: #e6edf6;
+  --color-ink-dim: #8fa3bb;
+  --color-ink-faint: #61748d;
+
+  --color-model: #f0b429;
+  --color-model-bg: #2a1f06;
+  --color-deterministic: #34d399;
+  --color-deterministic-bg: #06251b;
+  --color-refusal: #fb7185;
+  --color-refusal-bg: #2a0d14;
+  --color-operator: #38bdf8;
+  --color-operator-bg: #06212e;
+
+  --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "Menlo", monospace;
+}
+
+html,
+body {
+  background: var(--color-surface);
+  color: var(--color-ink);
+}
+
+body {
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Identifiers, amounts and correlation ids are read character by character, so they get a
+   monospaced face and no ligatures. An operator comparing two operation ids should not have to
+   trust proportional spacing. */
+.tabular {
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+  font-size: 12.5px;
+  letter-spacing: -0.01em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-operator);
+  outline-offset: 2px;
+}
