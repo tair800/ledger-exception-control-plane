@@ -3,10 +3,10 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current milestone:** M5.2 complete — audit-event contract v1, emitted at every state transition.
-**Next:** the **4.5 kill-test gate** — the `naive/` RED baseline and the chaos suite. It is the
-flagship claim and it has not run. See ADR-056 for the build order, ADR-057 for what 4.4 decided and
-ADR-058 for what contract v1 means.
+**Current milestone:** M4.5 complete — **the kill-test gate has run and passed.**
+**Next:** M6 onwards — the console, evaluation, observability, orchestration and deployment. See
+ADR-056 for the build order, ADR-057 for what 4.4 decided, ADR-058 for what contract v1 means and
+**ADR-059 for what the kill test proves and the five ways it could have proved nothing**.
 **The whole deterministic core exists.** A settlement file is ingested, normalised and either
 accepted or quarantined; its lines are matched deterministically against ledger entries with
 tolerance; every line that fails to match becomes exactly one classified exception; and an approved
@@ -32,9 +32,15 @@ held; a reconciliation separates what the ledger answered from what was conclude
 fields this repository cannot fill truthfully are null with the reason named rather than blank.
 `provenance()` answers §5.2's five questions from one adjustment.
 
-What still does not exist: the `naive/` baseline and the chaos suite — **the 4.5 kill-test gate has
-not run, and the flagship claim is unproven until it does**; no console, evaluation, observability or
-deployment; and no wired pipeline — nothing calls the stages in sequence, which is M7's.
+**The flagship claim is now proven rather than asserted.** 4.5 built the `naive/` RED baseline and
+the chaos suite: fifty-four scenario runs against real PostgreSQL, both branches, all three adapter
+capability configurations. `naive/` commits the same financial effect **twice in five of the seven
+scenarios**; `main` applies **at most once in all twenty-one cells**; and every one of the forty-two
+observed cells matches an expectation declared before the run. §19's results table is generated into
+`README.md` from what that run recorded at the ledger.
+
+What still does not exist: no console, evaluation, observability or deployment; and no wired
+pipeline — nothing calls the stages in sequence, which is M7's.
 
 ---
 
@@ -61,7 +67,8 @@ deployment; and no wired pipeline — nothing calls the stages in sequence, whic
 | **5.1 Approval gate with role separation** | **DONE** | OPEN-8 resolved; hashed bearer tokens, three roles, countersignature and single use enforced by database constraints; the gate proven to block the write |
 | **4.4 `UNKNOWN` semantics, reconciliation and recovery** | **DONE** | §13.5's capability branch executed across all three configurations; query before re-send; both re-send bounds enforced; the consecutive-negative count derived from an append-only table; monotonic transitions and the supersession interlock held by triggers; operator queue with evidence procedure, SLA and segregation of duties; `/recovery` endpoints |
 | **5.2 Audit-event contract v1** | **DONE** | All ten verbs emit inside the transaction they describe; closed `scope_granted` vocabulary with a refusal recording the authority actually held; correlation id derived from the ingested artefact and proven by recomputation; `provenance()` answers the exit criterion and names the two fields this repository cannot fill |
-| 4.5, 6.1 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
+| **4.5 KILL-TEST GATE — the chaos suite and the `naive/` RED baseline** | **PASSED** | 54 scenario runs, both branches, three capability configurations, real PostgreSQL. `naive/` double-posts in 5 of 7 scenarios; `main` applies at most once in all 21 cells; all 42 observed cells match the expectation declared before the run. Faults are a closed enum injected through a port; a five-mutant battery proves the instrumentation can still go red; §19's table is generated from the run |
+| 6.1 – 12.1 | NOT STARTED | See `IMPLEMENTATION_PLAN.md` (31 increments total) |
 
 ## What M0.2 delivered
 
@@ -747,6 +754,98 @@ skipped its database gate.
 
 Recorded as **ADR-056**, which also set the build order 5.1 → 4.4 → 5.2 → 4.5 and why.
 
+## What M4.5 delivered
+
+**The flagship gate, and it passed.** `PROJECT_SPEC.md` §19 and the build precondition recorded in
+`CLAUDE.md` required the `naive/` branch to be *demonstrated* to double-post under the chaos suite.
+It was. `naive/` commits the same financial effect twice in **five of the seven scenarios**, in every
+capability configuration; `main` applies **at most once in all twenty-one cells**. ADR-059 records
+what the run established and, more usefully, the five decisions taken to stop it establishing
+nothing.
+
+The table is generated into `README.md` by `make chaos-table` from the observations the run recorded.
+Every number in it is the simulated ledger's own applied-count, taken from the ledger and never
+inferred from this system's records — §19.1 forbids the latter by name.
+
+### `naive/` — a legitimate baseline, with its own tables
+
+Four files, no reliability code, and nothing sabotaged: the claim is a `SELECT … WHERE state =
+'open'` followed by an `UPDATE`, the adjustment row and the send are separate transactions in the
+obvious order, a failed send is retried because retrying a failed request is ordinary practice, and
+each attempt carries a fresh request identifier because that is what an identifier is *for* when
+nobody has asked a provider to deduplicate on it. Every failure it exhibits is a failure of
+**omission**, and `naive/README.md` maps each omission to the increment that closed it in `src/`.
+
+It has its own `naive_*` tables, created by `naive/schema.py` rather than by a migration, and that is
+not a convenience: `main`'s schema *itself* prevents the defect — `adjustment.operation_id` NOT NULL
+and unique, `settlement_batch.content_hash` unique, `uq_approval_token` — so a naive implementation
+writing into those tables would have been protected by `main`'s constraints and shown no failure at
+all. The tables are dropped on module teardown, because they are outside Alembic's history and no
+`downgrade base` removes them; a leftover one would fail the migration's own integrity test several
+modules later.
+
+### The fault-injection port: faults are values, and they fire once
+
+§19 requires injection *"via explicit, testable seams (a fault-injection port), not by patching
+internals"*. `Fault` is a closed enum whose members are named for **what happens to the books**
+rather than for what the client sees, because that distinction is the whole subject of §13.5.
+`COMMIT_THEN_LOSE_RESPONSE` and `AMBIGUOUS_5XX` are indistinguishable to a caller by construction and
+differ only in the ledger's applied-count — which is exactly §14's point, and the reason the suite
+can assert identical client behaviour and different books for the two.
+
+Faults fire **once** by default. A permanently faulted ledger means nothing ever lands, and then
+every branch looks identically safe: an implementation that never posts never double-posts.
+
+`FaultInjectingLedger` forwards `name`, `capabilities`, the declared endpoint, the query and all
+three counts, and every count is the *inner* ledger's. A number the wrapper maintained would be its
+opinion of the books, which is the same category of evidence the scenario exists to reject.
+
+### A third reference adapter, because the middle configuration was mislabelled
+
+`SimulatedLedger` suppresses a repeated identifier *internally* whatever it declares, so configuring
+it `NONE`/`NONE` would have produced a configuration whose behaviour was stronger than its label —
+and the label is what an auditor reads. `QueryableNonIdempotentLedger` is §19's middle configuration
+honestly: queryable by operation identifier, enforcing nothing, applying every posting it receives.
+Its conformance record proves the query claim and leaves the suppression claim **unproven**, and that
+asymmetry is the entire reason it exists.
+
+### The mutation battery — five ways this gate could have proved nothing
+
+`tests/test_kill_test_falsifiability.py` plants each of them and observes it fail:
+
+1. **A fault that never fires** — the applied-count is 1 either way, so it cannot detect this. The
+   injection counter can, which is why every §19.1 assertion checks it first.
+2. **A measurement taken from our own records** — the mutant counts *requests*: under an enforcing
+   ledger it reports 2 where the books hold 1, failing in the **flattering** direction.
+3. **A double too forgiving to double-book** — the reason for the third adapter, asserted rather
+   than argued.
+4. **A count maintained by the wrapper** — (2) one layer out.
+5. **Expectations fitted to the run** — a mutated expectation must actually break the suite, in
+   every configuration some scenario must distinguish the branches *by a duplicated effect*, and no
+   cell may expect `main` to apply more than once.
+
+`tests/test_fault_port.py` drives **every** member of the fault vocabulary, including the three no
+§19 scenario uses, because an enum member nothing constructs is untested code in the flagship
+module.
+
+### Two defects this increment found, and one of them was in production code
+
+- **`conformance.implementation_of` unwrapped only `AttributedAdapter`.** The chaos suite holds every
+  adapter inside a `FaultInjectingLedger`, so both strong claims were downgraded to `NONE` and
+  `main` routed every ambiguity to manual recovery **in all three configurations**. The suite would
+  still have "covered three capability branches"; it covered the weakest one three times, and every
+  individual assertion passed. Six tests failed together and said so. The unwrap list now holds two
+  wrappers, on exact type checks, with the rule for eligibility recorded: a `ConformanceRun` attests
+  suppression and query behaviour, and a fault changes what the client is *told* and never the
+  identifier a delegated post carries.
+- **The resolution helper never reached the state its own docstring claimed.** It stepped `now`
+  forward one second per pass from the instant of the send, so the adapter's declared 30-second
+  in-flight window never elapsed, no negative answer could become trustworthy, and the query bound
+  exhausted into manual recovery — correct behaviour, reached for a reason with nothing to do with
+  the scenario. A harness defect that read as a finding about the system.
+
+---
+
 ## What M5.2 delivered
 
 *"The portfolio's canonical audit shape, established here."* Six later repositories re-implement
@@ -1130,7 +1229,8 @@ ship.
 No reconciliation, no posting-identity query workflow, no idempotency-window or inflight-window
 enforcement, no supersession interlock, no manual-recovery queue, no `PartiallyApplied` routing —
 all 4.4's, and `recovery_queue` stays empty through every branch. No `naive/`, no chaos suite, no
-fault-injection port: **the kill-test gate is at 4.5 and has not run**. No audit events (5.2). No
+fault-injection port — all three arrived at 4.5, where **the kill-test gate has since run and
+passed** (ADR-059). No audit events (5.2). No
 worker process, no daemon and no sleep loop — the plan names none, and the runner does a bounded
 pass and returns.
 
@@ -1219,8 +1319,8 @@ the loser is refused rather than promoted to *N+1*.
 
 No dispatcher loop, no retry, no backoff, no DLQ, no replay (4.3). No `UNKNOWN` reconciliation
 workflow, no idempotency-window or inflight-window enforcement, no supersession interlock, no
-manual-recovery queue (4.4). No naive baseline and no chaos suite — **the kill-test gate is at 4.5
-and has not run** (ADR-053). No approval gate, no audit events, no console, no evaluation, no
+manual-recovery queue (4.4). No naive baseline and no chaos suite — **the kill-test gate is at 4.5,
+where it has since run and passed** (ADR-053, ADR-059). No approval gate, no audit events, no console, no evaluation, no
 deployment. A guard test asserts the dispatcher contains no loop, imports nothing that schedules, and
 has no parameter that could express a batch.
 

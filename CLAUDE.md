@@ -43,7 +43,14 @@ and **5.2 has delivered audit-event contract v1** — all ten verbs emitting ins
 the state change they describe, a closed `scope_granted` vocabulary, a correlation id derived from
 the ingested artefact rather than threaded through, and a `provenance()` read that answers §5.2's
 five questions while keeping what the trail attests apart from what the domain tables hold
-(ADR-058). **The 4.5 kill-test gate is next**, and it is the flagship claim.
+(ADR-058); and **4.5 has discharged the kill-test gate — the flagship claim is proven rather than
+asserted**. Fifty-four scenario runs against real PostgreSQL, every §19 scenario on both branches
+across all three adapter capability configurations: `naive/` commits the same financial effect twice
+in five of the seven scenarios, `main` applies at most once in all twenty-one cells, and every one
+of the forty-two observed cells matches an expectation declared before the run. Faults are a closed
+enum injected through a port, the results table is generated from what the run recorded at the
+ledger, and a five-mutant battery plants the ways the gate could have been green and worthless
+(ADR-059).
 
 The model layer still makes **no live call**: no provider SDK is a dependency, nothing under `llm/`
 imports an HTTP client, and no transport that speaks HTTP exists — the flow is exercised entirely
@@ -51,14 +58,17 @@ through injected fakes and recorded cassettes. The committed cassettes are **syn
 captured**; the format records which a file is and a test asserts it, because 6.3 will publish
 measurements produced from cassettes and the difference must never be lost.
 
-**Nor does the ledger side open a socket.** There are now two reference adapters, both in-process,
+**Nor does the ledger side open a socket.** There are now three reference adapters, all in-process,
 which is what lets the whole reliability layer be proven offline and in CI. The second — required by
 §4.4 and configured `idempotency=NONE, posting_identity_query=NONE` — **genuinely double-books**, so
 every "applied exactly once" assertion against it measures our restraint rather than the double's
-forgiveness. A real adapter would need its capability profile established from a vendor's
-documentation rather than assumed, which is OPEN-11. The transport classifier added at 4.3 is
+forgiveness. The third arrived at 4.5 for §19's middle configuration: queryable by operation
+identifier, enforcing nothing, and **also genuinely double-booking** — because configuring the
+reference adapter `NONE`/`NONE` would have produced a configuration whose behaviour was stronger
+than its label, and the label is what an auditor reads. A real adapter would need its capability
+profile established from a vendor's documentation rather than assumed, which is OPEN-11. The transport classifier added at 4.3 is
 exercised by handing it exceptions directly, for the same reason. Still not implemented: no
-evaluation, no scorer, no chaos suite and no console.
+evaluation, no scorer and no console.
 
 **An `adjustment` row is now written and can now be dispatched**, and both sentences used to say
 the opposite. 4.1 derives a retry-independent `operation_id`, binds it to the whole posting
@@ -90,9 +100,8 @@ of §11's ten fields are deliberately null here, with the reason recorded rather
 quietly left blank — this system is not an agent, and it makes no model call whose region could be
 recorded.
 
-What still does not exist is the `naive/` baseline and the chaos suite (4.5) — **the flagship claim
-is unproven until that gate runs** — and everything from M6 onwards. There is also no wired
-pipeline: nothing calls the stages in sequence, which is M7's orchestration.
+What still does not exist is everything from M6 onwards. There is also no wired pipeline: nothing
+calls the stages in sequence, which is M7's orchestration.
 `PROJECT_STATUS.md` is the authority on exactly what exists.
 
 ---
@@ -184,8 +193,16 @@ pipeline: nothing calls the stages in sequence, which is M7's orchestration.
   behaviour differs by capability and testing only the strong adapter proves only the easy case.
 - The suite runs against **both** `naive/` (the deliberately unsafe RED baseline) and `main`. The
   naive branch **must fail**. A suite that passes both proves nothing and is theatre.
+- **`naive/` must stay a legitimate baseline.** Every failure it exhibits is a failure of
+  *omission*, and `naive/README.md` maps each omission to the increment that closed it in `src/`.
+  Making it absurd to force a red result would forfeit the whole claim; so would writing up a
+  *lost* effect as a duplicated one.
+- **Every number in the results table comes from the ledger's own applied-count**, recorded by the
+  scenario that drove it. §19.1 forbids inferring an outcome from our own records by name, and the
+  renderer refuses to produce a table when any of the forty-two cells was not observed.
 - Results go in the README as a table: scenario × adjustments posted × expected × observed, for both
-  branches.
+  branches — **generated** by `make chaos-table`, never hand-written, and `make chaos-check` fails
+  if what is committed there has drifted from what the code does.
 
 ### 6. Evaluation and tests gate milestones
 
@@ -233,14 +250,13 @@ either.** `portfolio-control/PORTFOLIO_PROGRESS.md` states them as "Gate before 
 each at a numbered increment inside that phase, because a gate is *decided against working code
 rather than against an intention*; `IMPLEMENTATION_PLAN.md` assigns the increments. See ADR-053.
 
-1. **Before M4 — discharged at increment 4.5. NOT YET RUN.** The `naive/` branch must be
-   demonstrated to actually double-post under the chaos suite. If it cannot be made to fail, the chaos
-   suite is theatre and the flagship claim collapses. 4.5 is where it can first be decided against a
-   working `main`; deciding it earlier would decide it against an intention. **This placement accepts
-   a real cost:** 4.2, 4.3 and 4.4 are built before the flagship claim is proven, and a failed gate
-   discards them. "Early" bounds that exposure to three increments — the gate still precedes the
-   console, evaluation, observability and deployment work (M6—M10). Treat a failure as the plan's
-   exit criteria require: stop and reconsider, never soften.
+1. **Before M4 — discharged at increment 4.5. PASSED** (ADR-059). The `naive/` branch had to be
+   demonstrated to actually double-post under the chaos suite, and it was: five of the seven
+   scenarios, in every capability configuration, while `main` applies at most once in all
+   twenty-one cells. The placement accepted a real cost — 4.2, 4.3 and 4.4 were built before the
+   claim was proven, and a failed gate would have discarded them — and that cost was not incurred.
+   The gate is now a standing CI step rather than a one-off: `make chaos-check` re-runs it and fails
+   if the published table has drifted from what the code does.
 2. **Before M3 — discharged at increment 3.1. PASSED** (ADR-048). The treatment set must genuinely
    close into an enum. If real cases require the model to propose an amount, the containment claim is
    false and must be **dropped, not softened**.
@@ -338,6 +354,17 @@ make reconcile-verify  # the UNKNOWN branch across all three capability configur
 make audit-verify      # contract v1, the correlation span, and the provenance read
 ```
 
+The kill test (M4.5). The flagship gate: §19's scenarios on both branches, across all three adapter
+capability configurations, against a real server. The falsifiability battery needs no database and
+runs in the default suite, which is why `chaos-verify` runs it first — a gate whose ability to fail
+is checked by a command nobody runs is a gate on trust:
+
+```bash
+make chaos-verify      # the gate: naive/ must double-post, main must not
+make chaos-table       # re-run it and render §19's results table into README.md
+make chaos-check       # re-run it and fail if the committed table has drifted
+```
+
 Adding a dependency: `uv add <pkg>` for runtime, `uv add --dev <pkg>` for tooling. Both update
 `uv.lock`, which is committed. CI runs `--frozen`, so a dependency change that skipped the lockfile
 cannot reach `main`.
@@ -349,7 +376,8 @@ cannot reach `main`.
 - Python 3.12, typed throughout, Pydantic v2 for all boundary schemas.
 - `src/` layout: `db`, `fixtures`, `ingest`, `matching`, `classification`, `money`, `llm`,
   `operations`, `ledger`, `demo`. `ledger/` arrived at 4.2 and holds the adapter port, the
-  conformance suite, the two reference simulated ledgers and the transport classifier. A module or
+  conformance suite, the three reference simulated ledgers and the transport classifier; `4.5` added
+  `ledger/faults.py`, the fault-injection port §19 requires. A module or
   package named `outbox` or `workers` remains forbidden by a guard test at any depth: the outbox row
   is written by the module that already owns adjustment writes, so a file under that name would mean
   a second dispatch path had appeared without review; and **`workers` stays forbidden** — neither the
@@ -357,7 +385,15 @@ cannot reach `main`.
   returns, and what drives them is a deployment decision (10.1). `operations/approval.py` arrived at
   5.1 and is the only module permitted to record a human decision; `operations/reconcile.py` and
   `operations/recovery.py` arrived at 4.4.
-- `naive/` holds the RED baseline and is never imported by `src/`.
+- `naive/` holds the RED baseline and is **never imported by `src/`**. The dependency runs one way:
+  the baseline reads the ledger port, the reference adapters and the fault vocabulary; the shipped
+  package may not know the directory exists. A guard test in
+  `tests/test_kill_test_falsifiability.py` parses the package's import statements and enforces it —
+  deliberately in a module the *default* suite runs, because a guard behind the `integration` mark
+  would leave ruff, mypy and `make gate` green while an `import naive` sat in `src/`.
+- `naive/` has its **own tables** (`naive_*`, created by `naive/schema.py`, not by a migration).
+  `main`'s constraints would otherwise protect the baseline from its own defect and the comparison
+  would be rigged in its favour.
 - Migrations via Alembic; every migration applies and rolls back cleanly.
 - Conventional commit messages: `feat:`, `fix:`, `test:`, `chore:`, `docs:`, `refactor:`.
 - Commit at meaningful, reviewable increments — not one giant initial commit.

@@ -40,12 +40,14 @@ from ledger_exception_control_plane.ledger import (
     LedgerAdapter,
     LedgerAdapterCapabilities,
     Linearizable,
+    NonIdempotentLedger,
     NotFound,
     PartiallyApplied,
     PostingInstruction,
     PostingOutcome,
     PostingQueryMode,
     QueryableLedgerAdapter,
+    QueryableNonIdempotentLedger,
     QueryOutcome,
     Rejected,
     ReversalMode,
@@ -663,9 +665,22 @@ def test_the_committed_record_names_the_reference_adapter_and_a_date() -> None:
     assert record is not None
     assert record.suppression_proven and record.query_proven
 
-    (run,) = conformance_module.CONFORMANCE_RUNS
-    assert run.implementation == conformance_module.implementation_of(SimulatedLedger())
-    assert dt.date.fromisoformat(run.run_on) <= dt.date(2100, 1, 1), "the date must be a real date"
+    keyed = {run.implementation: run for run in conformance_module.CONFORMANCE_RUNS}
+    assert len(keyed) == len(conformance_module.CONFORMANCE_RUNS), (
+        "two records for one implementation: the first one found would silently win"
+    )
+    assert conformance_module.implementation_of(SimulatedLedger()) in keyed
+    for run in conformance_module.CONFORMANCE_RUNS:
+        assert dt.date.fromisoformat(run.run_on) <= dt.date(2100, 1, 1), (
+            f"{run.implementation} records something that is not a date"
+        )
+
+    # 4.5's addition, asserted for the asymmetry rather than merely for its presence: §19's middle
+    # configuration is queryable and enforces nothing, and a record claiming both would have made
+    # it indistinguishable from the reference adapter.
+    queryable = keyed[conformance_module.implementation_of(QueryableNonIdempotentLedger())]
+    assert queryable.query_proven is True
+    assert queryable.suppression_proven is False
 
 
 def test_an_adapter_with_no_committed_record_has_none() -> None:
@@ -682,8 +697,11 @@ async def test_every_committed_conformance_record_is_backed_by_a_live_run() -> N
     chain nobody checked. This runs the suite against every recorded implementation and requires the
     outcome to match what the record claims, so an entry that stopped being true fails the build.
     """
-    implementations = {
+    implementations: dict[str, type[LedgerAdapter]] = {
         conformance_module.implementation_of(SimulatedLedger()): SimulatedLedger,
+        conformance_module.implementation_of(
+            QueryableNonIdempotentLedger()
+        ): QueryableNonIdempotentLedger,
     }
 
     for run in conformance_module.CONFORMANCE_RUNS:
@@ -1220,26 +1238,71 @@ def test_wrapping_an_adapter_preserves_its_declared_endpoint_and_its_absence() -
     assert not hasattr(silent, "endpoint")
 
 
-def test_only_that_exact_wrapper_is_unwrapped_and_a_subclass_is_not() -> None:
-    """**The unwrapping is an exact type check, and this is why.**
+def test_only_those_exact_wrappers_are_unwrapped_and_a_subclass_is_not() -> None:
+    """**The unwrapping is an exact type check, for each of the two wrappers, and this is why.**
 
     ``isinstance`` would reopen the forgery the implementation keying closed: a subclass could
     override ``post``, stop delegating to the adapter it holds, and still inherit that adapter's
     conformance record. The exact check makes the delegation and the evidence inseparable — you
     cannot have the second without the first.
+
+    Both transparent wrappers are checked, because the argument does not weaken for the second one:
+    a ``FaultInjectingLedger`` subclass that answered ``Confirmed`` itself would be a ledger that
+    posts nothing while holding the reference adapter's proven claims.
     """
+    from ledger_exception_control_plane.ledger.faults import FaultInjectingLedger
     from ledger_exception_control_plane.ledger.transport import AttributedAdapter
 
     class _PretendsToDelegate(AttributedAdapter):
         async def post(self, operation_id: str, instruction: PostingInstruction) -> PostingOutcome:
             return Confirmed(posting_ref="never-went-anywhere")
 
-    forger = _PretendsToDelegate(SimulatedLedger())
-    effective = capabilities_for(forger)
+    class _PretendsToInject(FaultInjectingLedger):
+        async def post(self, operation_id: str, instruction: PostingInstruction) -> PostingOutcome:
+            return Confirmed(posting_ref="never-went-anywhere")
 
-    assert effective.idempotency is IdempotencyMode.NONE
-    assert effective.posting_identity_query is PostingQueryMode.NONE
-    assert effective.permits_effectively_once_claim is False
+    for forger in (_PretendsToDelegate(SimulatedLedger()), _PretendsToInject(SimulatedLedger())):
+        effective = capabilities_for(forger)
+        assert effective.idempotency is IdempotencyMode.NONE, type(forger).__name__
+        assert effective.posting_identity_query is PostingQueryMode.NONE, type(forger).__name__
+        assert effective.permits_effectively_once_claim is False, type(forger).__name__
+
+
+def test_a_fault_injector_carries_the_capability_of_the_ledger_it_wraps() -> None:
+    """**The defect that collapsed §19's three configurations into one, pinned as a test.**
+
+    Written after six chaos tests failed together: the fault injector was not on the unwrap list,
+    so `main` saw both strong claims downgraded to ``NONE`` in *every* configuration and routed
+    every ambiguity to manual recovery. The suite still looked like it covered three capability
+    branches. It covered the weakest one, three times.
+
+    **What makes the record still apply.** A ``ConformanceRun`` attests two behaviours — a re-post
+    of the same ``operation_id`` is suppressed, and a known posting can be queried back. The fault
+    injector changes what the client is *told* and never the identifier a delegated post carries, so
+    both behaviours remain the inner ledger's. The nested case is asserted too, because that is the
+    arrangement production actually builds: the dispatcher attributes whatever adapter it is handed.
+    """
+    from ledger_exception_control_plane.ledger.faults import Fault, FaultInjectingLedger
+    from ledger_exception_control_plane.ledger.transport import AttributedAdapter
+
+    direct = capabilities_for(SimulatedLedger())
+    faulted = capabilities_for(
+        FaultInjectingLedger(SimulatedLedger(), fault=Fault.COMMIT_THEN_LOSE_RESPONSE)
+    )
+    nested = capabilities_for(
+        AttributedAdapter(
+            FaultInjectingLedger(SimulatedLedger(), fault=Fault.COMMIT_THEN_LOSE_RESPONSE)
+        )
+    )
+
+    assert faulted == direct == nested
+    assert faulted.permits_effectively_once_claim is True
+
+    weak = capabilities_for(FaultInjectingLedger(NonIdempotentLedger()))
+    assert weak.idempotency is IdempotencyMode.NONE, (
+        "unwrapping must carry the inner adapter's record, not grant a stronger one"
+    )
+    assert weak.permits_effectively_once_claim is False
 
 
 def test_an_unrelated_object_with_a_wrapped_attribute_inherits_nothing() -> None:

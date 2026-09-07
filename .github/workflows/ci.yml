@@ -74,17 +74,33 @@ jobs:
       - name: Verify the committed cassettes have not drifted
         run: uv run python -m tests.cassette_builder verify
 
+      # The mutation battery for the kill test (4.5). It needs no database, so it runs here on
+      # every build rather than only where PostgreSQL is up, and it is called out as its own step
+      # for one reason: it is what makes the flagship gate falsifiable. Each test plants a defect
+      # that would leave the chaos suite green and worthless — a fault that never fires, a count
+      # taken from our own records, a double too forgiving to double-book — and asserts the number
+      # comes out wrong. A red step here means the gate has stopped being able to detect something.
+      - name: Verify the kill test can still fail
+        run: uv run pytest tests/test_kill_test_falsifiability.py tests/test_fault_port.py --no-cov
+
   schema:
     name: Migrations and schema integrity
     runs-on: ubuntu-latest
-    # Raised from 10 at M5.2, and the reason is worth recording rather than just the number.
-    # This job runs eleven per-increment integration steps *and* the whole-suite coverage gate,
-    # which re-executes all of them — deliberate duplication, because a per-increment step names
-    # which increment broke and the coverage gate is the only honest place to measure coverage.
-    # Each increment since 4.2 has added a step, and at 5.2 the total crossed ten minutes: the
-    # coverage gate was cancelled mid-run, so the authoritative measurement silently stopped
-    # happening while the job still reported every step it had managed to finish as green.
-    timeout-minutes: 30
+    # Raised from 10 at M5.2 and from 30 at M4.5, and the reason is worth recording rather than
+    # just the number. This job runs a per-increment integration step for every increment since
+    # 1.1 *and* the whole-suite coverage gate, which re-executes all of them — deliberate
+    # duplication, because a per-increment step names which increment broke and the coverage gate
+    # is the only honest place to measure coverage.
+    #
+    # At 5.2 the total crossed ten minutes: the coverage gate was cancelled mid-run, so the
+    # authoritative measurement silently stopped happening while the job still reported every step
+    # it had managed to finish as green. A cancelled job reports `cancelled`, not `failure`, which
+    # is why that went unnoticed — so the margin here is deliberately generous rather than tight.
+    #
+    # 4.5 adds the chaos suite: 54 scenarios across two branches and three capability
+    # configurations, each needing a real database, and every one of them runs twice for the reason
+    # above. Locally that is ~15 minutes on a throttled machine.
+    timeout-minutes: 60
 
     # Narrowly scoped on purpose: a single PostgreSQL service container, no Redis and no
     # Compose. Migration correctness is the one thing unit tests genuinely cannot prove —
@@ -214,6 +230,22 @@ jobs:
       # denying everything.
       - name: Verify audit-event contract v1 against real PostgreSQL
         run: uv run pytest tests/test_audit_contract_postgres.py -m integration --no-cov
+
+      # THE FLAGSHIP GATE (4.5). §19's scenarios on both branches, across all three adapter
+      # capability configurations. The RED baseline in `naive/` must double-post and `main` must
+      # not: a suite that passes on both branches proves nothing and is, in the specification's own
+      # words, a defect.
+      #
+      # Two steps rather than one, because they fail for different reasons and a reader of a red
+      # build needs to know which. The first is the gate itself. The second re-renders §19's
+      # results table from the observations that run recorded and fails if what is committed in
+      # README.md has drifted — which is what stops the flagship numbers becoming a paragraph
+      # nobody re-derives.
+      - name: Run the kill test against real PostgreSQL — both branches
+        run: uv run pytest tests/chaos -m integration --no-cov
+
+      - name: Verify the committed chaos results table has not drifted
+        run: uv run python -m tests.chaos.results verify
 
       # The authoritative coverage gate, and the only place it can be honest.
       #

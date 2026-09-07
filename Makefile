@@ -5,7 +5,7 @@
         fixtures-check fixtures-load fixtures-verify ingest-verify match-verify classify-verify \
         money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
         operations-verify dispatch-verify ledger-verify retry-verify approval-verify \
-        reconcile-verify audit-verify
+        reconcile-verify audit-verify chaos-verify chaos-table chaos-check
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -198,6 +198,31 @@ reconcile-verify: test-db-init ## Prove the UNKNOWN branch, reconciliation and r
 
 audit-verify: test-db-init ## Prove audit-event contract v1 and the provenance read against real PostgreSQL
 	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/test_audit_contract.py tests/test_audit_contract_postgres.py -m "integration or not integration" -p no:cacheprovider --no-cov
+
+# --- the chaos suite and the RED baseline (M4.5) ---
+#
+# The flagship gate. Both branches, every §19 scenario, all three adapter capability
+# configurations, against real PostgreSQL — because most of what `main` does about these failures
+# *is* database behaviour: a transaction-scoped claim, a unique constraint, an append-only trail.
+#
+# `chaos-verify` runs the gate and leaves one observation file per cell behind. `chaos-table`
+# re-runs it and renders those observations into README.md. `chaos-check` re-runs it and *fails*
+# if the committed table has drifted — which is what stops the flagship numbers becoming a
+# paragraph nobody re-derives.
+#
+# The mutation battery that proves this instrumentation can itself go red needs no database and
+# runs in the default suite, so it is included here rather than left to a separate command: a gate
+# whose falsifiability is checked by a command nobody runs is a gate on trust.
+
+chaos-verify: test-db-init ## Run the kill test: §19 on both branches, three capabilities, real PostgreSQL
+	uv run pytest tests/test_kill_test_falsifiability.py -p no:cacheprovider --no-cov
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run pytest tests/chaos -m integration -p no:cacheprovider --no-cov
+
+chaos-table: chaos-verify ## Render the §19 results table into README.md from the run
+	uv run python -m tests.chaos.results render
+
+chaos-check: chaos-verify ## Fail if the results table in README.md has drifted from the run
+	uv run python -m tests.chaos.results verify
 
 # --- recorded cassettes (M3.4) ---
 #

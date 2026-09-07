@@ -61,3 +61,9 @@ logs/
 # deterministic, and useful to a reader who will not clone and run anything.
 artifacts/*
 !artifacts/m2-demo.html
+
+# The chaos suite's per-cell observations (M4.5). Working state: the run writes them, the renderer
+# reads them, and the reviewed artefact is the table they produce in README.md. Committing them
+# would make the same numbers exist in two places, and the copy nobody regenerates is the one a
+# reader would trust.
+.chaos-observations/

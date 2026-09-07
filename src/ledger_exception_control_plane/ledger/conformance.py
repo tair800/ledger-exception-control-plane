@@ -154,22 +154,47 @@ def implementation_of(adapter: object) -> str:
 
     ``name`` survives for display and for the human-readable record; it decides nothing.
 
-    **One wrapper is unwrapped, on an exact type check.** 4.3 dispatches through
-    :class:`~.transport.AttributedAdapter`, whose only job is to label the exceptions the adapter
-    raises so a database failure cannot be mistaken for a ledger one. It forwards every call to the
-    adapter it holds, so the wrapped adapter's conformance record genuinely applies — and without
-    this, wrapping the reference ledger produced an unrecognised class, downgraded both proven
-    claims to ``NONE``, and refused a re-send §13.5 permits.
+    **Two wrappers are unwrapped, on exact type checks, and the chain is followed to its end.**
+
+    - :class:`~.transport.AttributedAdapter` (4.3) labels the exceptions the adapter raises so a
+      database failure cannot be mistaken for a ledger one.
+    - :class:`~.faults.FaultInjectingLedger` (4.5) makes one declared thing go wrong at the posting
+      boundary and otherwise delegates.
+
+    Both forward every call to the adapter they hold, so the inner adapter's conformance record
+    genuinely applies. Without the first, wrapping the reference ledger produced an unrecognised
+    class, downgraded both proven claims to ``NONE``, and refused a re-send §13.5 permits. Without
+    the second, **the chaos suite's three capability configurations collapsed into one**: every
+    scenario ran with both claims downgraded, so `main` routed to manual recovery everywhere and the
+    suite exercised the weak branch three times while appearing to cover all three. Six tests caught
+    it; had they been written to accept whatever came back, §19's central comparison would have been
+    measuring the wrapper.
+
+    **What the record attests, and why a fault does not invalidate it.** A
+    :class:`~.ConformanceRun` attests exactly two behaviours: that the adapter suppresses a
+    re-post of the same ``operation_id``, and that a known posting can be queried back. A fault
+    changes what the *client is told* — an ``Unknown`` in place of a ``Confirmed`` — and never the
+    identifier a delegated post carries, so both proven behaviours remain those of the inner ledger.
+    A wrapper that posted under a different identifier, or that answered a query itself, would be
+    manufacturing capability and must not be listed here.
 
     ``type(...) is`` rather than ``isinstance``, deliberately: a subclass could override ``post``
     and stop delegating, which would be the forgery this function exists to prevent wearing a
     different hat. Nothing else is unwrapped, and a plain attribute named ``wrapped`` on some other
     object means nothing here.
+
+    The loop is bounded rather than ``while``: two wrappers can legitimately nest — the dispatcher
+    attributes whatever it is handed, including a fault injector — and an object whose ``wrapped``
+    pointed at itself must not spin.
     """
+    from ledger_exception_control_plane.ledger.faults import FaultInjectingLedger
     from ledger_exception_control_plane.ledger.transport import AttributedAdapter
 
-    if type(adapter) is AttributedAdapter:
-        adapter = adapter.wrapped
+    for _ in range(2):  # the two transparent wrappers; see above
+        if type(adapter) is AttributedAdapter or type(adapter) is FaultInjectingLedger:
+            adapter = adapter.wrapped
+        else:
+            break
 
     cls = type(adapter)
     return f"{cls.__module__}.{cls.__qualname__}"
@@ -203,6 +228,21 @@ CONFORMANCE_RUNS: Final[tuple[ConformanceRun, ...]] = (
         suppression_proven=True,
         query_proven=True,
         run_on="2026-09-05",
+    ),
+    # 4.5. §19's middle capability configuration — queryable, enforcing nothing — needed an adapter
+    # of its own, and this is its record. **Note which claim is proven and which is not:** the query
+    # is, the suppression is not, and that asymmetry is the entire reason the adapter exists. A
+    # record claiming both would have made the configuration indistinguishable from the reference
+    # adapter, which is the mislabelling §19's "a suite that tests only the strong adapter proves
+    # only the easy case" is warning about.
+    ConformanceRun(
+        implementation=(
+            "ledger_exception_control_plane.ledger.simulated.QueryableNonIdempotentLedger"
+        ),
+        adapter_name="queryable-non-idempotent-ledger",
+        suppression_proven=False,
+        query_proven=True,
+        run_on="2026-09-07",
     ),
 )
 

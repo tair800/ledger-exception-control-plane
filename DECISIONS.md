@@ -3365,6 +3365,174 @@ service entry points in order, not by observing a running system. Every event it
 services emitted and nothing is seeded, but the distinction is stated in the test's own docstring
 rather than left for a reader to discover.
 
+## ADR-059 — What the kill test proves, and the five ways it could have proved nothing (M4.5)
+
+**Status:** Accepted. **Discharges the M4 build gate** recorded in `CLAUDE.md` and in
+`portfolio-control/PORTFOLIO_PROGRESS.md`: the `naive/` branch was required to be *demonstrated* to
+double-post, and it was. Resolves no OPEN item; narrows OPEN-11.
+
+The gate was placed here rather than earlier for the reason ADR-053 gives — a gate is decided
+against working code, not against an intention — and it was accepted that a failure would discard
+increments 4.2, 4.3 and 4.4. This ADR records what the run established, and, more usefully, the
+decisions taken to stop it establishing nothing.
+
+### 1. The result
+
+Fifty-four scenario runs against real PostgreSQL, all passing. `naive/` commits the same financial
+effect **twice in five of the seven scenarios**, in every capability configuration. `main` applies
+**at most once in all twenty-one cells**, and every one of the forty-two observed cells matches the
+expectation declared before the run. The full table is generated into `README.md` from the
+observations that run recorded; the numbers are the simulated ledger's own applied-count, taken from
+the ledger by the scenario that drove it.
+
+Two of the baseline's seven rows are not duplicates, and writing them up as duplicates would have
+been the suite deciding what it wanted to see:
+
+- **Worker killed mid-batch** — the baseline claims a whole batch up front and *commits* the claim,
+  so the work is stranded rather than re-claimable. A **lost** effect, not a duplicated one.
+- **Ambiguous 5xx** — nothing had been applied, so the baseline's retry completed the work once. It
+  is **correct by luck**, on the identical inference that double-posts when a response is lost after
+  a commit. The difference lies entirely in what the ledger happened to have done, which the
+  baseline cannot see.
+
+A RED baseline that failed all seven rows would be as uninformative as one that failed none.
+
+### 2. Five ways this gate could have proved nothing, and what was decided about each
+
+Each of these is a way for a chaos suite to be green, complete and worthless. Each is now planted as
+a mutant in `tests/test_kill_test_falsifiability.py` and observed to fail.
+
+**(a) A fault that never fires.** The scenario runs, the adapter answers, every applied-count is 1,
+and the suite passes for the worst possible reason. The applied-count *cannot* distinguish this — it
+is 1 either way — so every §19.1 assertion checks `adapter.injections` first. That counter exists
+for this and nothing else.
+
+**(b) A measurement taken from our own records.** §19.1 forbids it by name. An assertion reading
+`posting_attempt` would agree with itself while the ledger held two postings — the lost-response
+defect wearing a conformance badge. The mutant is an instrument that counts *requests*: under an
+enforcing ledger it reports 2 where the books hold 1, so it fails in the **flattering** direction
+and would have made the RED column look stronger than the evidence.
+
+**(c) A double too forgiving to double-book.** `SimulatedLedger` suppresses a repeated identifier
+*internally* whatever it declares, so labelling it `NONE`/`NONE` would give a configuration whose
+behaviour is stronger than its label — precisely the mislabelling §19 warns about. Hence a third
+reference adapter, `QueryableNonIdempotentLedger`, for §19's middle configuration: queryable,
+enforcing nothing, and genuinely double-booking. Its conformance record says `query_proven=True,
+suppression_proven=False`, and that asymmetry is the entire reason it exists.
+
+**(d) A count maintained by the wrapper.** `FaultInjectingLedger` delegates `applied_count`,
+`total_applied` and `posts_received` to the ledger it holds. A tally of its own would be its
+*opinion* of the books — (b) one layer out.
+
+**(e) Expectations fitted to the run.** Every expectation is declared in
+`tests/chaos/scenarios.py` before any run; both runners read that table and neither writes it. A
+mutation test confirms a wrong table actually breaks the suite rather than being absorbed, and two
+further tests assert the criterion over the whole matrix: in every configuration some scenario must
+distinguish the branches *by a duplicated effect*, and no cell may expect `main` to apply more than
+once. A future scenario added with `applied=2` for `main` would be the reliability claim being
+withdrawn inside a data structure, which is the quietest possible place to withdraw it.
+
+### 3. `naive/` has its own tables, and that is not a convenience
+
+`src/`'s schema *itself* prevents the defect: `adjustment.operation_id` is NOT NULL and unique,
+`settlement_batch.content_hash` is unique, `uq_approval_token` is unique. A naive implementation
+writing into those tables would be protected by `main`'s constraints and would show no failure at
+all — rigging the comparison in the direction that flatters the baseline. So `naive/` creates
+`naive_*` tables from `naive/schema.py`, which is deliberately **not** an Alembic migration: a
+`naive_*` table inside that history would ship the RED baseline into every deployment of the real
+system.
+
+What the baseline *does* share is the world: the same PostgreSQL instance, the same three capability
+configurations, the same fault-injection port, the same amount, the same instant. It imports the
+ledger port, the reference adapters and the fault vocabulary, and nothing else.
+
+### 4. Faults are values, and they fire a bounded number of times
+
+§19 requires injection *"via explicit, testable seams (a fault-injection port), not by patching
+internals"*. The adapters already accept a `responder`, which is enough to make one thing go wrong
+once; what §19 asks for is seven named scenarios against three configurations with a table an
+auditor reads. That needs the fault to be **a member of a closed enum** — declared, named, countable
+and assertable — rather than a lambda whose behaviour must be re-read to know what it injects.
+
+`Fault` is named for **what happens to the books**, never for what the client sees, because that
+distinction is the whole subject of §13.5. `COMMIT_THEN_LOSE_RESPONSE` and `AMBIGUOUS_5XX` are
+indistinguishable to the caller by construction and differ only in the ledger's applied-count, which
+is exactly §14's point.
+
+Faults fire **once** by default. A permanently faulted ledger would mean nothing ever lands, and
+every branch would then look identically safe: an implementation that never posts never
+double-posts. The interesting arithmetic exists only when the first send is faulted and the second
+is not.
+
+### 5. `total_applied` is the count §19's table wants
+
+§19's column is *adjustments posted* — financial effects for one economic unit of work — and four of
+the baseline's failures post twice under two **different** identifiers: two residuals from one
+delivered payload, two approvals from one replayed token. A per-identifier count records each of
+those as "applied once" while the money has moved twice. So the table is rendered from
+`total_applied`, across identifiers, and `applied_count(operation_id)` remains what §19.1's
+step-by-step assertions read.
+
+### 6. Two defects this gate found, and what each says about the other tests
+
+`conformance.implementation_of` unwrapped exactly one wrapper, `AttributedAdapter`. The chaos suite
+holds every adapter inside a `FaultInjectingLedger`, which was therefore an unrecognised class — so
+both strong claims were downgraded to `NONE` and `main` routed every ambiguity to manual recovery
+**in all three configurations**. Six tests failed together and said so.
+
+The suite would still have "covered three capability branches". It would have covered the weakest
+one, three times, and every individual assertion would have passed. Had those six tests been written
+to accept whatever came back, §19's central comparison would have been measuring the wrapper.
+
+The fix widens the unwrap list to two wrappers, on exact type checks, following the chain to its
+end — and records **what makes a wrapper eligible**: a `ConformanceRun` attests exactly two
+behaviours, that a re-post of the same `operation_id` is suppressed and that a known posting can be
+queried back. A fault changes what the client is *told* and never the identifier a delegated post
+carries, so both behaviours remain the inner ledger's. A wrapper that posted under a different
+identifier, or answered a query itself, would be manufacturing capability and must not be listed.
+`type(...) is` rather than `isinstance` throughout, so a subclass that stops delegating cannot
+inherit the evidence — asserted for both wrappers.
+
+**The second defect was in the harness, and it read as a finding about the system.** The helper
+driving reconciliation stepped `now` forward one second per pass from the instant of the send, so
+the adapter's declared thirty-second in-flight window never elapsed, no negative answer could become
+trustworthy, and the query bound exhausted into manual recovery. Correct behaviour, reached for a
+reason with nothing to do with the scenario — and the docstring said "past both windows" while the
+arithmetic did not deliver it. Recorded because the two defects point in opposite directions: the
+first was the system being mis-measured downward, the second was the harness failing to reach the
+state it claimed. A suite whose assertions had been written to accept whatever came back would have
+reported both as facts about the ledger.
+
+**A third, smaller one, recorded because it would have surfaced far from its cause.** The chaos
+modules left their `naive_*` tables behind, and `tests/chaos/` is collected *before* `tests/test_*`
+in the whole-suite coverage run — so `test_schema_postgres`'s "unexpected tables were created" would
+have failed several modules later, on a migration test, for a reason that has nothing to do with
+migrations. The tables are outside Alembic's history by design, so no `downgrade base` removes them:
+the fixture that creates them now drops them.
+
+### 7. What the table does not prove
+
+Under `ENFORCES_KEY` the suppression is performed by a simulated ledger written in this repository.
+That column shows the dispatcher behaving correctly *given* an enforcing ledger, not that any
+particular real ledger enforces anything — which is OPEN-11, now narrowed to the same question about
+a named provider. §13.5's claim is unchanged by this result: an effectively-once financial effect is
+available only where an adapter's capability is **declared and proven**, and is withdrawn rather
+than reworded where it is not. The unit is the **approved resolution**, not the exception.
+
+The three scenarios `CLAUDE.md` §5 lists that this suite does not drive are each proven by the
+4.4 suite that owns them, and the chaos suite does not duplicate them:
+
+| Scenario | Proven by |
+|---|---|
+| Supersession attempted during `UNKNOWN` | `test_a_new_resolution_version_is_blocked_while_a_prior_one_is_ambiguous` |
+| Reconciliation `NotFound` then a late appearance | `test_a_posting_appearing_after_a_notfound_still_resolves_correctly` |
+| Idempotency-window expiry | `test_a_resend_outside_the_idempotency_window_is_refused` |
+
+all in `tests/test_reconcile_postgres.py`. A scenario proven elsewhere is not a gap; a scenario
+proven nowhere would be. The fourth item on that list — a crash between the socket write and the
+response write — *is* driven here: it is what `COMMIT_THEN_LOSE_RESPONSE` models, and 4.4 also proves
+it from the other side in `test_a_crash_between_the_send_and_the_response_is_ambiguous_without_any_outcome`.
+
 ---
 
 # Open decisions
@@ -3462,7 +3630,12 @@ match whatever the capability table then says.
 **Constraint:** the claim follows the capability, never the reverse. If a real ledger turns out to be
 `ACCEPTS_KEY` without enforcement and without query, the effectively-once claim must be withdrawn for
 that adapter rather than reworded.
-**Needed before:** any adapter other than the two simulated ones ships.
+**Needed before:** any adapter other than the three simulated ones ships.
+**Narrowed at 4.5 (ADR-059):** the chaos suite now runs every scenario against all three capability
+configurations, so the *behavioural* half of this question is settled — the dispatcher is proven to
+degrade correctly when a capability is absent, and the results table states in its own footer that
+suppression under `ENFORCES_KEY` is performed by a simulated ledger written here. What remains is
+purely the vendor half: establishing a real provider's three declarations from its documentation.
 
 ## OPEN-10 — Hosting cost ceiling and shutdown policy
 

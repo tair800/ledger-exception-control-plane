@@ -55,6 +55,7 @@ __all__ = [
     "AppliedPosting",
     "NonIdempotentLedger",
     "QueryResponder",
+    "QueryableNonIdempotentLedger",
     "Responder",
     "SimulatedLedger",
 ]
@@ -234,6 +235,23 @@ class SimulatedLedger:
         """
         return self._posts_received
 
+    @property
+    def total_applied(self) -> int:
+        """Every posting this ledger has committed, across all identifiers (increment 4.5).
+
+        **The column §19's results table calls "adjustments posted".** Per-identifier counts answer
+        §19.1's question — *was this operation applied more than once* — but they cannot see the
+        other half of the baseline's failure: two residuals for one delivered payload, or two
+        approvals from one replayed token, produce two postings under two *different* identifiers.
+        Each is applied once and the economic event has happened twice.
+
+        So the suite counts financial effects, not identifiers. The baseline mints a fresh request
+        identifier on every attempt, so a per-identifier count reads 1 for every posting it makes
+        and would have let **all five** of its duplicates pass — for a reason that has nothing to
+        do with the baseline being safe.
+        """
+        return sum(self._application_count.values())
+
     def applied(self, operation_id: str) -> AppliedPosting | None:
         return self._applied.get(operation_id)
 
@@ -328,6 +346,115 @@ class NonIdempotentLedger:
         rather than about the double.
         """
         return self._applications.get(operation_id, 0)
+
+    @property
+    def total_applied(self) -> int:
+        """Every posting committed, across all identifiers — §19's "adjustments posted" (4.5)."""
+        return sum(self._applications.values())
+
+    @property
+    def posts_received(self) -> int:
+        return self._posts_received
+
+
+class QueryableNonIdempotentLedger:
+    """A ledger that answers by operation identifier and suppresses nothing (increment 4.5).
+
+    **The third capability configuration §19 requires, and it needed its own adapter.** §19 runs
+    every scenario against ``ENFORCES_KEY``, ``BY_OPERATION_ID`` *only*, and ``NONE``/``NONE``. The
+    first and third have adapters; the middle one did not, and configuring
+    :class:`SimulatedLedger` with ``idempotency=NONE`` would not have produced it — that adapter
+    suppresses duplicates *internally* whatever it declares, so the configuration would have been
+    labelled "does not enforce a key" while quietly enforcing one.
+
+    That mislabelling matters in exactly one place and it is the place that decides the gate. A
+    baseline sending a *stable* key into a ledger that secretly deduplicates applies once, and the
+    suite would then record "the naive branch did not double-post here" — a true sentence about a
+    double that was doing the protecting, presented as a fact about the code under test. §19's whole
+    argument is that a suite proving only the easy case proves nothing; a suite whose middle
+    configuration is stronger than its label is worse than that, because the label is what an
+    auditor reads.
+
+    So: applies every posting it receives, and can be asked whether an identifier was ever applied.
+    Both halves are honest, and its conformance run proves the query claim while leaving the
+    suppression claim unproven — which is the correct record, and the one :func:`capabilities_for`
+    then acts on.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str = "queryable-non-idempotent-ledger",
+        endpoint: str = "sim://queryable-weak/postings",
+        responder: Responder | None = None,
+    ) -> None:
+        self._name = name
+        self._endpoint = endpoint
+        self._responder = responder
+        self._applications: dict[str, int] = {}
+        self._references: dict[str, str] = {}
+        self._posts_received = 0
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def endpoint(self) -> str:
+        return self._endpoint
+
+    def capabilities(self) -> LedgerAdapterCapabilities:
+        """Queryable, and enforcing nothing.
+
+        ``LINEARIZABLE`` because this double answers from the same dictionary it writes, so its
+        answer genuinely is current — declaring ``EVENTUAL`` would be inventing a lag it does not
+        have, and §13.5's windows would then be waiting for nothing.
+        """
+        return LedgerAdapterCapabilities(
+            idempotency=IdempotencyMode.NONE,
+            posting_identity_query=PostingQueryMode.BY_OPERATION_ID,
+            query_consistency=Linearizable(),
+            max_inflight_window=dt.timedelta(seconds=30),
+            atomicity=Atomicity.ATOMIC,
+            reversal=ReversalMode.NONE,
+        )
+
+    async def post(self, operation_id: str, instruction: PostingInstruction) -> PostingOutcome:
+        """Apply unconditionally, then answer. **The responder runs after the books move.**
+
+        Same ordering as :class:`NonIdempotentLedger`, and for the same reason: the scenario that
+        matters against a weak adapter is §19.1, where the posting is applied and the response is
+        lost. A responder consulted first would make an injected ``Unknown`` mean "nothing
+        happened", which is the one reading that cannot double-post.
+        """
+        self._posts_received += 1
+        self._applications[operation_id] = self._applications.get(operation_id, 0) + 1
+        reference = self._references.setdefault(operation_id, f"QNI-{uuid.uuid4().hex[:16]}")
+
+        if self._responder is not None:
+            injected = self._responder(operation_id, instruction)
+            if injected is not None:
+                return injected
+        return Confirmed(posting_ref=reference)
+
+    async def get_by_operation_id(self, operation_id: str) -> QueryOutcome:
+        """Whether this identifier was ever applied, and under which reference.
+
+        ``NotFound`` where it was not — never ``Indeterminate``, because this double's answer is
+        always current and pretending otherwise would let §13.5's ``Indeterminate`` rule be
+        exercised by a fiction.
+        """
+        reference = self._references.get(operation_id)
+        return Found(posting_ref=reference) if reference is not None else NotFound()
+
+    def applied_count(self, operation_id: str) -> int:
+        """How many postings this ledger has committed for one identifier. **Can exceed 1.**"""
+        return self._applications.get(operation_id, 0)
+
+    @property
+    def total_applied(self) -> int:
+        """Every posting committed, across all identifiers — §19's "adjustments posted" (4.5)."""
+        return sum(self._applications.values())
 
     @property
     def posts_received(self) -> int:

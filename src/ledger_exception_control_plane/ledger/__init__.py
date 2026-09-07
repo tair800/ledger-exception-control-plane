@@ -42,6 +42,12 @@ from ledger_exception_control_plane.ledger.conformance import (
     run_conformance,
     verified_for,
 )
+from ledger_exception_control_plane.ledger.faults import (
+    AMBIGUOUS_FAULTS,
+    Fault,
+    FaultInjectingLedger,
+    LedgerUnreachableError,
+)
 from ledger_exception_control_plane.ledger.port import (
     MAX_POSTING_REF,
     UNBOUNDED,
@@ -75,12 +81,14 @@ from ledger_exception_control_plane.ledger.port import (
 from ledger_exception_control_plane.ledger.simulated import (
     AppliedPosting,
     NonIdempotentLedger,
+    QueryableNonIdempotentLedger,
     QueryResponder,
     Responder,
     SimulatedLedger,
 )
 
 __all__ = [
+    "AMBIGUOUS_FAULTS",
     "CONFORMANCE_RUNS",
     "MAX_POSTING_REF",
     "UNBOUNDED",
@@ -92,12 +100,15 @@ __all__ = [
     "ConformanceRun",
     "EndpointDeclaringAdapter",
     "Eventual",
+    "Fault",
+    "FaultInjectingLedger",
     "Found",
     "IdempotencyMode",
     "IdempotencyScope",
     "Indeterminate",
     "LedgerAdapter",
     "LedgerAdapterCapabilities",
+    "LedgerUnreachableError",
     "Linearizable",
     "NonIdempotentLedger",
     "NotFound",
@@ -108,6 +119,7 @@ __all__ = [
     "QueryOutcome",
     "QueryResponder",
     "QueryableLedgerAdapter",
+    "QueryableNonIdempotentLedger",
     "Rejected",
     "Responder",
     "ReversalMode",
