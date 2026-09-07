@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from typing import Final
 
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -115,6 +116,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.principals = PrincipalRegistry.from_json(resolved.principals)
     app.state.engine = create_engine(resolved)
     app.include_router(router)
+
+    # The console is a separate origin in development and usually the same origin in a deployment,
+    # so cross-origin access is configuration rather than a constant — and it is **added only when
+    # an origin was actually named**. Registering the middleware unconditionally with an empty
+    # allowlist would answer preflights with a policy permitting nothing, which reads to a browser
+    # as a misconfigured server rather than as a server that was never asked to allow anything.
+    #
+    # Credentials are deliberately not allowed: this API authenticates with a bearer token the
+    # console sends explicitly, so no cookie needs to ride along, and `allow_credentials` with any
+    # reflected origin is the combination that turns a permissive policy into account takeover.
+    if resolved.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(resolved.cors_origins),
+            allow_credentials=False,
+            allow_methods=["GET", "POST"],
+            allow_headers=["Authorization", "Content-Type", resolved.correlation_id_header],
+            expose_headers=[resolved.correlation_id_header],
+        )
 
     @app.middleware("http")
     async def correlation_id_middleware(

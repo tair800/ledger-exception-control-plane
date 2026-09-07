@@ -73,6 +73,39 @@ class Settings(BaseSettings):
     #: closed, and OPEN-8 explicitly rules out inventing an identity provider here.
     principals: str = ""
 
+    # -- The operations console (M7) ----------------------------------------------------
+
+    #: Browser origins permitted to call this API, comma-separated. Empty means **none**, and
+    #: empty is the default.
+    #:
+    #: Fail-closed for the same reason :attr:`principals` is: a wildcard default would be a
+    #: cross-origin hole nobody chose, and this API authenticates with a bearer token, so a
+    #: permissive origin policy is a credential-theft surface rather than a convenience. A
+    #: deployment that serves the console from the same origin needs nothing here at all.
+    cors_allow_origins: str = ""
+
+    #: Whether this instance is a **public demonstration** rather than a deployment doing work.
+    #:
+    #: §22 requires a demo mode with no live provider and no unrestricted paid endpoint, and M7.2
+    #: requires a control that injects a fault so a visitor can watch duplicate suppression happen.
+    #: That control writes to the reliability path, so it exists **only** when this is true, and a
+    #: guard refuses it otherwise — a fault injector reachable in production is a defect however
+    #: carefully it is documented.
+    #:
+    #: Default ``False``: an instance is not a demo unless it says so.
+    demo_mode: bool = False
+
+    @property
+    def cors_origins(self) -> tuple[str, ...]:
+        """The parsed origin allowlist. Blank entries dropped, order preserved.
+
+        Parsed here rather than at the middleware so a malformed value is one place to look, and
+        so ``""`` and ``" , "`` both mean *no origin*, which is what a reader expects them to mean.
+        """
+        return tuple(
+            origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()
+        )
+
     # -- Ambiguous-outcome reconciliation and recovery (M4.4, §13.5) --------------------
     #
     # §13.5 requires a negative answer to be corroborated across "N consecutive queries" and

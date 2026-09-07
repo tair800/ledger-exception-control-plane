@@ -46,15 +46,20 @@ from ledger_exception_control_plane.db.control import (
     Adjustment,
     Approval,
     ApprovalDecision,
+    AuditEvent,
     AuditOutcome,
     AuditTool,
+    DeadLetter,
+    Evidence,
     ExceptionRecord,
     Outbox,
     PostingAttempt,
     RecoveryItem,
     RecoveryResolution,
+    ReplayState,
     TreatmentCode,
     TreatmentProposal,
+    TreatmentProposalEvidence,
 )
 from ledger_exception_control_plane.db.models import SettlementLine
 from ledger_exception_control_plane.operations.approval import (
@@ -188,6 +193,50 @@ class PostingAttemptView(BaseModel):
     posting_ref: str | None
 
 
+class EvidenceView(BaseModel):
+    """One addressable evidence record, and whether the proposal actually cited it.
+
+    ``cited`` is the field a reviewer needs and the one a naive read would omit. §6.1 requires a
+    proposal to reference the evidence it used, and 3.3 validates that every citation is a subset
+    of the pack the model was shown — so the interesting question in the console is not *what
+    evidence existed* but *which of it the model claimed to rely on*. Returning the pack without
+    that distinction would show a reviewer a list and let them assume all of it was cited.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    kind: str
+    content: str
+    cited: bool
+
+
+class AuditEventView(BaseModel):
+    """One row of the append-only trail, as §11 recorded it.
+
+    Fields the system cannot truthfully know are returned as ``null`` rather than omitted or
+    filled: ``agent_identity`` is null because this system is not an agent, and
+    ``region_jurisdiction`` is null because no model call is made. ADR-058 took that decision and
+    the console must not quietly hide it — a trail that renders an absent field as blank space
+    looks like a trail with nothing to say.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    occurred_at: dt.datetime
+    principal: str
+    agent_identity: str | None
+    tool: str
+    scope_granted: str
+    approval_decision: str
+    approver: str | None
+    model: str | None
+    region_jurisdiction: str | None
+    outcome: str
+    correlation_id: str
+
+
 class ExceptionDetail(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -196,11 +245,18 @@ class ExceptionDetail(BaseModel):
     status: str
     correlation_id: str
     line: dict[str, str | None]
+    #: The pack the model was shown, with the citations it made. Ordered by kind then id, so two
+    #: reads of an unchanged exception render identically.
+    evidence: list[EvidenceView]
     proposal: dict[str, str | bool | None] | None
     approval: dict[str, str | None] | None
     adjustment: dict[str, str | None] | None
     outbox: dict[str, str | int | None] | None
     attempts: list[PostingAttemptView]
+    #: The audit trail for this exception's correlation id, oldest first. Returned on the detail
+    #: rather than behind a second request because §10 asks for *full provenance* in one read and
+    #: 7.1's exit criterion is that provenance is reachable in two clicks.
+    audit: list[AuditEventView]
 
 
 async def _audit_refusal(
@@ -447,6 +503,34 @@ async def exception_detail(
         .first()
     )
 
+    # The pack, and which of it this proposal cited. Two queries rather than a join, because the
+    # citation set belongs to *one* proposal and the pack belongs to the exception: an exception
+    # with no proposal still has evidence, and a join would have returned nothing for it.
+    evidence_rows = (
+        (
+            await session.execute(
+                select(Evidence)
+                .where(Evidence.exception_id == exception_id)
+                .order_by(Evidence.kind, Evidence.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    cited: set[uuid.UUID] = set()
+    if proposal is not None:
+        cited = set(
+            (
+                await session.execute(
+                    select(TreatmentProposalEvidence.evidence_id).where(
+                        TreatmentProposalEvidence.treatment_proposal_id == proposal.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
     approval = (
         (
             await session.execute(
@@ -497,11 +581,53 @@ async def exception_detail(
             for row in attempt_rows
         ]
 
+    # Keyed on the correlation id rather than on the exception id, deliberately: §11's trail spans
+    # ingestion through posting and several of its rows belong to no single exception row, so a
+    # query by exception id would return a trail with the interesting parts missing. The correlation
+    # id is the thing 5.2 built to survive the whole path.
+    audit_rows = (
+        (
+            await session.execute(
+                select(AuditEvent)
+                .where(AuditEvent.correlation_id == exception_row.correlation_id)
+                .order_by(AuditEvent.occurred_at, AuditEvent.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
     return ExceptionDetail(
         id=exception_row.id,
         classification=str(exception_row.classification),
         status=str(exception_row.status),
         correlation_id=exception_row.correlation_id,
+        evidence=[
+            EvidenceView(
+                id=row.id,
+                kind=str(row.kind),
+                content=row.content,
+                cited=row.id in cited,
+            )
+            for row in evidence_rows
+        ],
+        audit=[
+            AuditEventView(
+                id=row.id,
+                occurred_at=row.occurred_at,
+                principal=row.principal,
+                agent_identity=row.agent_identity,
+                tool=str(row.tool),
+                scope_granted=row.scope_granted,
+                approval_decision=str(row.approval_decision),
+                approver=row.approver,
+                model=row.model,
+                region_jurisdiction=row.region_jurisdiction,
+                outcome=str(row.outcome),
+                correlation_id=row.correlation_id,
+            )
+            for row in audit_rows
+        ],
         line={
             "psp_reference": line.psp_reference,
             "merchant_reference": line.merchant_reference,
@@ -698,3 +824,86 @@ async def resolve_recovery(
         approving_principal=item.approving_principal,
         overdue=item.overdue,
     )
+
+
+# ======================================================================================
+# /dlq — what exhausted its retry budget, and the way back (increment 4.3, §15)
+# ======================================================================================
+
+
+class DeadLetterView(BaseModel):
+    """One dead-lettered dispatch, with the envelope an operator judges it by.
+
+    **No monetary amount, and that is a schema guarantee rather than a choice made here.** The
+    `dlq` table's envelope is JSONB and a check constraint rejects amount-like keys in it, because
+    money in JSONB would bypass the money constraints and become the numeric escape hatch the
+    schema forbids everywhere else. The amount is reconstructed from `adjustment` at replay time,
+    so the console shows an operator *what failed and why* and never invites them to re-price it.
+
+    ``adjustment_id`` is resolved through the outbox row so the console can link a dead letter back
+    to the exception it came from in one hop; without it the queue is a list of identifiers an
+    operator cannot navigate.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    outbox_id: uuid.UUID
+    adjustment_id: uuid.UUID
+    operation_id: str
+    reason: str
+    attempts: int
+    replay_state: str
+    created_at: dt.datetime
+    replayed_at: dt.datetime | None
+
+
+@router.get("/dlq", response_model=list[DeadLetterView])
+async def list_dead_letters(
+    principal: Annotated[Principal, Depends(current_principal)],
+    session: Annotated[AsyncSession, Depends(_session)],
+    pending_only: bool = True,
+) -> list[DeadLetterView]:
+    """The dead-letter queue. **Operator work, so an approver may not see it as their queue.**
+
+    §16 separates the roles: the principal who authorises a posting is not the principal who works
+    the failure queues, and 4.4 already enforces the mirror of this rule for recovery. Refusing
+    here rather than filtering keeps the reason legible — an analyst is told they lack the
+    authority, instead of being shown an empty queue and left to conclude nothing failed.
+
+    ``pending_only`` defaults to true because a replayed entry is history and an operator opening
+    the queue wants work. The full list stays reachable, which is what makes the default a
+    convenience rather than a hidden filter.
+    """
+    if not principal.may_work_operations_queues():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="the dead-letter queue is worked by the operator role",
+        )
+
+    query = (
+        select(DeadLetter, Outbox.adjustment_id)
+        .join(Outbox, Outbox.id == DeadLetter.outbox_id)
+        .order_by(DeadLetter.created_at)
+    )
+    if pending_only:
+        query = query.where(DeadLetter.replay_state == ReplayState.PENDING)
+
+    rows = (await session.execute(query)).all()
+    return [
+        DeadLetterView(
+            id=entry.id,
+            outbox_id=entry.outbox_id,
+            adjustment_id=adjustment_id,
+            # Read off the persisted envelope, never re-derived: 4.1's identifier is the one the
+            # original send carried, and recomputing it here would be a second derivation nobody
+            # asked for and the one place a re-derived key could diverge from the sent one.
+            operation_id=str(entry.envelope.get("operation_id", "")),
+            reason=entry.reason,
+            attempts=entry.attempts,
+            replay_state=str(entry.replay_state),
+            created_at=entry.created_at,
+            replayed_at=entry.replayed_at,
+        )
+        for entry, adjustment_id in rows
+    ]
