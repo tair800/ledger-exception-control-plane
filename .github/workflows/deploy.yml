@@ -1,0 +1,320 @@
+name: Deploy
+
+# NOTHING IS DEPLOYED BY THIS REPOSITORY TODAY. Every job below except `guard` skips until the
+# owner adds the credentials named in `docs/deployment.md`. That is the design, not a limitation:
+# a pipeline that goes red because a credential is absent teaches everyone to ignore red.
+
+on:
+  # The release path. `workflow_run` rather than `push`, so a deploy cannot start while CI is
+  # failing: this fires only when the CI workflow has *completed* for a commit on main, and the
+  # `guard` job below refuses anything but a success. Deploying a commit whose 60-minute database
+  # job is still running would be deploying an unvalidated schema change.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+  # The manual path, for the first deploy and for re-releasing a known-good commit. Choose the
+  # ref in the GitHub UI; production still waits for its environment reviewers.
+  workflow_dispatch:
+
+# One deploy at a time, and never cancelled. `cancel-in-progress: false` is deliberate and is the
+# opposite of CI's setting: interrupting a release mid-migration is how a schema ends up half
+# applied, and the release command is exactly where that would happen.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Answers two questions and nothing else: which commit, and is deployment configured at all.
+  #
+  # It exists because the `secrets` context is NOT available in a job-level `if:` — only `github`,
+  # `needs`, `vars` and `inputs` are. So the presence of a credential is resolved here, in a step
+  # where `secrets` *is* available, and published as an output the deploy jobs can gate on.
+  #
+  # No secret VALUE is ever printed or written to an output. The comparisons below evaluate to the
+  # strings "true" or "false" before anything reaches the shell.
+  guard:
+    name: Resolve target and configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
+      staging: ${{ steps.configuration.outputs.staging }}
+      production: ${{ steps.configuration.outputs.production }}
+
+    steps:
+      # For `workflow_run`, `github.sha` is the default branch tip, NOT the commit that was
+      # tested — the difference matters the moment two commits land close together. The tested
+      # commit is `workflow_run.head_sha`, and that is what everything downstream checks out.
+      - name: Resolve the commit to deploy
+        id: target
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          FALLBACK_SHA: ${{ github.sha }}
+        run: |
+          sha="${HEAD_SHA:-$FALLBACK_SHA}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "::notice::Target commit $sha"
+
+      # Two independent conditions, resolved in one place: did this commit pass CI, and is the
+      # environment configured at all. Neither produces a failure — an unconfigured repository or
+      # a commit that failed CI *skips* the deploy jobs.
+      #
+      # Not failing is a deliberate choice in both cases. A red CI has already reported itself,
+      # and failing again here would mean every red build produced two red workflows and taught
+      # everyone to ignore one of them. A missing credential is not a defect at all.
+      - name: Determine what may be deployed
+        id: configuration
+        env:
+          EVENT: ${{ github.event_name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          # Each expression below is the string "true" or "false" before it reaches the shell.
+          # No token value ever enters the environment.
+          HAS_STAGING_TOKEN: ${{ secrets.FLY_API_TOKEN_STAGING != '' }}
+          HAS_STAGING_SMOKE: ${{ secrets.SMOKE_TOKEN_STAGING != '' }}
+          HAS_PRODUCTION_TOKEN: ${{ secrets.FLY_API_TOKEN_PRODUCTION != '' }}
+          HAS_PRODUCTION_SMOKE: ${{ secrets.SMOKE_TOKEN_PRODUCTION != '' }}
+        run: |
+          staging=false
+          production=false
+
+          if [ "$EVENT" = "workflow_run" ] && [ "$CONCLUSION" != "success" ]; then
+            echo "::notice::CI concluded '$CONCLUSION' for this commit. Nothing will be deployed."
+          else
+            if [ "$HAS_STAGING_TOKEN" = "true" ] && [ "$HAS_STAGING_SMOKE" = "true" ]; then
+              staging=true
+            else
+              echo "::notice::Staging is not configured: FLY_API_TOKEN_STAGING and SMOKE_TOKEN_STAGING must both be set. Skipping."
+            fi
+            if [ "$HAS_PRODUCTION_TOKEN" = "true" ] && [ "$HAS_PRODUCTION_SMOKE" = "true" ]; then
+              production=true
+            else
+              echo "::notice::Production is not configured: FLY_API_TOKEN_PRODUCTION and SMOKE_TOKEN_PRODUCTION must both be set. Skipping."
+            fi
+          fi
+
+          echo "staging=$staging" >> "$GITHUB_OUTPUT"
+          echo "production=$production" >> "$GITHUB_OUTPUT"
+
+  # Build once. Staging and production both deploy this exact digest, so what production runs is
+  # the artifact staging's smoke tests passed against — not a rebuild of the same source, which is
+  # a different thing and occasionally a different image.
+  #
+  # Gated on staging being configured: an unconfigured repository publishes nothing. That the
+  # image *builds* is already proven on every commit by CI's `container` job, so nothing is lost.
+  image:
+    name: Build and publish the image
+    runs-on: ubuntu-latest
+    needs: guard
+    if: needs.guard.outputs.staging == 'true'
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      reference: ${{ steps.reference.outputs.reference }}
+
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.sha }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GHCR requires a lowercase repository path, and an owner or repository name with a capital
+      # in it would otherwise fail at push with an unhelpful error.
+      - name: Compute the image repository
+        id: repository
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "path=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.repository.outputs.path }}:${{ needs.guard.outputs.sha }}
+          # The image is identified downstream by digest, but a commit tag is what makes the
+          # registry readable by a human trying to work out what is deployed.
+          labels: |
+            org.opencontainers.image.revision=${{ needs.guard.outputs.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # By digest, not by tag. A tag can be moved; a digest is the image staging was tested with.
+      - name: Publish the immutable image reference
+        id: reference
+        env:
+          PATH_PREFIX: ${{ steps.repository.outputs.path }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "reference=${PATH_PREFIX}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Image ${PATH_PREFIX}@${DIGEST}"
+
+      # Fly pulls the image itself and has no GHCR credentials, so a package left private fails
+      # the deploy with a registry authentication error that says nothing about the cause. This
+      # asks the registry anonymously and names the fix.
+      - name: Verify the image is publicly pullable
+        env:
+          PATH_PREFIX: ${{ steps.repository.outputs.path }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          repository="${PATH_PREFIX#ghcr.io/}"
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/${repository}/manifests/${DIGEST}")
+          if [ "$status" != "200" ]; then
+            echo "::error::ghcr.io/${repository} is not anonymously pullable (HTTP $status). Fly cannot pull it. Set the package visibility to public — see docs/deployment.md."
+            exit 1
+          fi
+          echo "the image is publicly pullable"
+
+  deploy-staging:
+    name: Deploy to staging
+    runs-on: ubuntu-latest
+    needs: [guard, image]
+    if: needs.guard.outputs.staging == 'true'
+    timeout-minutes: 20
+    environment:
+      name: staging
+      url: ${{ vars.BASE_URL_STAGING || 'https://lecp-staging.fly.dev' }}
+
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.sha }}
+
+      # Fly's documented installer. `@master` is unpinned, which is a real supply-chain gap in a
+      # job that holds a deploy token; `docs/deployment.md` records pinning it to a commit SHA as
+      # a hardening step, and the exposure is bounded by the token being scoped to one Fly app.
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # `alembic upgrade head` runs as the release command declared in the config, before any
+      # machine takes traffic. A failed migration aborts the release and leaves the previous
+      # version serving.
+      - name: Deploy the validated image
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_STAGING }}
+          IMAGE: ${{ needs.image.outputs.reference }}
+        run: |
+          flyctl deploy \
+            --config deployment/fly.staging.toml \
+            --image "$IMAGE" \
+            --wait-timeout 600
+
+  smoke-staging:
+    name: Smoke staging
+    runs-on: ubuntu-latest
+    needs: [guard, deploy-staging]
+    if: needs.guard.outputs.staging == 'true'
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.sha }}
+
+      # No `uv sync`: the smoke script is standard library only, on purpose. There is nothing to
+      # install and nothing that can fail to resolve between a deployment and the check on it.
+      - name: Run the smoke checks
+        env:
+          SMOKE_BASE_URL: ${{ vars.BASE_URL_STAGING || 'https://lecp-staging.fly.dev' }}
+          SMOKE_TOKEN: ${{ secrets.SMOKE_TOKEN_STAGING }}
+        run: |
+          python scripts/smoke/smoke.py \
+            --environment staging \
+            --require-queue-read \
+            --wait-seconds 120
+
+  deploy-production:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    # Production can only follow a staging deploy whose smoke checks passed, on the same digest.
+    needs: [guard, image, smoke-staging]
+    if: needs.guard.outputs.production == 'true'
+    timeout-minutes: 30
+    # THE APPROVAL GATE. A job bound to a GitHub Environment with required reviewers waits here
+    # until a named human approves it, and the approval is recorded against the run. That is why
+    # there is no separate "await approval" job: adding one would be decoration in front of the
+    # mechanism that actually blocks.
+    #
+    # The reviewer requirement is the ONE thing that cannot be declared in YAML — GitHub stores
+    # protection rules on the environment, not in the workflow. `docs/deployment.md` names it as
+    # a required manual step, and until it is done this job deploys without waiting.
+    environment:
+      name: production
+      url: ${{ vars.BASE_URL_PRODUCTION || 'https://lecp-production.fly.dev' }}
+
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.sha }}
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # The same digest staging is running and smoke-tested. Not a rebuild.
+      - name: Deploy the digest staging validated
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}
+          IMAGE: ${{ needs.image.outputs.reference }}
+        run: |
+          flyctl deploy \
+            --config deployment/fly.production.toml \
+            --image "$IMAGE" \
+            --wait-timeout 900
+
+  smoke-production:
+    name: Smoke production
+    runs-on: ubuntu-latest
+    needs: [guard, deploy-production]
+    if: needs.guard.outputs.production == 'true'
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.sha }}
+
+      # `--environment production` additionally asserts that the interactive API browser is not
+      # served, which is the one behaviour that differs between the two environments.
+      - name: Run the smoke checks
+        env:
+          SMOKE_BASE_URL: ${{ vars.BASE_URL_PRODUCTION || 'https://lecp-production.fly.dev' }}
+          SMOKE_TOKEN: ${{ secrets.SMOKE_TOKEN_PRODUCTION }}
+        run: |
+          python scripts/smoke/smoke.py \
+            --environment production \
+            --require-queue-read \
+            --wait-seconds 120
+
+      # A failed production smoke run is not an alert to read later — it means the release is bad
+      # and the previous version should be serving. Stated as an annotation on the run rather than
+      # performed automatically: `fly releases rollback` is a financial control plane changing
+      # versions, and `docs/runbook.md` walks the operator through it deliberately.
+      - name: Say what to do about a failure
+        if: failure()
+        run: |
+          echo "::error::Production smoke checks failed. Roll back now: see the 'Rolling back a release' section of docs/runbook.md."

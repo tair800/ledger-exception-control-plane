@@ -1,0 +1,71 @@
+# Fly.io configuration — PRODUCTION (the public demo).
+#
+# NOTHING IS DEPLOYED. This file is deployment-ready configuration, not a record of a deployment.
+#
+# Read `deployment/fly.staging.toml` first: it carries the reasoning for every shared setting.
+# This file states only what differs, and each difference is a deliberate environment separation
+# rather than a copy that drifted.
+#
+# Environment separation is real, not nominal: a different Fly app, a different Neon project, a
+# different principal registry, a different Fly API token, and a GitHub Environment with required
+# reviewers in front of the deploy. Nothing is shared between the two but the image digest — and
+# sharing exactly that is the point (build once, deploy twice).
+#
+# NO SECRET APPEARS IN THIS FILE. Secrets are set with `fly secrets set` and listed by NAME in
+# `docs/deployment.md`.
+
+app = "lecp-production"
+primary_region = "ams"
+
+[deploy]
+  # See the staging file. Same mechanism, and the same prerequisite: the image must contain
+  # `alembic.ini` and `migrations/`.
+  release_command = "alembic upgrade head"
+  strategy = "immediate"
+
+[env]
+  # The one difference that changes application behaviour rather than capacity: `create_app`
+  # sets `docs_url=None` when the environment is production, so the interactive API browser is
+  # not served. The smoke script asserts it — a wrong value here is otherwise invisible until
+  # somebody finds the page.
+  LECP_ENVIRONMENT = "production"
+
+  LECP_LOG_LEVEL = "INFO"
+  LECP_SERVICE_NAME = "ledger-exception-control-plane"
+  LECP_READINESS_TIMEOUT_SECONDS = "8.0"
+  LECP_CORRELATION_ID_HEADER = "X-Request-ID"
+
+  LECP_RETRY_BASE_DELAY_SECONDS = "1.0"
+  LECP_RETRY_MULTIPLIER = "2.0"
+  LECP_RETRY_CAP_SECONDS = "60.0"
+  LECP_RETRY_MAX_ATTEMPTS = "5"
+  LECP_RETRY_TIME_BUDGET_SECONDS = "3600.0"
+  LECP_RECONCILE_CONSECUTIVE_NOT_FOUND = "3"
+  LECP_RECONCILE_MAX_QUERIES = "10"
+  LECP_RECOVERY_SLA_HOURS = "24"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  # Tighter than staging. This one is reachable by anyone with the link, and the concurrency
+  # ceiling is the only request quota that exists until application-level rate limiting lands.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 10
+    hard_limit = 25
+
+[[http_service.checks]]
+  grace_period = "15s"
+  interval = "15s"
+  method = "get"
+  path = "/healthz"
+  protocol = "http"
+  timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

@@ -1,0 +1,114 @@
+# Fly.io configuration — STAGING.
+#
+# NOTHING IS DEPLOYED. This file is deployment-ready configuration, not a record of a deployment.
+# The owner setup steps are in `docs/deployment.md`; until they are done, the deploy jobs in
+# `.github/workflows/deploy.yml` skip.
+#
+# Deliberately NOT at the repository root, and NOT named `fly.toml`. `flyctl` reads `./fly.toml`
+# by default, so a bare `fly deploy` in this repository fails with "config not found" rather than
+# picking an environment for you. Every deploy names its config explicitly:
+#
+#     flyctl deploy --config deployment/fly.staging.toml --image <digest>
+#
+# NO SECRET APPEARS IN THIS FILE OR IN ITS PRODUCTION SIBLING. `[env]` is baked into the machine
+# and is world-readable to anyone who can run `fly config show`; the DSN and the principal
+# registry are set with `fly secrets set` and are listed by NAME in `docs/deployment.md`.
+
+app = "lecp-staging"
+primary_region = "ams"
+
+# No [build] section: the image is always supplied with `--image`. The pipeline builds one image
+# per commit, pushes it once, and deploys that same digest to staging and then to production —
+# so what production runs is the artifact staging's smoke tests passed against, not a rebuild of
+# the same source.
+
+[deploy]
+  # Migrations run here: in a temporary machine, on the new image, with the app's environment and
+  # secrets, BEFORE any machine takes traffic. A non-zero exit aborts the release, so a failed
+  # migration leaves the previous version serving rather than a new version against an old schema.
+  #
+  # This is the only place migrations are applied. The application process never migrates itself
+  # (ADR-021): a serving process that runs DDL turns a rollout into a race between instances.
+  #
+  # `alembic.ini` reads no DSN — `migrations/env.py` builds it from `Settings`, so this command is
+  # configured by LECP_POSTGRES_DSN like everything else and cannot be pointed elsewhere by
+  # accident.
+  #
+  # PREREQUISITE, and the first deploy fails without it: the image must contain `alembic.ini` and
+  # `migrations/`. The current root Dockerfile copies neither — see `docs/deployment.md`.
+  release_command = "alembic upgrade head"
+
+  # One machine per environment, so there is no window in which two versions serve. `rolling`
+  # needs at least two machines to mean anything.
+  strategy = "immediate"
+
+# Non-secret configuration only. Every name here is a field on `Settings` (`config.py`), which
+# rejects unknown `LECP_` variables at startup — so a typo in this block fails the release rather
+# than silently falling back to a default.
+[env]
+  LECP_ENVIRONMENT = "staging"
+  LECP_LOG_LEVEL = "INFO"
+  LECP_SERVICE_NAME = "ledger-exception-control-plane"
+
+  # Raised from the local default of 2.0s. Neon's serverless PostgreSQL suspends an idle compute
+  # and resumes it on the next connection, and a resume is slower than a warm connect — a 2s
+  # readiness bound would report a healthy database as unavailable for the first request after an
+  # idle period. Still bounded, because §18's reason for bounding it does not change: an
+  # unbounded probe turns a slow dependency into a slow health endpoint and then into a false
+  # outage.
+  LECP_READINESS_TIMEOUT_SECONDS = "8.0"
+
+  LECP_CORRELATION_ID_HEADER = "X-Request-ID"
+
+  # Retry and reconciliation bounds, stated explicitly rather than inherited from the code
+  # defaults. Two of these decide how many times an irreversible financial write is offered to a
+  # ledger (ADR-055), and a deployment should not have to read the source to find that out.
+  LECP_RETRY_BASE_DELAY_SECONDS = "1.0"
+  LECP_RETRY_MULTIPLIER = "2.0"
+  LECP_RETRY_CAP_SECONDS = "60.0"
+  LECP_RETRY_MAX_ATTEMPTS = "5"
+  LECP_RETRY_TIME_BUDGET_SECONDS = "3600.0"
+  LECP_RECONCILE_CONSECUTIVE_NOT_FOUND = "3"
+  LECP_RECONCILE_MAX_QUERIES = "10"
+  LECP_RECOVERY_SLA_HOURS = "24"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+
+  # Scale to zero when idle, resume on the first request. This is the cost half of OPEN-10: an
+  # idle demo costs nothing, and the link still works — `suspend` rather than `stop` so a resume
+  # restores a warm process instead of booting one. The monthly ceiling itself is the owner's
+  # decision and is still open.
+  #
+  # The consequence is a cold start on the first request after idle, which is why the smoke
+  # script waits for liveness before it starts checking.
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  # The request quota for a public demo, and the only rate control that exists today. Fly rejects
+  # requests above `hard_limit` concurrent in-flight per machine, which bounds what a single
+  # caller can occupy but is NOT per-caller rate limiting: a slow trickle of requests passes
+  # freely. Per-IP and per-principal limits are an application concern and do not exist yet —
+  # `docs/deployment.md` records that gap rather than describing it as covered.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 40
+
+# Liveness, never readiness. An orchestrator restarts what fails its health check, so a check
+# coupled to PostgreSQL would turn a database blip into a restart storm that removes the capacity
+# needed to recover (ADR-015). `/readyz` is for load balancers and operators, and is checked by
+# the smoke script instead.
+[[http_service.checks]]
+  grace_period = "15s"
+  interval = "15s"
+  method = "get"
+  path = "/healthz"
+  protocol = "http"
+  timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

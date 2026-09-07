@@ -22,6 +22,22 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
 
 COPY src/ ./src/
+
+# Migrations travel with the image, because the deployment applies them as a **release command**
+# rather than from the application process — a process that migrates on boot races every other
+# replica for the same DDL, and on a rolling deploy the old and new schema are live at once.
+#
+# Their absence was found empirically, not by reading: without `alembic.ini` the release command
+# fails with `No 'script_location' key found in configuration` and the very first deploy never
+# releases. A migration step that cannot see its own script directory is a deployment that stops
+# at the point where it would have changed the database.
+COPY alembic.ini ./
+COPY migrations/ ./migrations/
+
+# The fixture corpus, so a deployed demonstration can be seeded in-container. Committed, seeded,
+# and byte-identical to what the generator produces — the same artefact CI drift-checks, not a
+# copy made for the image.
+COPY fixtures/ ./fixtures/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 

@@ -6,7 +6,10 @@
         money-verify m2-demo m2-demo-check cassettes cassettes-check cassette-verify \
         operations-verify dispatch-verify ledger-verify retry-verify approval-verify \
         reconcile-verify audit-verify chaos-verify chaos-table chaos-check \
-        golden golden-check eval-verify observability-verify
+        golden golden-check eval-verify observability-verify \
+        eval-gate eval-gate-update eval-gate-verify label-packet label-packet-verify \
+        eval-compare eval-compare-verify \
+        smoke-local smoke-selftest secret-scan deploy-check demo demo-reset
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -334,3 +337,42 @@ eval-compare-verify: ## Prove the comparison harness fabricates no number and ga
 # would be invisible to it and the target would fail the check it exists to satisfy.
 observability-verify: ## Prove the telemetry conventions, the redaction gate and the correlation contract
 	uv run pytest tests/test_observability.py -p no:cacheprovider --no-cov
+
+# --- deployment (M10.1) ---
+#
+# Nothing here deploys anything. These targets run the checks the pipeline runs, so a
+# deployment-affecting change can be verified before it is pushed rather than after.
+#
+# `smoke` (above) is a different thing and the names are worth keeping straight: that target runs
+# the *integration test suite* against the local stack. These run the *post-deploy* checks against
+# a URL, which is a much smaller question — is the thing at this address alive, ready, refusing
+# anonymous callers, and not leaking a connection string.
+
+smoke-local: ## Run the post-deploy smoke checks against the local stack (make up first)
+	uv run python scripts/smoke/smoke.py --base-url http://localhost:8000 --environment local
+
+smoke-selftest: ## Prove the smoke checks can still fail: 10 planted deployment faults
+	uv run python scripts/smoke/selftest.py
+
+secret-scan: ## Scan tracked files for credentials, unsafe config and frontend exposure
+	uv run python deployment/checks/scan.py all
+
+deploy-check: secret-scan smoke-selftest ## Everything the deployment lane gates on, no Docker needed
+	uv run --no-project --with pyyaml python -c "import pathlib, yaml; [yaml.safe_load(p.read_text(encoding='utf-8')) for p in pathlib.Path('.github/workflows').glob('*.yml')]; print('workflows parse')"
+
+# --- the local demonstration (M7 support) ---
+#
+# `demo` leaves a disposable database holding an exception in every state the console renders,
+# including the two that matter: one posting recorded UNKNOWN that the system refuses to retry, and
+# one dead-lettered with the envelope an operator replays it from. Repeatable — it resets before it
+# seeds, because `alembic downgrade base` cannot serve here: the 4.4 migration refuses to downgrade
+# while the `recover` events this seeder writes exist, and that refusal protects a real deployment.
+#
+# No credential and no model: a stand-in proposer supplies the proposal and says so in its own
+# rationale, which the console renders verbatim.
+
+demo: test-db-init migrate ## Seed the disposable database so the console has real rows to show
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run python -m ledger_exception_control_plane.demo seed
+
+demo-reset: test-db-init ## Empty every table the demonstration writes, leaving the schema in place
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run python -c "import asyncio; from ledger_exception_control_plane.config import Settings; from ledger_exception_control_plane.db.engine import create_engine; from ledger_exception_control_plane.demo.seed import reset_demo; from ledger_exception_control_plane.fixtures.loader import assert_target_is_disposable; s=Settings(); assert_target_is_disposable(s); e=create_engine(s); asyncio.run(reset_demo(e))"
