@@ -33,6 +33,7 @@ from ledger_exception_control_plane.health import (
     check_redis,
     run_probe,
 )
+from ledger_exception_control_plane.ledger import SimulatedLedger
 from ledger_exception_control_plane.log import (
     configure_logging,
     new_correlation_id,
@@ -115,6 +116,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # a permissions problem. Empty is legal and means "no principal can authenticate": fail closed.
     app.state.principals = PrincipalRegistry.from_json(resolved.principals)
     app.state.engine = create_engine(resolved)
+
+    # The ledger the console's operator actions dispatch through, held on app state for the same
+    # reason the engine is: which ledger a deployment talks to is a deployment decision, and a
+    # route that constructed one itself would hard-wire that decision into the request path.
+    #
+    # It is the **simulated** adapter, and that is the honest default rather than a placeholder:
+    # this repository has no real ledger integration (OPEN-11), the simulated one declares and
+    # honours the capability contract §13.4 branches on, and a route reaching for a real provider
+    # that does not exist would be worse than one that says which double it is using.
+    app.state.ledger_adapter = SimulatedLedger()
+
     app.include_router(router)
 
     # The console is a separate origin in development and usually the same origin in a deployment,

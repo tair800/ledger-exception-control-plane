@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ledger_exception_control_plane import __version__
 from ledger_exception_control_plane.audit import (
     NO_AUTHORITY,
     UNRECORDED_CORRELATION_ID,
@@ -42,6 +43,7 @@ from ledger_exception_control_plane.audit import (
     emit,
     scope_for,
 )
+from ledger_exception_control_plane.config import Settings
 from ledger_exception_control_plane.db.control import (
     Adjustment,
     Approval,
@@ -62,11 +64,18 @@ from ledger_exception_control_plane.db.control import (
     TreatmentProposalEvidence,
 )
 from ledger_exception_control_plane.db.models import SettlementLine
+from ledger_exception_control_plane.ledger import (
+    Fault,
+    FaultInjectingLedger,
+    SimulatedLedger,
+)
+from ledger_exception_control_plane.operations import outcome_code
 from ledger_exception_control_plane.operations.approval import (
     ApprovalRefusedError,
     RefusalReason,
     record_decision,
 )
+from ledger_exception_control_plane.operations.dispatcher import dispatch_once
 from ledger_exception_control_plane.operations.recovery import (
     RecoveryRefusal,
     RecoveryRefusedError,
@@ -74,6 +83,7 @@ from ledger_exception_control_plane.operations.recovery import (
     resolve_item,
     stale_items,
 )
+from ledger_exception_control_plane.operations.retry import replay_dead_letter
 from ledger_exception_control_plane.security import Principal, PrincipalRegistry
 
 __all__ = ["router"]
@@ -907,3 +917,230 @@ async def list_dead_letters(
         )
         for entry, adjustment_id in rows
     ]
+
+
+class ReplayReportView(BaseModel):
+    """What a replay did, in exactly the terms 4.3 recorded it.
+
+    **Every field here exists on ``ReplayReport``.** The first version of this model carried an
+    ``applied_count`` read "off the ledger", which sounded like the right thing and was not a field
+    the report has — mypy refused it. Worth recording, because a response model that invents a
+    field is how a console ends up displaying a number the system never measured.
+
+    ``detail`` is returned because 4.3 writes it for the outcomes it owns, and an operator deciding
+    whether to escalate needs the reason rather than only the verdict.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    dlq_id: uuid.UUID
+    adjustment_id: uuid.UUID
+    operation_id: str
+    outcome: str
+    posting_ref: str | None
+    detail: str
+    #: Whether this replay closed the entry, as 4.3 defines closure. Derived there, not here.
+    resolved: bool
+
+
+@router.post("/dlq/{dlq_id}/replay", response_model=ReplayReportView)
+async def replay_dead_letter_entry(
+    dlq_id: uuid.UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> ReplayReportView:
+    """Re-send one dead-lettered dispatch. **An irreversible financial write, on a human's order.**
+
+    Every safety property is inherited rather than re-implemented here, which is the point:
+    :func:`~ledger_exception_control_plane.operations.retry.replay_dead_letter` reads the persisted
+    operation identifier instead of re-deriving one, re-reads the persisted instruction instead of
+    rebuilding it, and applies the dispatcher's own gates. This route adds authority and a name to
+    the order, and nothing else.
+
+    **The principal is required and is the caller's own.** 4.3 made ``--principal`` mandatory on the
+    replay command after every event a human-ordered re-send produced recorded ``system``; an HTTP
+    route that omitted it would reintroduce exactly that. It is taken from the authenticated
+    identity rather than from the request body, so an operator cannot order a replay in someone
+    else's name.
+
+    Deliberately not idempotent at the HTTP layer, and deliberately not made so: a second POST is a
+    second *order*, and the protection against it duplicating a financial effect is the operation
+    identifier and the ledger's capability contract, not a request cache. Making this endpoint
+    swallow a repeat would move a financial guarantee into HTTP plumbing, where §13 says it must
+    never live.
+    """
+    if not principal.may_work_operations_queues():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="a replay is an operator action",
+        )
+
+    report = await replay_dead_letter(
+        request.app.state.engine,
+        dlq_id=dlq_id,
+        adapter=request.app.state.ledger_adapter,
+        now=dt.datetime.now(dt.UTC),
+        principal=principal.id,
+    )
+    return ReplayReportView(
+        dlq_id=report.dlq_id,
+        adjustment_id=report.adjustment_id,
+        operation_id=report.operation_id,
+        outcome=report.outcome.value,
+        posting_ref=report.posting_ref,
+        detail=report.detail,
+        resolved=report.resolved,
+    )
+
+
+# ======================================================================================
+# /meta and /demo — what this instance is, and the control that makes §19.1 visible
+# ======================================================================================
+
+
+class MetaView(BaseModel):
+    """What kind of instance this is. Unauthenticated, and carries nothing that could be sensitive.
+
+    Unauthenticated deliberately: the console needs to know whether to render the demo controls
+    *before* a principal has authenticated, and version plus a demo flag are not facts worth
+    protecting. Nothing here names a dependency, an origin, a principal or a configuration value.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str
+    demo_mode: bool
+    #: What the configured ledger calls itself. Displayed so a visitor is told, in the console
+    #: itself, that the strong guarantee they are watching rests on a simulated ledger written in
+    #: this repository — see OPEN-11. A demo that quietly implied a real provider would be the
+    #: overclaim this project exists to avoid.
+    ledger_adapter: str
+
+
+@router.get("/meta", response_model=MetaView)
+async def meta(request: Request) -> MetaView:
+    """This instance's identity. No authentication, no dependencies, no secrets."""
+    settings: Settings = request.app.state.settings
+    return MetaView(
+        version=__version__,
+        demo_mode=settings.demo_mode,
+        ledger_adapter=str(request.app.state.ledger_adapter.name),
+    )
+
+
+class InjectedFaultReport(BaseModel):
+    """What the injected fault did to the books, and what the system did about it.
+
+    The two are reported separately because their difference is the entire demonstration.
+    ``ledger_applied_count`` is the **simulated ledger's own count** for this operation identifier;
+    ``recorded_outcome`` is what this system concluded. §19.1's whole subject is that a client
+    cannot infer the first from the second, so a report that showed only one of them would be
+    showing the visitor the wrong thing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    adjustment_id: uuid.UUID
+    operation_id: str
+    fault: str
+    #: What the caller was told. For the lost-response fault this is ``unknown``, which is the
+    #: honest answer and the only one available.
+    recorded_outcome: str
+    #: How many times the ledger actually applied this operation. **One**, and that is the point.
+    ledger_applied_count: int
+    #: How many requests reached the ledger. Greater than the applied count when a duplicate was
+    #: suppressed, which is how a visitor can tell suppression from a request never arriving.
+    ledger_posts_received: int
+    explanation: str
+
+
+@router.post("/demo/exceptions/{exception_id}/inject-fault", response_model=InjectedFaultReport)
+async def inject_fault(
+    exception_id: uuid.UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+    session: Annotated[AsyncSession, Depends(_session)],
+) -> InjectedFaultReport:
+    """Dispatch one approved adjustment through a ledger that commits and then loses the response.
+
+    **This is M7.2's exit criterion made reachable: a visitor triggers the failure §19.1 names and
+    sees that no second financial effect is applied.** It reuses 4.5's fault-injection port rather
+    than simulating a crash, so what the visitor watches is the same mechanism the kill test
+    measures — not a re-enactment of it.
+
+    Two guards, both refusals rather than filters:
+
+    * **It exists only in demo mode.** A fault injector reachable in a deployment doing real work
+      is a defect however carefully it is documented, so this returns 404 — not 403 — when
+      ``demo_mode`` is false. 403 would confirm the route exists and invite someone to find the
+      credential for it; 404 says there is nothing here, which is true.
+    * **It is an operator action.** Injecting a fault dispatches a financial write, and §16 puts
+      that on the role that works the failure queues rather than on the role that authorises
+      postings.
+
+    The count returned is read from the ledger, never from our own rows.
+    """
+    settings: Settings = request.app.state.settings
+    if not settings.demo_mode:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    if not principal.may_work_operations_queues():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="injecting a fault dispatches a financial write; that is an operator action",
+        )
+
+    approval = (
+        (
+            await session.execute(
+                select(Approval)
+                .where(Approval.exception_id == exception_id)
+                .where(Approval.decision == ApprovalDecision.APPROVED)
+                .order_by(Approval.decided_at.desc())
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if approval is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="nothing is approved for this exception, so there is no posting to fault",
+        )
+
+    adjustment = (
+        (await session.execute(select(Adjustment).where(Adjustment.approval_id == approval.id)))
+        .scalars()
+        .first()
+    )
+    if adjustment is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="the approved treatment has not been priced, so there is no posting to fault",
+        )
+
+    # A fresh inner ledger per injection, so the count the visitor reads is this demonstration's
+    # and not an accumulation across everyone who pressed the button.
+    inner = SimulatedLedger()
+    faulted = FaultInjectingLedger(inner, fault=Fault.COMMIT_THEN_LOSE_RESPONSE)
+
+    result = await dispatch_once(
+        request.app.state.engine,
+        adjustment_id=adjustment.id,
+        adapter=faulted,
+        sent_at=dt.datetime.now(dt.UTC),
+    )
+
+    return InjectedFaultReport(
+        adjustment_id=adjustment.id,
+        operation_id=adjustment.operation_id,
+        fault=Fault.COMMIT_THEN_LOSE_RESPONSE.value,
+        recorded_outcome=outcome_code(result.outcome).value,
+        ledger_applied_count=inner.applied_count(adjustment.operation_id),
+        ledger_posts_received=inner.posts_received,
+        explanation=(
+            "The ledger committed the posting and the response was lost, so this system recorded "
+            "the outcome as UNKNOWN rather than guessing. It did not retry: an ambiguous "
+            "irreversible write never enters the retry path. The count above is the ledger's own, "
+            "and it is one."
+        ),
+    )
