@@ -11,14 +11,33 @@ hand-written table that could quietly disagree with them:
 
 1. ``generate(seed, profile, instances)`` builds the corpus. Seeded, committed generator; the same
    seed the committed fixture corpus uses.
-2. ``interpret(payload)`` parses and normalises every settlement file — ingestion's pure half.
-3. ``match(candidates, entries, DEFAULT_POLICY)`` clears what the deterministic matcher can clear.
-4. ``classify(residuals, movements)`` assigns a class and a rule to each residual the matcher left.
-5. ``_originating_period`` derives the counterpart period from production fields only.
-6. :func:`~tests.evaluation.labels.label_for` states the correct treatment and why.
+2. ``match(candidates, entries, DEFAULT_POLICY)`` clears what the deterministic matcher can clear.
+3. ``classify(residuals, movements)`` assigns a class and a rule to each residual the matcher left.
+4. ``_originating_period`` derives the counterpart period from production fields only.
+5. :func:`~tests.evaluation.labels.label_for` states the correct treatment and why.
 
-Steps 1 to 5 are the shipped pipeline. Only step 6 is evaluation's own judgement, and it lives
+Steps 1 to 4 are the shipped pipeline. Only step 5 is evaluation's own judgement, and it lives
 in one small reviewable module.
+
+**Ingestion is deliberately not one of those steps, and that is a change from the first version.**
+The generator used to call ``interpret(payload)`` on each batch's raw file and take its settlement
+facts — and its *identifiers* — from what ingestion parsed. Ingestion does not assign an identifier,
+so the module derived one of its own: ``uuid5(NAMESPACE_URL, f"lecp:line:{content_hash}:{line}")``.
+That produced a golden set whose keys existed nowhere else in the repository. The committed
+cassettes are keyed against the corpus rows' own ``id``, which is also the identifier the real
+pipeline's ``ExceptionSubject`` carries, so the two artefacts M6 has to join **shared no identifier
+at all**: 13 exceptions on each side of the canonical corpus, zero in common. A golden set that
+cannot be joined to the responses being graded is not an answer key, it is a coincidence of counts.
+
+So the lines now come from ``generated.corpus.batches[].lines[]`` directly, in the corpus row
+namespace, which is the namespace everything else already uses. What that costs is one property:
+these records no longer travel through ingestion's parse boundary. That boundary keeps its own
+suite — ``tests/test_ingest.py`` and ``tests/test_ingest_postgres.py`` prove the parse, the
+normalisation and the quarantine path — and this module asserts separately that the corpus rows and
+what ``interpret`` parses from the very same bytes agree field for field, so nothing is being taken
+on trust. What the change buys is the property that actually matters here: the golden set and the
+subjects a proposal is made about are addressed identically, and a join-cardinality test fails
+loudly if that ever stops being true.
 
 **No database.** Every stage above is pure, which is what lets the golden set be regenerated in a
 second and verified on every CI build with no service running.
@@ -55,8 +74,7 @@ from ledger_exception_control_plane.classification import (
 )
 from ledger_exception_control_plane.db.control import ExceptionClassification, TreatmentCode
 from ledger_exception_control_plane.fixtures.generator import generate
-from ledger_exception_control_plane.fixtures.schema import Profile
-from ledger_exception_control_plane.ingest import NormalisedLine, interpret
+from ledger_exception_control_plane.fixtures.schema import Profile, SettlementLineRecord
 from ledger_exception_control_plane.matching import (
     DEFAULT_POLICY,
     CandidateEntry,
@@ -76,9 +94,16 @@ __all__ = [
     "render_golden_set",
 ]
 
-#: Bumped when the *shape* of a record changes. A committed file at an older version is a failure
-#: rather than something to migrate: regenerating costs a second.
-GOLDEN_SCHEMA_VERSION: Final = "1"
+#: Bumped when the *shape* of a record changes, or when the meaning of its key does. A committed
+#: file at an older version is a failure rather than something to migrate: regenerating costs a
+#: second.
+#:
+#: ``2`` is the identity migration described in the module docstring. The field list did not change;
+#: ``exception_id`` stopped being a locally derived ``uuid5`` and became the corpus row's own
+#: identifier, so every one of the 250 keys is different from version 1's. That is a bigger change
+#: than adding a field, and a version that only tracked the field list would have let a stale file
+#: load with keys that join to nothing.
+GOLDEN_SCHEMA_VERSION: Final = "2"
 
 #: The committed artefact. JSONL because it is append-friendly, line-diffable in review, and the
 #: format §20 names.
@@ -115,15 +140,6 @@ GOLDEN_INSTANCES: Final = 1200
 HOLD_OUT_EVERY: Final = 10
 
 
-def _line_id(content_hash: str, line_number: int) -> uuid.UUID:
-    """The identifier a persisted line would have. Derived, so records are stable across runs.
-
-    Mirrors ``demo/snapshot.py``: the same content hash and line number give the same id, which is
-    what makes a golden record addressable and a diff between two generations readable.
-    """
-    return uuid.uuid5(uuid.NAMESPACE_URL, f"lecp:line:{content_hash}:{line_number}")
-
-
 @dataclasses.dataclass(frozen=True, slots=True)
 class GoldenRecord:
     """One labelled exception: what the system concluded, and what the right treatment is.
@@ -133,7 +149,9 @@ class GoldenRecord:
     construction metadata.
     """
 
-    #: Stable, derived from the content hash and line number. The key.
+    #: The settlement line's own identifier, taken from the corpus row. The key, and deliberately
+    #: the *same* key the cassette-covered subjects carry — a golden record and the proposal made
+    #: about it must be joinable, or neither can grade the other.
     exception_id: str
 
     # --- what the deterministic layers concluded -------------------------------------------
@@ -224,31 +242,34 @@ def build_golden_set(
 ) -> GoldenSet:
     """Run the deterministic pipeline over a seeded corpus and label every residual it leaves.
 
-    Chained, not recomputed: what ingestion parsed is what the matcher sees, what the matcher leaves
-    is what the classifier reads, and what the classifier decided is what gets labelled.
+    Chained, not recomputed: the corpus rows are what the matcher sees, what the matcher leaves is
+    what the classifier reads, and what the classifier decided is what gets labelled.
+
+    **The lines come from the corpus rows, in their own identifier namespace.** That is the same
+    thing ``tests/cassette_builder.py::corpus_subjects`` does, deliberately, and it is what makes
+    the two artefacts joinable — see the module docstring for what the first version did instead
+    and what it cost. Nothing here reads a construction label; a row carries one, and this module
+    never touches it.
     """
     generated = generate(seed, profile, instances)
 
-    parsed: list[tuple[str, NormalisedLine]] = []
-    for batch in generated.corpus.batches:
-        lines, defects = interpret(generated.files[batch.raw_payload_path])
-        assert not defects, "the seeded corpus must parse cleanly"
-        parsed.extend((batch.content_hash, line) for line in lines)
+    rows: list[SettlementLineRecord] = [
+        row for batch in generated.corpus.batches for row in batch.lines
+    ]
 
     candidates: list[CandidateLine] = []
-    normalised: dict[uuid.UUID, NormalisedLine] = {}
-    for content_hash, line in parsed:
-        identifier = _line_id(content_hash, line.line_number)
+    line_of: dict[uuid.UUID, SettlementLineRecord] = {}
+    for row in rows:
         candidates.append(
             CandidateLine(
-                id=identifier,
-                line_number=line.line_number,
-                amount=line.amount,
-                currency=line.currency,
-                value_date=line.value_date,
+                id=row.id,
+                line_number=row.line_number,
+                amount=row.amount,
+                currency=row.currency,
+                value_date=row.value_date,
             )
         )
-        normalised[identifier] = line
+        line_of[row.id] = row
 
     entries = [
         CandidateEntry(
@@ -267,8 +288,8 @@ def build_golden_set(
     movements = [
         SettlementMovement(
             id=candidate.id,
-            merchant_reference=normalised[candidate.id].merchant_reference,
-            movement=movement_type(normalised[candidate.id].transaction_type),
+            merchant_reference=line_of[candidate.id].merchant_reference,
+            movement=movement_type(line_of[candidate.id].transaction_type),
             amount=candidate.amount,
             currency=candidate.currency,
             value_date=candidate.value_date,
@@ -285,7 +306,7 @@ def build_golden_set(
     records: list[GoldenRecord] = []
     for index, decision in enumerate(sorted(decisions, key=lambda d: str(d.line_id))):
         movement = by_movement[decision.line_id]
-        line = normalised[decision.line_id]
+        line = line_of[decision.line_id]
         originating = _originating_period(movement, movements)
         label = label_for(decision.classification, originating_period=originating)
         records.append(

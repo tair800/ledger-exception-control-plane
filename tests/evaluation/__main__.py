@@ -39,7 +39,12 @@ from tests.evaluation.scorer import CassetteOrigin, Proposal, score
 def _generate(path: pathlib.Path) -> int:
     golden = build_golden_set()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_golden_set(golden), encoding="utf-8")
+    # ``newline="\n"`` explicitly, the same as the cassette builder. Without it, Python's text mode
+    # translates every newline to the platform's, so regenerating this file on Windows produced
+    # 251 CRLFs where CI produces 251 LFs — a file that is *not* byte-identical across platforms
+    # while every drift check still passed, because `read_text` translates them back. "Same seed,
+    # same bytes" has to mean the bytes on disk.
+    path.write_text(render_golden_set(golden), encoding="utf-8", newline="\n")
     print(
         f"wrote {len(golden.records)} records to {path.name} "
         f"({len(golden.hold_out)} held out, {len(golden.human_labelled)} human-labelled)"
