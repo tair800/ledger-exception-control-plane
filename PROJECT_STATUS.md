@@ -904,7 +904,15 @@ Every event asserted anywhere in this increment is one the services emitted. Not
 the end-to-end test drives the production entry points in sequence rather than a test double of
 them — which is also why it cannot claim to observe a running system, and says so.
 
-Two defects were found by review rather than by test, both in this increment's own subject:
+**A third defect surfaced in CI, and it had been silently true for one increment.** The schema job
+carried `timeout-minutes: 10`. Each increment since 4.2 has added a per-increment integration step
+to it, and at 5.2 the total crossed ten minutes — so the **coverage gate step was cancelled
+mid-run** while every step that had already finished still reported green. The job's own conclusion
+was `cancelled`, not `failure`, which is the kind of result that reads as an infrastructure hiccup
+rather than as a gate that stopped running. Raised to 30 minutes with the reasoning recorded beside
+the number.
+
+Two further defects were found by review rather than by test, both in this increment's own subject:
 
 - **the refusal path recorded an authorisation that does not exist.** 4.4 stamped
   `approval:<role>` on every refused approval, including one refused *because that role may not

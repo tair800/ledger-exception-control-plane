@@ -77,7 +77,14 @@ jobs:
   schema:
     name: Migrations and schema integrity
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Raised from 10 at M5.2, and the reason is worth recording rather than just the number.
+    # This job runs eleven per-increment integration steps *and* the whole-suite coverage gate,
+    # which re-executes all of them — deliberate duplication, because a per-increment step names
+    # which increment broke and the coverage gate is the only honest place to measure coverage.
+    # Each increment since 4.2 has added a step, and at 5.2 the total crossed ten minutes: the
+    # coverage gate was cancelled mid-run, so the authoritative measurement silently stopped
+    # happening while the job still reported every step it had managed to finish as green.
+    timeout-minutes: 30
 
     # Narrowly scoped on purpose: a single PostgreSQL service container, no Redis and no
     # Compose. Migration correctness is the one thing unit tests genuinely cannot prove —
