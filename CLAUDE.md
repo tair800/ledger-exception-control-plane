@@ -59,8 +59,10 @@ identifier, enforcing nothing, and **also genuinely double-booking** — because
 reference adapter `NONE`/`NONE` would have produced a configuration whose behaviour was stronger
 than its label, and the label is what an auditor reads. A real adapter would need its capability
 profile established from a vendor's documentation rather than assumed, which is OPEN-11. The transport classifier added at 4.3 is
-exercised by handing it exceptions directly, for the same reason. Still not implemented: no CI
-evaluation gate (6.2), no three-arm comparison (6.3) and no console.
+exercised by handing it exceptions directly, for the same reason. The evaluation gate (6.2), the
+three-arm comparison (6.3) and the console (M7) have since shipped; this paragraph described the
+state before them and the sentence that said otherwise has been removed rather than left to
+contradict the status above.
 
 **An `adjustment` row is now written and can now be dispatched**, and both sentences used to say
 the opposite. 4.1 derives a retry-independent `operation_id`, binds it to the whole posting
@@ -380,6 +382,20 @@ make golden-check      # fail if the committed golden set has drifted from its g
 make eval-verify       # the golden set's schema, and the scorer's arithmetic and reporting
 uv run python -m tests.evaluation score <proposals.jsonl> --origin synthesised
 ```
+
+The local demonstration (M7 support). `demo` is repeatable — it resets before it seeds — and
+`demo-api` is deliberately not `make up`: the Compose stack targets the `lecp` database, which the
+seeder is forbidden to touch, so pointing the console there renders correct empty states over a
+database nobody is reading.
+
+```bash
+make demo         # migrate and seed the disposable database
+make demo-api     # serve it on 127.0.0.1:8000 with demo mode on and the demo principals loaded
+make demo-reset   # empty every table the demonstration writes, leaving the schema
+```
+
+Sign in as `demo-controller`, `demo-operator` or `demo-analyst`. Those tokens are published in the
+`Makefile` beside their hashes and a test asserts they appear nowhere else.
 
 Adding a dependency: `uv add <pkg>` for runtime, `uv add --dev <pkg>` for tooling. Both update
 `uv.lock`, which is committed. CI runs `--frozen`, so a dependency change that skipped the lockfile

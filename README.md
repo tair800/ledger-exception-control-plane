@@ -192,13 +192,7 @@ unconditionally in the strong sense; one holds unconditionally but is deliberate
 is ours but bounded by what we can know; one is an admission rule we impose on adapters; and the fifth
 — the financial side effect — is conditional on the ledger:
 
-| # | Guarantee | Holds |
-|---|---|---|
-| 1 | One claim per residual; one adjustment per operation id | **Unconditionally** — ours |
-| 2 | Transactional outbox: intent is never lost | **Unconditionally** — and deliberately *at-least-once*, not once |
-| 3 | No second dispatch for a known terminal outcome | **Ours, bounded by knowledge** — silent when the outcome is `UNKNOWN` |
-| 4 | Adapter declares its capabilities; outcome is three-valued | **By contract** — an adapter that cannot express `UNKNOWN` is rejected |
-| 5 | **Effectively-once financial side effect** | **Only when** the adapter enforces an idempotency key **or** exposes a queryable posting identity |
+They are tabulated under [Reliability model](#reliability-model) above and not repeated here.
 
 The reference adapter here declares both, so guarantee 5 holds and is claimed. Point this at a ledger
 that declares neither and **the claim is withdrawn, not reworded** — the system records the outcome as
@@ -315,9 +309,44 @@ the envelope an operator replays it from.
 ```bash
 make db-up          # PostgreSQL 16 on 127.0.0.1:15432
 make demo           # migrate + seed: 11 lines in, 7 exceptions, 4 approved, 1 UNKNOWN, 1 dead-lettered
-make up             # the API on 127.0.0.1:8000
+make demo-api       # the API on 127.0.0.1:8000, demo mode on, pointed at the seeded database
 cd frontend && npm install && npm run dev    # the console on 127.0.0.1:3000
 ```
+
+Then sign in at `http://localhost:3000` with one of three demonstration tokens — `demo-controller`
+to approve, `demo-operator` to work the dead-letter and recovery queues, `demo-analyst` to see a
+role that may reject but **not** authorise. They are published deliberately, on the same footing as
+the development database password in `docker-compose.yml`: the registry stores SHA-256 hashes, they
+reach only a disposable database on localhost with demo mode on, and a deployment supplies its own
+registry through `LECP_PRINCIPALS`. `docs/deployment.md` says how, and why.
+
+`make demo-api` rather than `make up`, and the distinction is load-bearing: `make up` runs the
+Compose stack against the `lecp` database, which the seeder refuses to touch — it asserts its target
+is disposable and `lecp` is not. Pointed there, the console renders correct empty states over a
+database it is not reading, which is the worst of the three outcomes because nothing looks broken.
+
+### The console, on the seeded demonstration
+
+Captured from the running console against the database `make demo` produces. Not mock-ups.
+
+**The queue.** Seven residuals the deterministic matcher could not clear, with the stage each has
+reached. The four cleared lines are not here, which is the point.
+
+![The exception queue](docs/screenshots/queue.png)
+
+**One exception, end to end.** Evidence pack and which record the proposal actually cited; the
+treatment proposal with its confidence *band* and a rationale labelled as model output; the human
+decision and who made it; the deterministic adjustment with its amount, account, period and
+`operation_id`; the dispatch, its attempts and the ambiguous outcome; the recovery item that opened
+because of it; and the append-only audit trail underneath all of it.
+
+![One exception in full provenance](docs/screenshots/exception-detail.png)
+
+**Manual recovery.** Where the automatic path stops. Each item states what to inspect and what would
+be sufficient, and records that the controller who authorised the posting may not also judge what
+happened to it.
+
+![The manual recovery queue](docs/screenshots/manual-recovery.png)
 
 **The centrepiece is the fault-injection control.** In demo mode an operator can inject the failure
 `PROJECT_SPEC.md` §19.1 names — the ledger commits the posting and the response is lost — and watch
@@ -325,23 +354,42 @@ what the system does about it:
 
 ```json
 {
+  "adjustment_id": "…",
+  "operation_id": "…",
   "fault": "commit_then_lose_response",
   "recorded_outcome": "unknown",
   "ledger_applied_count": 1,
   "ledger_posts_received": 1,
   "explanation": "The ledger committed the posting and the response was lost, so this system
                   recorded the outcome as UNKNOWN rather than guessing. It did not retry: an
-                  ambiguous irreversible write never enters the retry path. The count above is the
-                  ledger's own, and it is one."
+                  ambiguous irreversible write never enters the retry path. Press this again and
+                  watch the applied count stay at one: a re-send inside the declared idempotency
+                  window is permitted, and the ledger suppresses it because the operation
+                  identifier is the same."
 }
 ```
 
-Two numbers, side by side, because their difference *is* the demonstration: what the system was able
-to conclude, and what actually happened at the ledger. The count is read from the simulated ledger's
-own applied-count, never inferred from this system's records — §19.1 forbids the latter by name.
+**`recorded_outcome` and `ledger_applied_count` are the demonstration**, and they disagree on
+purpose: the system concluded nothing, and the money moved once. The count is read from the
+simulated ledger's own applied-count, never inferred from this system's records — §19.1 forbids the
+latter by name.
+
+Press it a second time and the third number moves. `ledger_posts_received` counts requests carrying
+this operation identifier, so it reads **2 against an applied count of 1**: the re-send was
+permitted, it arrived, and the ledger suppressed it. Either number alone is consistent with the
+wrong story — an applied count of one is also what a demonstration that never sent the second
+request would report.
+
+![The fault-injection control, after the crash](docs/screenshots/fault-injection.png)
 
 The control returns **404, not 403**, when demo mode is off. A fault injector reachable in a
 deployment doing real work is a defect however carefully it is documented.
+
+The selector is populated from `GET /api/v1/demo/fault-targets` rather than filtered client-side.
+That is a correction: the console used to offer *undecided* exceptions, which are exactly the ones
+the injector refuses, so the default selection returned 409 on the first press. Eligibility —
+approved, priced, and still awaiting a first dispatch — is a precondition of the endpoint, so the
+endpoint is what publishes it.
 
 ## Quick start
 
@@ -349,7 +397,7 @@ deployment doing real work is a defect however carefully it is documented.
 uv sync --frozen              # exact pinned dependencies
 make db-up                    # PostgreSQL only
 make migrate                  # apply migrations to head
-uv run pytest                 # 1712 unit tests, no Docker needed for these
+uv run pytest                 # 1723 unit tests, no Docker needed for these
 make gate                     # format, lint, strict types, unit tests — CI order
 ```
 
@@ -376,6 +424,7 @@ GET  /api/v1/dlq                                     dead letters (operator only
 POST /api/v1/dlq/{id}/replay                         re-send one (operator only)
 GET  /api/v1/recovery                                where the automatic path stopped
 POST /api/v1/recovery/{id}/resolve                   an operator's judgement
+GET  /api/v1/demo/fault-targets                      demo mode only — what the injector accepts
 POST /api/v1/demo/exceptions/{id}/inject-fault       demo mode only
 ```
 
@@ -385,8 +434,14 @@ plane with no configured humans fails closed.
 
 `GET /api/v1/me` returns the four capability booleans **the server will actually enforce**, not a
 role name for a client to interpret. That shape has a reason: an analyst was able to authorise a
-posting until a reviewer compared the code with ADR-056, and a console computing authority from a
-role name would have shown the right buttons while the server allowed the wrong ones.
+posting until a reviewer compared the code with ADR-056, and for four increments the console and the
+server disagreed about who could do what with nothing to notice it.
+
+The console does not consume those booleans yet — it mirrors the rule in a small table checked
+against the server's, which is a rendering decision and never an authorisation. Authority is decided
+server-side and fails closed either way: a control the console draws by mistake is refused on click,
+with the reason. Reading the published booleans instead is the obvious next change and is listed
+under future work.
 
 ## Frontend
 
@@ -434,6 +489,34 @@ informative number in the repository. So the scorer also reports:
 - **abstention split by whether escalating was correct**, because abstaining on a fee split is right
   and abstaining on a chargeback reversal is a refusal to do the job.
 
+### The three-arm comparison
+
+§20 asks for the shipped hybrid to be compared against a pure deterministic matcher and against a
+model asked to do the matching itself. Rendered by `make eval-compare` over a seeded 1,290-line
+corpus:
+
+| Arm | Accuracy | USD / 1,000 lines | p95 | Origin |
+|---|---|---|---|---|
+| deterministic matcher | 100.0% | 0.0000 | 611.8 µs/line | `no_model` |
+| LLM-as-matcher | **NOT MEASURED** | **NOT MEASURED** | **NOT MEASURED** | — |
+| shipped hybrid | 100.0% | **NOT MEASURED** | **NOT MEASURED** | `no_model` |
+
+`NOT MEASURED` is not a number somebody forgot. Cost is computed from provider usage fields or not
+at all, and the committed cassettes are synthesised and carry none, so the two model-dependent arms
+have no cost, no latency and no accuracy that would mean anything. A live capture is the only thing
+that fills those cells.
+
+Three things the table is careful about. The deterministic arm's 100.0% is *pair precision* — 1,040
+correct of 1,040 pairs — and the harness reports recall beside it (976 of 978 matchable lines,
+99.8%) because precision alone can be bought by matching nothing. The 0.0000 USD is structural
+rather than measured: that arm issues no provider request, and compute and database cost are not
+measured and are not claimed to be zero. And p95 is in-process wall clock on the machine that
+generated the table, not a service-level latency.
+
+§20 expects the LLM-as-matcher arm to lose on all three figures. That expectation is written down
+and **is not enforced anywhere in the harness**: if a capture shows otherwise, the result is
+published unchanged.
+
 ```bash
 make eval-verify        # the golden set's schema and the scorer's arithmetic
 make eval-gate          # the offline reproduction gate against its committed baseline
@@ -451,7 +534,7 @@ live latency are **NOT MEASURED** and are reported that way in the three-arm tab
 
 | Layer | What it covers |
 |---|---|
-| Unit | 1712 tests, no Docker: matching, tolerance, amount computation, key derivation, rounding, schema guards |
+| Unit | 1723 tests, no Docker: matching, tolerance, amount computation, key derivation, rounding, schema guards |
 | Property | Amount invariants — sign, currency, quantisation, determinism |
 | Schema guard | No numeric type, no amount-like field name, no extra fields in the model response schema |
 | Boundary guard | The calculator must not import the proposal model; `src/` must not import `naive/` |
@@ -495,7 +578,7 @@ naive/           the RED baseline — never imported by src/
 frontend/        the operations console
 tests/           unit, integration, chaos, evaluation
 migrations/      Alembic
-docs/            architecture, deployment, runbook, evaluation, observability
+docs/            deployment, runbook, evaluation, observability, screenshots
 ```
 
 ## Limitations
@@ -528,10 +611,21 @@ Stated plainly, because a reviewer will find them anyway.
 
 ## Future work
 
-In rough order of value: a real ledger adapter with its capability profile established from vendor
-documentation; live cassette capture and the model-facing measurements that unlock; the orchestration
-that wires the stages into a service; per-caller rate limiting for a public demo; and the Langfuse
-trace that discharges §18.
+In rough order of value:
+
+- a real ledger adapter, with its capability profile established from that vendor's documentation
+  rather than assumed — the one thing that would turn the reliability claim from *proven against a
+  double written here* into *proven against something real*;
+- live cassette capture, and the model-facing measurements it unlocks: accuracy, cost and latency
+  for the two arms of the comparison that currently read `NOT MEASURED`;
+- the orchestration that wires the stages into a running service, instead of a seeder that composes
+  them and says so;
+- the console reading `/api/v1/me`'s capability booleans instead of mirroring the role table, so
+  one rule is both enforced and rendered from the same source;
+- the queue endpoint's two extra queries per row folded into the join it already makes — invisible
+  at seven exceptions and not at seven hundred;
+- per-caller rate limiting, before anything is exposed publicly;
+- and the Langfuse trace that discharges §18.
 
 ---
 
@@ -607,7 +701,7 @@ Alembic reads its database URL from the application's `Settings`, not from `alem
 connection string is committed and migrations cannot run against an environment the application
 itself is not configured for.
 
-**Tables at M1.2** — fifteen. The core reconciliation domain:
+**Tables** — sixteen. Fifteen were created by the M1.2 migration and `reconciliation_query` arrived at 4.4, which is why it is last in the second list. The core reconciliation domain:
 
 | Table | Purpose |
 |---|---|
@@ -1117,154 +1211,46 @@ not built, and [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for what each 
 
 ## Status
 
-### 20 of 31 increments — the last is M4.5, the kill-test gate, and it passed
->
-> **What exists:** the local Docker Compose stack (PostgreSQL, Redis, app), typed configuration,
-> liveness and readiness endpoints with bounded dependency probes, structured JSON logging with
-> correlation-id propagation, the tooling baseline, a green CI gate, the **complete database
-> schema** with Alembic migrations, a **deterministic synthetic fixture corpus**, and — as of
-> M2.1 — **settlement ingestion**: a settlement file is received, hashed, persisted immutably,
-> parsed, normalised, and either accepted as typed settlement lines or quarantined with a reason;
-> as of M2.2 — **deterministic matching**: those lines are reconciled against ledger entries by
-> exact amount and by a per-currency tolerance band, with ambiguity refused rather than guessed; and
-> as of M2.3 — **residual classification**: every line that fails to match becomes exactly one
-> `exception`, carrying a class from the closed taxonomy, the rule that assigned it and the version
-> of the rule set, or `unclassified` where the evidence cannot support a class; and as of M2.4 —
-> **the deterministic money path**: given an approved treatment code, an exception is priced into a
-> financial instruction — amount, currency, account, period — or refused with a closed reason,
-> including a refusal for any value that is not a genuine member of the treatment vocabulary.
-> Increment 3.1 was a **gate rather than a feature**: it exists to try to break the containment
-> claim before a model is built on it, and the claim survived.
->
-> As of M3.2 — **the model layer, as a shape rather than a call**: a closed `TreatmentProposal`
-> contract with no numeric type anywhere in its tree, and a provider-neutral port with two adapters
-> behind it. No provider SDK is a dependency, nothing imports an HTTP client, and no request is made.
-> As of M3.3 — **deterministic evidence assembly and the proposal flow**: an exception's
-> evidence is selected by code, rendered as a canonical JSON document, hashed for provenance, and a
-> model's answer is validated against the pack it was actually shown before a proposal is recorded.
-> And as of M3.4 — **the recorded-cassette harness**: every exception in the corpus replays through
-> both adapters offline, from a committed file, with no credential and no socket. Replay is matched
-> on a fingerprint of the whole request, so a changed prompt, schema, ceiling or model produces a
-> loud miss rather than a stale answer, and a cassette fault is never reported as a provider outage.
->
-> Still no live model call, and none from the ledger either: the reference adapter is a **simulated
-> ledger**, in-process, with no socket. The committed cassettes are **synthesised, not captured** — nothing in this
-> repository has ever spoken to a provider — and the file format records which a cassette is so that
-> a later measurement cannot be mistaken for evidence about a model.
->
-> And as of M4.1 — **claim locking and the retry-independent operation identifier**, the first
-> increment of the reliability phase: a residual is claimed with `SELECT … FOR UPDATE SKIP LOCKED`
-> so two workers provably cannot hold one, and an approved resolution acquires a deterministic
-> `operation_id` derived from the exception, the resolution version and a hash of the entire posting
-> instruction — never from an attempt counter, a clock, a hostname or the approver. Attempt one and
-> attempt five produce the identical value; changing any component of the instruction changes it;
-> changing only the approver does not.
->
-> And as of M4.2 — **the transactional outbox and a capability-declaring ledger adapter**. The
-> `adjustment` row and its dispatch intent are written in one transaction, so there is no window in
-> which one is durable and the other is not. A **write-ahead attempt record** is committed in its own
-> transaction before every send, so a crash between the socket write and the response leaves an
-> `in_flight` row with no outcome rather than no evidence at all. The adapter port is closed and
-> three-valued — `Confirmed`, `Rejected`, `Throttled`, `Unknown`, `PartiallyApplied` for a posting;
-> `Found`, `NotFound`, `Indeterminate` for a query — and an adapter that cannot express `Unknown` is
-> refused rather than adapted around.
->
-> **Capability is declared as data, proven by a run, and only then believed.** An adapter publishes
-> what it can do; a conformance suite must demonstrate the two strong claims before either is
-> credited, and an unproven claim is read as `NONE`. The evidence is keyed on the implementation
-> class, so an adapter cannot inherit another's proven capabilities by adopting its name.
->
-> And as of M4.3 — **bounded retry, a dead-letter queue and a replay command**. A transport failure
-> is classified against an enumerated allowlist of four causes — DNS, TCP connect, TLS handshake,
-> connect-timeout before the first byte — and **everything else defaults to `UNKNOWN`**, including a
-> read timeout and a connection reset, which are the ones a conventional retry classifier gets
-> wrong. What is retryable is retried with full-jitter exponential backoff under two independent
-> bounds, an attempt ceiling and a wall-clock budget, and then dead-lettered with an envelope that
-> carries no monetary value at all. `python -m ledger_exception_control_plane.operations replay`
-> sends it again, re-reading the persisted adjustment rather than rebuilding one — and the test that
-> proves it applies exactly one posting reads the count off the simulated ledger rather than out of
-> our own records.
->
-> And as of M5.1 — **the human approval gate**. A principal presents a bearer token; the registry
-> holds only its SHA-256, the comparison is constant-time across every entry, and an empty registry
-> refuses everybody. Three roles with two separations: an operator holds no approval right, and no
-> approval role may work the operations queues. The countersignature rule for an edited treatment and
-> the single use of an approval token are **database constraints**, and the gate's exit criterion is
-> a composite foreign key — an adjustment referencing a *rejection* has nothing to point at, so
-> PostgreSQL refuses the write with no application check involved.
->
-> And as of M4.4 — **`UNKNOWN` semantics, bounded reconciliation and manual recovery**: §13.5's
-> capability branch executed rather than described. Where the adapter can be queried, reconciliation
-> **asks before it sends** — a query is a read that can be wrong for free and a re-send is an
-> irreversible write that cannot. A `NotFound` resolves to `REJECTED` only after N consecutive
-> negatives **and** both declared windows have elapsed; an `Indeterminate` never counts and breaks
-> the run. Where the adapter can only suppress, a re-send is permitted **only** inside the declared
-> idempotency window and a scope proven against the endpoint the original send recorded — an
-> unrecorded endpoint is *unproven*, not *matching*. Where it can do neither, the automatic path
-> stops and an operator takes it.
->
-> **The count that justifies a negative resolution is derived, not stored.** Every query is appended
-> to an append-only table with the windows it was judged against, and "N consecutive" is read back
-> off those rows — because the number deciding whether an ambiguous financial write may be declared
-> un-applied must not be a column somebody can set. `UNKNOWN` is never overwritten in place: the
-> attempt row that saw the ambiguity keeps its outcome forever, `CONFIRMED → anything` is refused,
-> and both rules are database triggers rather than conventions.
->
-> **The operator queue is a control, not a to-do list.** Each item carries the evidence procedure —
-> which artefact to inspect and what would be sufficient for each permitted resolution — an SLA that
-> makes a stale item alertable, and a segregation of duties the database enforces: the principal who
-> approved an adjustment may not judge what happened to it. `RESOLVED_UNVERIFIED` **settles nothing**
-> and is recorded as an abstention, because there is no terminal outcome meaning "a human judged
-> without evidence" and inventing one would be the coercion the design forbids under a new name.
->
-> And as of M5.2 — **audit-event contract v1 across the whole pipeline**. All ten verbs emit, each
-> inside the transaction of the state change it describes, so an event and the change it records
-> commit together or not at all. `scope_granted` is a closed vocabulary rather than free text, and a
-> refused action records the authority it actually **held** — an operator whose approval is blocked
-> because their role may not approve no longer writes a permanent row claiming otherwise. A
-> reconciliation emits twice: what the ledger answered, and what was concluded from it.
-> `provenance()` answers the exit criterion's five questions from one adjustment, keeping what the
-> audit trail attests structurally apart from what the domain tables hold — and **naming what
-> neither holds** rather than rendering it blank.
->
-> And as of M4.5 — **the kill-test gate has run, and it passed.** Fifty-four scenario runs against
-> real PostgreSQL: every scenario in §19, on both branches, against all three adapter capability
-> configurations. The deliberately unsafe baseline in [`naive/`](naive/README.md) commits the same
-> financial effect **twice in five of the seven scenarios**; `main` applies **at most once in all
-> twenty-one cells**; and every one of the forty-two observed cells matches an expectation declared
-> before the run. The table is [below](#chaos-suite-results), generated from what that run recorded
-> at the ledger. A five-mutant battery plants the ways this gate could have been green and
-> worthless — a fault that never fires, a count taken from our own records, a double too forgiving
-> to double-book — and watches each one produce the wrong number.
->
-> **What does not exist:** no console, evaluation, observability or deployment. There is also no wired
-> pipeline: nothing calls ingestion, matching, classification, approval, enqueue and dispatch in
-> sequence — that orchestration is M7's, and 5.2's end-to-end test composes the real service entry
-> points itself rather than observing a running system.
->
-> **An `UNKNOWN` is still never retried.** The retry path cannot see one: an operation whose last
-> outcome is ambiguous, or which carries an unresolved in-flight attempt from a crash mid-send, is
-> excluded by the due-work query itself rather than filtered out after being chosen. What 4.4 added
-> is not a retry — it is a query, a bounded re-send under a proven and unexpired suppression
-> guarantee, or a human.
->
-> **No unconditional duplicate-suppression claim is made.** Sending an operation identifier to a
-> ledger does not make anything idempotent — it is a *request* for idempotent treatment, honoured
-> only if the provider implements one. The transactional outbox is **at-least-once**: it guarantees
-> the intent cannot be lost, never that it is delivered once. A second send is refused for an
-> operation in a *known* terminal state, and refused after an ambiguous one unless the adapter's
-> *verified* capability permits it — where it does not, the automatic path stops rather than
-> guessing. The conditional effectively-once financial effect therefore holds for the reference
-> adapter shipped here, whose `ENFORCES_KEY` and `BY_OPERATION_ID` have a recorded conformance run
-> behind them, and is **withdrawn rather than reworded** for any adapter that has not.
->
-> Everything below that is not listed as existing is a *specification of intended behaviour*.
->
-> No measurement here is a result — the `Measured` table is an obligation the build must produce
-> from a committed script, and it will not appear until it does.
->
-> [`PROJECT_STATUS.md`](PROJECT_STATUS.md) tracks exactly what is built;
-> [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) lists all 31 increments.
+**Portfolio MVP complete — 28 of 31 increments.** Everything the repository can finish by itself is
+finished. The three that remain need something no amount of engineering here can supply.
+
+| Delivered | What it is |
+|---|---|
+| M0–M1 | Tooling baseline, CI, the Compose stack, typed configuration, health endpoints, the complete schema and its migrations, the deterministic fixture corpus |
+| M2 | Ingestion and quarantine, deterministic matching with per-currency tolerance bands, residual classification, the deterministic money path |
+| M3 | The closed proposal contract, the provider-neutral port, deterministic evidence assembly, the recorded-cassette harness |
+| M4 | Claim locking, the retry-independent `operation_id`, the transactional outbox, the capability-declaring adapter, bounded retry, DLQ and replay, the ambiguous-outcome branch — and **4.5, the kill-test gate, which passed** |
+| M5 | The human approval gate with role separation and the supersession interlock; audit-event contract v1 across all ten verbs |
+| M6 | The 250-record golden set, the scorer with its constant-answer baseline, the offline reproduction gate, the three-arm comparison, the human-label packet |
+| M7 | The operations console |
+| M8.1 | Span and metric conventions, redaction, correlation propagation |
+| M10.1 | The gated CI/CD pipeline and the Fly/Neon configuration |
+| M11.1 | This README, and the two documentation checks §11.1 names |
+
+**Not delivered, and each needs the owner rather than more code:**
+
+| | Why it is open |
+|---|---|
+| **9.1 — the `Measured` table** | Superseded in practice by 6.3's comparison for the deterministic arm. The model-facing cells need a live capture, which needs a provider credential. |
+| **11.2 — a screen recording** | The screenshots below are real and committed; a recording is an owner-facing task. |
+| **12.1 — career assets** | Positioning material, not engineering. |
+
+**Three claims this repository deliberately does not make.** They are listed here rather than
+buried, because each is the kind of thing a reader is entitled to assume was quietly skipped:
+
+1. **Live model quality, cost and latency are NOT MEASURED.** No provider SDK is a dependency,
+   nothing under `llm/` imports an HTTP client, and the committed cassettes are *synthesised* — their
+   treatments are assigned round-robin by position. The scorer takes a required `origin` and refuses
+   to describe such a run as a model measurement.
+2. **The human-labelled hold-out slice is not labelled.** Twenty-five records are selected
+   deterministically and the packet is generated; every one still reads `label_source: derived`,
+   and a test asserts that rather than letting it drift (OPEN-15).
+3. **Nothing is deployed.** The pipeline is built, gated and validated against the built image and
+   a real database. The deploy step itself needs cloud credentials.
+
+[`PROJECT_STATUS.md`](PROJECT_STATUS.md) is the authority on exactly what exists;
+[`DECISIONS.md`](DECISIONS.md) on why; [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) lists all
+31 increments with their exit criteria.
 
 ## Documents
 
@@ -1275,6 +1261,12 @@ not built, and [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for what each 
 | [`DECISIONS.md`](DECISIONS.md) | ADR-style decision log, including what is still open |
 | [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | Current milestone, verified results, next tasks |
 | [`CLAUDE.md`](CLAUDE.md) | Engineering rules that bind work in this repository |
+| [`docs/evaluation.md`](docs/evaluation.md) | The golden set, the scorer, the reproduction gate and the human-label packet |
+| [`docs/deployment.md`](docs/deployment.md) | The environment contract by variable name, the manual setup steps and rollback |
+| [`docs/runbook.md`](docs/runbook.md) | Operator procedures: dead letters, recovery, reconciliation, migrations |
+| [`docs/observability.md`](docs/observability.md) | Span and metric conventions, redaction, and the correlation contract |
+| [`naive/README.md`](naive/README.md) | The RED baseline, and which increment closed each omission |
+| [`frontend/README.md`](frontend/README.md) | The console: routes, the token boundary, and what it asks the control plane for |
 
 ## Licence
 

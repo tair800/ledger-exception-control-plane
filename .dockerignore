@@ -17,3 +17,8 @@ docs/
 !.env.example
 docker-compose.yml
 Makefile
+
+# The console is a separate deployable and nothing in the image copies it, but the build context is
+# uploaded whole — so without this line every build ships `node_modules/` and `.next/` to the daemon
+# to be discarded. Slow, and misleading to anyone reading the context size.
+frontend/

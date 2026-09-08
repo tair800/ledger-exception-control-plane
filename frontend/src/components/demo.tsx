@@ -14,7 +14,8 @@
  * count, and a console that computed "no duplicate" from the absence of a second row in *our*
  * tables would be asserting the conclusion rather than observing it.
  *
- * The endpoint is specified and not yet built, so the control is disabled and says why.
+ * The control plane publishes the endpoint; an instance that does not disables the control
+ * and names the missing route rather than failing on click.
  */
 
 import { useEffect, useState } from "react";
@@ -22,30 +23,37 @@ import { useEffect, useState } from "react";
 import { useConsole } from "@/components/console-session";
 import { Badge } from "@/components/primitives";
 import { Failure, Loading } from "@/components/states";
-import { injectCrash, listExceptions } from "@/lib/client";
-import type { ApiFailure, ExceptionSummary } from "@/lib/types";
+import { injectCrash, listFaultTargets } from "@/lib/client";
+import type { ApiFailure, FaultTargetView } from "@/lib/types";
 
 export function DemoControl() {
   const { meta } = useConsole();
-  const [candidates, setCandidates] = useState<ExceptionSummary[] | null>(null);
+  const [candidates, setCandidates] = useState<FaultTargetView[] | null>(null);
   const [selected, setSelected] = useState("");
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [observed, setObserved] = useState<unknown>(null);
 
+  // **Asked, not derived.** An earlier version listed the *undecided* exceptions, reasoning that
+  // an undispatched posting must belong to one. It is the inverse: the injector needs an approved
+  // decision and a priced adjustment, which is exactly what an undecided exception lacks, so every
+  // default selection returned 409 on the first press. Eligibility is a precondition of the control
+  // plane's endpoint, and the control plane is what publishes it.
   useEffect(() => {
-    void listExceptions().then((result) => {
+    void listFaultTargets().then((result) => {
       if (result.ok) {
-        const undecided = result.data.filter((row) => !row.decided);
-        setCandidates(undecided);
-        setSelected(undecided[0]?.id ?? "");
+        setCandidates(result.data);
+        setSelected(result.data[0]?.exception_id ?? "");
       } else {
         setCandidates([]);
       }
     });
   }, []);
 
-  const endpointMissing = !meta.capabilities.demo_inject_crash;
+  // Both halves: an instance publishing one and not the other would leave a control that
+  // cannot be populated, or one that cannot be fired.
+  const endpointMissing =
+    !meta.capabilities.demo_inject_crash || !meta.capabilities.demo_fault_targets;
   const demoMode = meta.demo_mode;
   const enabled = demoMode === true && !endpointMissing && selected.length > 0 && !pending;
 
@@ -99,11 +107,10 @@ export function DemoControl() {
 
         {endpointMissing ? (
           <p className="mt-3 text-ink-dim">
-            The fault-injection endpoint is not implemented on this control plane. The crash
-            scenarios run in the committed chaos suite against three adapter capability
-            configurations; the demo-mode HTTP control is specified and not yet built. The console
-            reads the published endpoint list, so this control enables itself when the route
-            appears — no change here.
+            This control plane publishes no fault-injection endpoint. The crash scenarios still
+            run in the committed chaos suite against three adapter capability configurations; only
+            the demo-mode HTTP control is absent from this instance. The console reads the published
+            endpoint list, so the control enables itself when the route appears — no change here.
           </p>
         ) : null}
       </div>
@@ -111,9 +118,10 @@ export function DemoControl() {
       <div className="rounded-md border border-edge bg-panel px-4 py-3.5">
         <h2 className="font-semibold text-ink">Inject a crash</h2>
         <p className="mt-1 max-w-prose text-ink-dim">
-          Pick an undecided exception. The injected fault is a crash after the socket write and
-          before the response is read — the case where the system cannot know whether the ledger
-          applied the instruction.
+          Pick an approved, priced posting still awaiting its first dispatch — the control plane
+          publishes which those are. The injected fault is a crash after the socket write and before
+          the response is read: the case where the system cannot know whether the ledger applied the
+          instruction.
         </p>
 
         {candidates === null ? (
@@ -134,11 +142,11 @@ export function DemoControl() {
                 className="tabular rounded border border-edge bg-surface px-2 py-1.5 text-ink disabled:opacity-40"
               >
                 {candidates.length === 0 ? (
-                  <option value="">no undecided exception available</option>
+                  <option value="">no posting is awaiting a first dispatch</option>
                 ) : (
                   candidates.map((row) => (
-                    <option key={row.id} value={row.id}>
-                      {row.psp_reference ?? row.id} · {row.classification}
+                    <option key={row.exception_id} value={row.exception_id}>
+                      {row.psp_reference ?? row.exception_id} · {row.classification}
                     </option>
                   ))
                 )}

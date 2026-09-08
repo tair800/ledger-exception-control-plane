@@ -196,6 +196,41 @@ def test_a_refused_action_can_record_that_no_authority_was_held() -> None:
     assert not NO_AUTHORITY.startswith("approval")
 
 
+def test_the_refused_scope_is_decided_by_the_verb_that_was_attempted() -> None:
+    """**The same lie, reintroduced by ADR-061 and caught by a reviewer rather than by a test.**
+
+    The route decided whether a refused decision had *any* authority with ``may_record_decision()``,
+    which was the whole right until 5.1's correction split it in two. An analyst passes that check,
+    so a refused **approve** was about to record ``approval:analyst`` — asserting the one
+    authorisation ADR-056 specifically denies them, permanently, in the field an auditor reads to
+    check exactly that.
+
+    Asserted verb by verb rather than role by role, because the property is that the audit row asks
+    the same question the gate asked. A table keyed on roles would pass while the two drifted apart
+    again, which is how this happened both times.
+    """
+    from ledger_exception_control_plane.db.control import ApprovalDecision
+    from ledger_exception_control_plane.routes import _holds_the_authority_for
+    from ledger_exception_control_plane.security import Principal, Role
+
+    analyst = Principal(id="analyst-a", role=Role.ANALYST)
+    controller = Principal(id="controller-a", role=Role.CONTROLLER)
+    operator = Principal(id="operator-a", role=Role.OPERATOR)
+
+    # An analyst holds the right to reject and no more. The first two are the regression.
+    assert not _holds_the_authority_for(analyst, ApprovalDecision.APPROVED)
+    assert not _holds_the_authority_for(analyst, ApprovalDecision.EDITED)
+    assert _holds_the_authority_for(analyst, ApprovalDecision.REJECTED)
+
+    # A controller holds all three, or the gate itself would be wrong.
+    for decision in ApprovalDecision:
+        assert _holds_the_authority_for(controller, decision), decision
+
+    # An operator works the failure queues and decides nothing.
+    for decision in ApprovalDecision:
+        assert not _holds_the_authority_for(operator, decision), decision
+
+
 # ======================================================================================
 # What must never reach a row
 # ======================================================================================

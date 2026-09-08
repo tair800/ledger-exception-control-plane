@@ -252,8 +252,20 @@ async def record_decision(
             f"role {principal.role.value} may not record an approval decision",
         )
 
-    # **Recording a decision and authorising a posting are different rights.** The check above
-    # admits the analyst because a rejection is a decision they are given; this one refuses them
+    # **The specific verb first.** An analyst holds neither the right to edit nor the right to
+    # authorise, so both of the next two checks would refuse them — but `EDITED` is the narrower
+    # question, and a caller told "may not authorise a posting" after asking to *edit* one has to
+    # work out which of two rules stopped them. Ordering these the other way is what the CI run
+    # after ADR-061 caught: two suites asserting `ROLE_MAY_NOT_EDIT` got `ROLE_MAY_NOT_APPROVE`,
+    # which was a true statement and the wrong answer.
+    if decision is ApprovalDecision.EDITED and not principal.may_edit_treatment():
+        raise ApprovalRefusedError(
+            RefusalReason.ROLE_MAY_NOT_EDIT,
+            f"role {principal.role.value} may request an edit but may not authorise one",
+        )
+
+    # **Recording a decision and authorising a posting are different rights.** The role check at the
+    # top admits the analyst because a rejection is a decision they are given; this one refuses them
     # the two decisions that authorise a financial effect.
     #
     # The single check that used to stand here admitted an analyst to `APPROVED` as well, which
@@ -275,12 +287,6 @@ async def record_decision(
         raise ApprovalRefusedError(
             RefusalReason.TREATMENT_INCONSISTENT_WITH_DECISION,
             "a rejection authorises nothing and must not name a treatment",
-        )
-
-    if decision is ApprovalDecision.EDITED and not principal.may_edit_treatment():
-        raise ApprovalRefusedError(
-            RefusalReason.ROLE_MAY_NOT_EDIT,
-            f"role {principal.role.value} may request an edit but may not authorise one",
         )
 
     exception_row = (

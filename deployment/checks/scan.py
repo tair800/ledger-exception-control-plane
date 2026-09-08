@@ -112,11 +112,20 @@ SECRET_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
 #:
 #: `lecp_local_dev` is the Compose stack's password, on a localhost-bound database holding no real
 #: data (`docker-compose.yml`); `lecp_ci_ephemeral` belongs to a service container that lives for
-#: the length of one job. Neither is reachable from anywhere and neither may be reused by a
-#: deployment — `config.py` and `.env.example` both say so.
+#: the length of one job; `langfuse_local_dev` is the same thing for the optional local Langfuse
+#: stack documented in `docs/observability.md`, which nothing in this repository runs. None is
+#: reachable from anywhere and none may be reused by a deployment — `config.py` and `.env.example`
+#: both say so.
+#:
+#: The list stays short because each entry is a place the scanner has been told to look away. Note
+#: what is *not* here: the same document's `NEXTAUTH_SECRET` has no value to allowlist, because it
+#: is written `${LANGFUSE_NEXTAUTH_SECRET:?...}` — Compose fails loudly rather than starting with a
+#: predictable secret. That is the shape to copy; an allowlist entry is the fallback for a value
+#: that genuinely must be written down.
 PLACEHOLDER_VALUES: Final = (
     "lecp_local_dev",
     "lecp_ci_ephemeral",
+    "langfuse_local_dev",
 )
 
 #: Values nobody protects anything real with. A test needs a password-shaped string, and one of

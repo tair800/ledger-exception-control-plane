@@ -167,6 +167,49 @@ jobs:
       - name: Verify the committed golden set has not drifted
         run: uv run python -m tests.evaluation verify
 
+  # **The console's own gate, and it was missing.** The repository claims two properties about the
+  # frontend that only a test can hold — that it performs no arithmetic on a monetary value, and
+  # that its role table mirrors the server's — and both were asserted by a suite no workflow ran.
+  # A guard nobody runs is a guard on trust. `npm ci` rather than `npm install`, so a lockfile that
+  # drifted from package.json fails here instead of resolving something different from local.
+  console:
+    name: Console lint, type check, test and build
+    runs-on: ubuntu-latest
+    needs: preflight
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies from the lockfile
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check (strict)
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Production build
+        # The build is a check in its own right: the App Router resolves every route here, so a
+        # page that only fails to compile under production settings is caught before a deploy.
+        run: npm run build
+
   # Practical, visible and honest. Five checks, each of which can actually go red for a reason
   # somebody can act on. Deliberately not a security platform: a dashboard nobody reads, or a
   # scanner permanently amber, is worse than five checks that mean something.

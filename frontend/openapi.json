@@ -568,6 +568,44 @@
         "title": "ExceptionSummary",
         "type": "object"
       },
+      "FaultTargetView": {
+        "additionalProperties": false,
+        "description": "One exception the fault-injection control can actually act on.\n\n**The console cannot work this out for itself, and the attempt was a defect.** The queue\nsummary carries `decided` but no dispatch state, so the control filtered to *undecided*\nexceptions \u2014 the exact set for which `inject_fault` has nothing to fault. Every default\nselection returned 409, on the one screen a visitor is most likely to press.\n\nPublishing the eligible set instead of enriching the queue schema is deliberate. \"Has an\napproved, priced posting still awaiting its first dispatch\" is a precondition of a demo-only\nendpoint, not queue information an operator needs, and putting it on `ExceptionSummary` would\nhave spread a demo concern across the production contract to spare one request.\n\nNo monetary amount: choosing which posting to fault does not require one, and a select option\nis not a place to start rendering money.",
+        "properties": {
+          "classification": {
+            "title": "Classification",
+            "type": "string"
+          },
+          "exception_id": {
+            "format": "uuid",
+            "title": "Exception Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "psp_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Psp Reference"
+          }
+        },
+        "required": [
+          "exception_id",
+          "psp_reference",
+          "classification",
+          "operation_id"
+        ],
+        "title": "FaultTargetView",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1053,6 +1091,60 @@
           }
         },
         "summary": "Inject Fault",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/demo/fault-targets": {
+      "get": {
+        "description": "The exceptions :func:`inject_fault` would accept, in the order the seeder creates them.\n\nEligibility is the endpoint's own precondition, read from the outbox rather than guessed:\nan approved decision, a priced adjustment, and an outbox row still `PENDING` with no attempt\nrecorded and no outcome. The last three conditions are what distinguish a posting awaiting its\nfirst dispatch from one already settled, dead-lettered or ambiguous \u2014 and a re-send of any of\nthose is a different demonstration with different correct behaviour.\n\nGuarded exactly as the injector is, and for the same reasons: 404 outside demo mode, so the\nroute's existence is not confirmed to a deployment doing real work, and operator authority,\nbecause the list is only useful to someone permitted to act on it.",
+        "operationId": "list_fault_targets_api_v1_demo_fault_targets_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/FaultTargetView"
+                  },
+                  "title": "Response List Fault Targets Api V1 Demo Fault Targets Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Fault Targets",
         "tags": [
           "control-plane"
         ]

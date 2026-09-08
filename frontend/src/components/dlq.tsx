@@ -9,7 +9,7 @@
  * from the adjustment at replay time, so this screen shows an operator *what failed and why* and
  * never invites them to re-price it. The link back to the exception is how you see the amount.
  *
- * Replay is specified and not yet built. The button is disabled and says so; the console asks the
+ * Replay is shipped. The console still asks the
  * control plane whether the endpoint exists rather than hard-coding the answer, so it enables
  * itself the moment the route is added.
  */

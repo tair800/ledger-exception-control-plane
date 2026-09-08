@@ -26,6 +26,8 @@ export interface ControlPlaneCapabilities {
   dlq_replay: boolean;
   /** `POST /api/v1/demo/exceptions/{exception_id}/inject-fault` — demo-mode fault injection. */
   demo_inject_crash: boolean;
+  /** `GET /api/v1/demo/fault-targets` — which exceptions that injector would accept. */
+  demo_fault_targets: boolean;
   /** `GET /api/v1/me` — the identity of the bearer token's principal, and its role. */
   identity: boolean;
   /** `GET /api/v1/meta` — `{demo_mode, version}`. */
@@ -37,6 +39,7 @@ export interface ControlPlaneCapabilities {
 export const NO_CAPABILITIES: ControlPlaneCapabilities = {
   dlq_replay: false,
   demo_inject_crash: false,
+  demo_fault_targets: false,
   identity: false,
   meta: false,
   request_edit: false,
@@ -46,6 +49,7 @@ export const NO_CAPABILITIES: ControlPlaneCapabilities = {
 const CAPABILITY_PATHS: Record<keyof ControlPlaneCapabilities, string> = {
   dlq_replay: "/api/v1/dlq/{dlq_id}/replay",
   demo_inject_crash: "/api/v1/demo/exceptions/{exception_id}/inject-fault",
+  demo_fault_targets: "/api/v1/demo/fault-targets",
   identity: "/api/v1/me",
   meta: "/api/v1/meta",
   request_edit: "/api/v1/exceptions/{exception_id}/request-edit",

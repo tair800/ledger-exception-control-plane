@@ -399,6 +399,7 @@ def test_pressing_the_control_twice_still_applies_the_money_exactly_once(
     first = client.post(f"/api/v1/demo/exceptions/{pending_target}/inject-fault", headers=OPERATOR)
     assert first.status_code == 200, first.text
     assert first.json()["ledger_applied_count"] == 1
+    assert first.json()["ledger_posts_received"] == 1
 
     second = client.post(f"/api/v1/demo/exceptions/{pending_target}/inject-fault", headers=OPERATOR)
     assert second.status_code == 200, second.text
@@ -407,11 +408,89 @@ def test_pressing_the_control_twice_still_applies_the_money_exactly_once(
     assert report["ledger_applied_count"] == 1, (
         "the same operation was applied more than once; the re-send was not suppressed"
     )
-    assert report["ledger_posts_received"] == 1, (
-        "the request must actually reach the ledger — a count of zero would mean the demonstration "
-        "proved nothing was sent rather than that a duplicate was suppressed"
+    # **Both numbers, because either alone is consistent with the wrong story.** An applied count of
+    # one on its own is what a demonstration that never sent the second request would also report,
+    # and a receipt count on its own says nothing about the books. Two received against one applied
+    # is the only pair that means "it arrived and was suppressed".
+    assert report["ledger_posts_received"] == 2, (
+        "the second request must actually reach the ledger — a count still at one would mean the "
+        "demonstration proved nothing was sent rather than that a duplicate was suppressed"
     )
     assert report["recorded_outcome"] == "unknown"
+
+
+def test_the_published_fault_targets_are_exactly_what_the_injector_accepts(
+    client: TestClient, pending_target: str
+) -> None:
+    """**The regression test for a defect the console could not have avoided.**
+
+    The control listed *undecided* exceptions and the injector refuses every one of them, so the
+    default selection returned 409 on the first press. The console had no way to do better: the
+    queue summary carries ``decided`` and nothing about dispatch state.
+
+    Asserted against :func:`_awaiting_dispatch`'s independent walk of the detail endpoint rather
+    than a hard-coded reference — a literal would pass if the endpoint and the seeder drifted
+    together, while agreeing with the read a human would check the answer against is the property
+    that matters.
+
+    ``pending_target`` is requested for the reason its own docstring gives: the pending posting is
+    consumable, and the first version of this test omitted the fixture and failed against a database
+    an earlier test had already spent. That is the module's documented trap, walked into once more.
+    """
+    published = client.get("/api/v1/demo/fault-targets", headers=OPERATOR)
+    assert published.status_code == 200, published.text
+    rows = published.json()
+
+    walked = {
+        str(row["id"])
+        for row in _exceptions(client)
+        if row["decided"]
+        and isinstance((outbox := _detail(client, str(row["id"]))["outbox"]), dict)
+        and outbox.get("state") == "pending"
+        and outbox.get("attempt_count") == 0
+        and outbox.get("last_outcome") is None
+    }
+
+    assert {row["exception_id"] for row in rows} == walked
+    assert {row["exception_id"] for row in rows} == {pending_target}, (
+        "the published set must be the posting the seeder left awaiting dispatch, and only that one"
+    )
+    for row in rows:
+        assert row["operation_id"], "a target without an operation identifier is not dispatchable"
+        assert set(row) == {"exception_id", "psp_reference", "classification", "operation_id"}
+
+
+def test_no_published_target_is_one_the_old_control_would_have_offered(
+    client: TestClient,
+) -> None:
+    """The two sets are disjoint, which is why the old control failed every time.
+
+    Kept separate from the equality test above because it states the *reason* rather than the
+    correction: an undecided exception has no approval and therefore no priced adjustment, so it
+    can never be a target. If these sets ever overlap, one of the two invariants has moved.
+    """
+    published = {
+        row["exception_id"]
+        for row in client.get("/api/v1/demo/fault-targets", headers=OPERATOR).json()
+    }
+    undecided = {str(row["id"]) for row in _exceptions(client) if not row["decided"]}
+
+    assert undecided, "the seeder must leave undecided exceptions, or this proves nothing"
+    assert published & undecided == set()
+
+
+def test_the_fault_targets_are_absent_outside_demo_mode() -> None:
+    """Guarded exactly as the injector is: 404, so the route's existence is not confirmed."""
+    with TestClient(create_app(_settings(demo_mode=False))) as plain:
+        response = plain.get("/api/v1/demo/fault-targets", headers=OPERATOR)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "not found"
+
+
+def test_the_fault_targets_are_operator_work(client: TestClient) -> None:
+    """The list is only useful to a principal permitted to act on it, so it is refused to others."""
+    assert client.get("/api/v1/demo/fault-targets", headers=CONTROLLER).status_code == 403
 
 
 def _awaiting_dispatch(client: TestClient) -> str:

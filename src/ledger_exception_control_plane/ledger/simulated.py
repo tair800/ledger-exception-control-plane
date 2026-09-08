@@ -128,6 +128,11 @@ class SimulatedLedger:
         #: makes the proof a proof.
         self._application_count: dict[str, int] = {}
         self._posts_received = 0
+        #: Receipts per identifier, which is the number the *demonstration* needs. The instance
+        #: total below is meaningless to a visitor once the adapter is shared across operations,
+        #: and a per-call delta is always one — neither can show a second request arriving and
+        #: being suppressed, which is the entire claim.
+        self._receipt_count: dict[str, int] = {}
         self._capabilities = capabilities or LedgerAdapterCapabilities(
             idempotency=IdempotencyMode.ENFORCES_KEY,
             idempotency_window=dt.timedelta(days=1),
@@ -171,6 +176,7 @@ class SimulatedLedger:
         subsequently believes.
         """
         self._posts_received += 1
+        self._receipt_count[operation_id] = self._receipt_count.get(operation_id, 0) + 1
 
         existing = self._applied.get(operation_id)
         if existing is not None:
@@ -225,9 +231,22 @@ class SimulatedLedger:
         """
         return self._application_count.get(operation_id, 0)
 
+    def posts_received_for(self, operation_id: str) -> int:
+        """How many times ``post`` was called with one identifier, applied or not.
+
+        The companion to :meth:`applied_count`, and the pair is the demonstration: two receipts
+        against one application is a duplicate that arrived and was suppressed, while one against
+        one is a request that was never repeated. Neither number alone distinguishes them.
+
+        Per identifier rather than per instance because the demo endpoint shares one adapter — it
+        must, or there is no memory of the first send to suppress the second against — and an
+        instance-wide total then counts other people's operations.
+        """
+        return self._receipt_count.get(operation_id, 0)
+
     @property
     def posts_received(self) -> int:
-        """How many times ``post`` was called, applied or not.
+        """How many times ``post`` was called across every identifier, applied or not.
 
         Kept separate from :meth:`applied_count` so a test can show the difference: a suppressed
         duplicate is a *received* request that changed nothing, and a test that only counted

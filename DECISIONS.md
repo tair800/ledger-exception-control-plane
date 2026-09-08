@@ -3966,6 +3966,152 @@ not taken here.
 
 ---
 
+## ADR-066 — The demonstration was unreachable, and three documents said so in the wrong direction
+
+**Status:** accepted. **Date:** the final review before portfolio-MVP completion.
+
+Three independent read-only reviewers were run over the repository at `555f0cd`, with every finding
+adversarially verified before it was acted on. Five were confirmed as blocking. All five were the
+same class of defect — **the repository worked and could not be shown to work** — and none of them
+was reachable by any test that existed.
+
+### What was wrong
+
+1. **`make demo` migrated the wrong database.** The target read `demo: test-db-init migrate` and the
+   recipe body seeded `lecp_test` with an explicit DSN. A prerequisite is a separate recipe and does
+   not inherit the recipe's environment, so `migrate` resolved the DSN from `Settings` and applied
+   every migration to `lecp`. On a clean checkout the seeder's first statement then failed against
+   tables that had never been created. The migration now runs inside the recipe.
+
+2. **`make up` served the wrong database.** Even with the seeder fixed, the documented next command
+   starts the Compose stack against `lecp` — which the seeder is *forbidden* to touch, because
+   `assert_target_is_disposable` refuses any name outside `lecp_(test|demo|fixtures)`. A reader
+   following the README reached a correctly-running API serving an empty queue, which is the worst
+   of the three outcomes because nothing looks broken. `make demo-api` was added: same disposable
+   database, demo mode on, demo principals loaded.
+
+3. **Nobody could sign in.** The registry stores SHA-256 hashes, `.env.example` carries placeholder
+   hashes that match nothing, and no document published a token. The console was reachable and
+   unusable. Three demonstration tokens are now published in the `Makefile` beside their hashes, on
+   the same footing as the development database password in `docker-compose.yml`: they authenticate
+   only against a disposable database on localhost with demo mode on, and a deployment supplies its
+   own registry through `LECP_PRINCIPALS`.
+
+4. **The centrepiece control returned 409 on every first press.** `/demo` populated its selector
+   with *undecided* exceptions; the injector requires an approved decision and a priced adjustment,
+   which is exactly what an undecided exception lacks. The two sets are disjoint. The console could
+   not have derived the right answer — `ExceptionSummary` carries `decided` and nothing about
+   dispatch state — so the fix is `GET /api/v1/demo/fault-targets`, guarded identically to the
+   injector, publishing the endpoint's own precondition rather than inviting the client to guess it.
+   **The alternative was to put dispatch state on the production queue contract to serve a
+   demonstration**, and that is the wrong direction.
+
+5. **The README's Status section described a repository from four milestones ago.** It stated *"What
+   does not exist: no console, evaluation, observability or deployment"* — all four exist and are
+   described earlier in the same file — and counted 20 of 31 increments when 28 are delivered. The
+   recruiter-first rewrite at 11.1 added the new argument above and left the old narrative below it.
+   Replaced with an accurate status and the three pending items stated as pending.
+
+### What the pattern was
+
+Every one of the five is a **claim about the repository that no test could fail on**. The build was
+green throughout: the suites assert what the code does, and nothing asserted that the documented way
+to reach it worked, or that the documents agreed with each other. Three guards now close the part of
+that gap which is mechanically checkable:
+
+- `test_every_setting_appears_in_the_deployment_environment_contract` — `docs/deployment.md` already
+  *claimed* a test kept its variable table in step with `Settings`, and none did. By the time a
+  reviewer checked, the table was missing `LECP_DEMO_MODE`, which is the variable that keeps a fault
+  injector off a deployment. A document asserting it is guarded is worse than one that does not,
+  because a reader stops checking.
+- `test_the_demonstration_principals_exist_only_in_the_makefile`. Publishing three working tokens is
+  safe **only** because of what they reach; the failure mode is somebody copying the registry into a
+  deployment config to make staging work, and nothing else would catch it — the hashes match no
+  scanner pattern and the pipeline would go green. Asserted over every tracked file, because the
+  wrong place for them is anywhere that is not the `Makefile`.
+- A `console` job in CI. The repository claims the frontend performs no arithmetic on a monetary
+  value and that its role table mirrors the server's; both are asserted by a suite no workflow ran.
+  A guard nobody runs is a guard on trust.
+
+A fourth was already there and was pointing at one machine: the M2 snapshot's leak guard forbade the
+author's account name as a **literal**, so a public repository carried the exact string the test
+exists to keep out of a published page. It now reads the home directory's name at run time, which
+removes it from the repository and catches whoever is actually building.
+
+The rest — a stale paragraph in `frontend/README.md` asserting the ADR-061 authorisation hole was
+still live, `CLAUDE.md` contradicting itself thirty-seven lines apart, three console modules whose
+docstrings described their backends as unbuilt — was corrected by hand. **The `frontend/README.md`
+paragraph was the one worth being alarmed by**: it told a reader of a public repository that the API
+lets an analyst authorise a ledger posting, which stopped being true at ADR-061.
+
+### One correction that changed behaviour rather than prose
+
+`ledger_posts_received` was computed as a per-call delta and is therefore always 1, because the
+endpoint sends exactly once. Its own docstring promised it would exceed the applied count when a
+duplicate was suppressed, which it could never do. Counted per operation identifier instead, a
+second press reads **2 received against 1 applied** — and that pair is the demonstration. Either
+number alone is consistent with the wrong story: an applied count of one is also what a
+demonstration that never sent the second request would report.
+
+### The finding the verifier dismissed, and the reviewer was right
+
+Every finding in this review was passed to an adversarial verifier told to refute it and to default
+to "not real" when the evidence was thin. That is the correct default and it is why the five
+blocking items are trustworthy. It also threw away a true one.
+
+The architecture reviewer reported that ADR-061 had quietly reintroduced the exact falsehood
+`NO_AUTHORITY` was created to prevent. The refusal path in `routes.py` decided whether a refused
+decision had recorded *any* authority with `principal.may_record_decision()` — which was the whole
+right, until 5.1's correction split recording a decision from authorising a posting. An analyst
+passes that check. So an analyst's refused **approve** would have written `approval:analyst` into
+the append-only trail: a permanent row asserting they acted under the one authorisation ADR-056
+specifically denies them, in the field an auditor reads to check exactly that.
+
+The verifier marked it not-a-defect, presumably reading `approval:<role>` as naming a domain rather
+than a granted right. The row's own comment settles it the other way — *"stamping
+`approval:operator` on that row would assert an authorisation §16 does not grant"* — and the
+argument it makes about the operator now applies word for word to the analyst. The check is now
+`_holds_the_authority_for(principal, decision)`, which asks, verb by verb, the same question the
+gate asked.
+
+**The lesson is about where these two defects came from, not about the verifier.** Both are the same
+shape: a right was split in two, and a *second* place that had been testing the old undivided right
+kept compiling. The refusal-scope test asserts verbs rather than roles for that reason — a table
+keyed on roles would pass while the two definitions drifted apart again, which is how this happened
+twice.
+
+### Two failures on `main`, found by CI rather than by the review
+
+Both were introduced by earlier work in this window and neither was visible to the unit suite.
+
+- **The ADR-061 split refused an analyst's edit with the wrong reason.** The new authorisation check
+  fired before the edit-role check, so an analyst asking to *edit* was told they may not authorise a
+  posting. True, and the wrong answer: two suites asserting `ROLE_MAY_NOT_EDIT` went red. The
+  specific verb is now checked first. The function's own docstring already said a caller gets the
+  most specific reason available; the ordering had stopped honouring it.
+- **The secret scan flagged a development-only password** in the local Langfuse Compose snippet
+  documented in `docs/observability.md`. Added to `PLACEHOLDER_VALUES`, which is a *value* allowlist
+  and not a path one — the distinction is why the scanner is still worth running. Note what did not
+  need an entry: the same snippet's `NEXTAUTH_SECRET` is written `${VAR:?...}`, so Compose fails
+  loudly rather than starting with a predictable secret. That is the shape to copy; an allowlist
+  entry is the fallback for a value that genuinely must be written down.
+
+### What was deliberately not done
+
+- **The demonstration's audit trail is not re-timestamped.** Every seeded event carries a fixed
+  epoch while `compute_amount` carries the database's own `created_at`, so it sorts last in a
+  back-dated history. That is a consequence of a rule worth more than the cosmetic ordering: the
+  module that feeds operation-identifier derivation is banned from touching a clock, and that ban is
+  what makes retry-independence checkable rather than asserted. Reordering would mean exempting it.
+- **The queue endpoint's per-row queries stay.** Two extra round trips per returned row is a real
+  inefficiency at a page size of 200 and no part of any claim this repository makes. Future work.
+- **The console still derives which controls to render from the role name**, though `/api/v1/me`
+  publishes the four booleans the server enforces. The server is the authority either way and
+  refuses regardless of what the console draws; the README's wording was the overclaim, and the
+  console reading the booleans it already receives is a small, separate change.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.

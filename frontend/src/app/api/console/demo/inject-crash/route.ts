@@ -2,30 +2,18 @@
  * Demo mode: crash a dispatch between the socket write and the response, then let the system
  * recover, so a visitor can watch duplicate suppression happen rather than read that it was tested.
  *
- * **The control plane does not implement this yet**, and this handler will not pretend otherwise: it
- * forwards only when the connected instance publishes the path, and otherwise answers `501`. The
- * button in the UI is disabled with the same explanation. Faking the outcome would be the worst
- * possible thing to fake — the whole demonstration is that the *system's* behaviour is trustworthy.
+ * The control plane implements this at `POST /api/v1/demo/exceptions/{exception_id}/inject-fault`,
+ * which answers 404 outside demo mode and refuses any principal without operator authority. This
+ * handler forwards only when the connected instance publishes that path and otherwise answers
+ * `501`, with the button disabled and carrying the same reason. Faking the outcome would be the
+ * worst possible thing to fake — the whole demonstration is that the *system's* behaviour is
+ * trustworthy.
  *
- * The contract this expects, for whoever implements it:
+ * The fault is not a parameter. The control plane injects exactly the one §19.1 names, because a
+ * menu would invite a visitor to hunt for the failure the system handles worst, and because a lost
+ * response after a committed write is the case the entire reliability layer exists for.
  *
- *     POST /api/v1/demo/inject-crash
- *     auth   operator only, and refused outright unless `Settings.demo_mode` is true (§16: "the
- *            demo fault-injection endpoint is disabled unless demo mode is explicitly configured")
- *     body   {"exception_id": "<uuid>", "fault": "crash_after_socket_write"}
- *     202    {
- *              "correlation_id": "...",
- *              "operation_id": "...",
- *              "fault": "crash_after_socket_write",
- *              "attempts": [{"attempt_no": 1, "state": "...", "outcome": "..."}],
- *              "ledger_applied_count": 1,
- *              "outbox_state": "settled",
- *              "duplicate_suppressed": true
- *            }
- *     403    {"detail": {"reason": "demo_mode_disabled"}} | {"reason": "role_may_not_recover"}
- *     409    {"detail": {"reason": "supersession_blocked"}}
- *
- * `ledger_applied_count` is the field that carries the demonstration, and it has to come from the
+ * `ledger_applied_count` is the field that carries the demonstration, and it comes from the
  * simulated ledger's own applied count — §19.1 forbids inferring an outcome from our own records.
  * A console that computed "no duplicate" from the absence of a second row in *our* tables would be
  * asserting the conclusion rather than observing it, which is exactly the defect the chaos suite
@@ -40,11 +28,9 @@ import type { InjectedFaultReport } from "@/lib/types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export const FAULT = "crash_after_socket_write";
-
 export const NOT_IMPLEMENTED_MESSAGE =
-  "This control plane has no fault-injection endpoint. The crash scenarios run in the committed " +
-  "chaos suite; the demo-mode HTTP control is specified in this handler and not yet built.";
+  "This control plane publishes no fault-injection endpoint. The crash scenarios still run in " +
+  "the committed chaos suite; only the demo-mode HTTP control is absent from this instance.";
 
 export async function POST(request: Request) {
   const capabilities = await probeCapabilities();

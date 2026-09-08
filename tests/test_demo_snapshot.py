@@ -197,14 +197,24 @@ def test_rendering_twice_produces_identical_bytes(page: str) -> None:
 
 def test_the_page_embeds_no_timestamp_path_username_or_secret(page: str) -> None:
     """Anything environment-specific would make the committed artifact drift for no real reason —
-    and a DSN on a portfolio page would be worse than drift."""
+    and a DSN on a portfolio page would be worse than drift.
+
+    **The username is derived from the environment rather than written down**, which is both safer
+    and stricter. An earlier version hard-coded the author's account name, so a public repository
+    carried the exact string this test exists to keep out of a published page — and the guard only
+    worked on the one machine. Reading it catches whoever is actually running the build.
+    """
+    home = pathlib.Path.home().name
+    assert home, "no home directory name to check against; this guard would pass over nothing"
+
     forbidden = (
         re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}"),  # ISO timestamp
         re.compile(r"[A-Za-z]:\\\\|[A-Za-z]:/"),  # Windows path
         re.compile(r"/home/|/Users/|C:\\Users"),  # home directory
         re.compile(r"postgres(ql)?://"),  # DSN
         re.compile(r"\b(password|passwd|secret|api[_-]?key|token)\b", re.IGNORECASE),
-        re.compile(r"taira|lecp_local_dev"),  # machine and dev credential
+        re.compile(r"lecp_local_dev"),  # the development credential
+        re.compile(re.escape(home), re.IGNORECASE),  # whoever is building it
     )
     for pattern in forbidden:
         assert not pattern.search(page), f"the page contains {pattern.pattern}"

@@ -52,6 +52,7 @@ from ledger_exception_control_plane.db.control import (
     AuditOutcome,
     AuditTool,
     DeadLetter,
+    DispatchState,
     Evidence,
     ExceptionRecord,
     Outbox,
@@ -271,6 +272,26 @@ class ExceptionDetail(BaseModel):
     audit: list[AuditEventView]
 
 
+def _holds_the_authority_for(principal: Principal, decision: ApprovalDecision) -> bool:
+    """Whether this principal actually held what this decision verb requires.
+
+    Mirrors the gate in :func:`~.operations.approval.record_decision` deliberately, verb by verb,
+    because the audit row must record the authority that was *tested* rather than a weaker one the
+    principal happens to hold. A rejection needs only the right to record a decision; an approval
+    needs the right to authorise a posting; an edit needs both.
+
+    Kept here rather than on :class:`~.security.Principal` because it is a statement about the three
+    HTTP verbs, not about a principal. `Principal` publishes the three rights; which one a route
+    demands is the route's business, and putting a fourth method there would invite a caller to
+    treat it as a fourth right.
+    """
+    if decision is ApprovalDecision.REJECTED:
+        return principal.may_record_decision()
+    if decision is ApprovalDecision.EDITED:
+        return principal.may_edit_treatment() and principal.may_authorise()
+    return principal.may_authorise()
+
+
 async def _audit_refusal(
     request: Request,
     *,
@@ -346,9 +367,16 @@ async def _decide(
             # the one field §11 provides for answering this question. A refusal for some other
             # reason keeps the real scope: there the authority was held and the refusal was about
             # something else.
+            #
+            # **Gated on the authority *this verb* required, and ADR-061 is why.** The test used to
+            # be `may_record_decision()`, which was the whole right until recording a decision and
+            # authorising a posting became two. An analyst passes it, so a refused *approve* was
+            # about to be stamped `approval:analyst` — recording that they acted under an approval
+            # authority they are specifically denied, in the row an auditor reads to check exactly
+            # that. A reviewer found it; the check now asks the same question the gate asked.
             scope_granted=(
                 approval_scope(principal.role.value)
-                if principal.may_record_decision()
+                if _holds_the_authority_for(principal, decision)
                 else NO_AUTHORITY
             ),
             principal=principal,
@@ -1052,10 +1080,90 @@ class InjectedFaultReport(BaseModel):
     recorded_outcome: str
     #: How many times the ledger actually applied this operation. **One**, and that is the point.
     ledger_applied_count: int
-    #: How many requests reached the ledger. Greater than the applied count when a duplicate was
-    #: suppressed, which is how a visitor can tell suppression from a request never arriving.
+    #: How many requests carrying this operation identifier reached the ledger. Greater than the
+    #: applied count once a duplicate has been suppressed, which is how a visitor tells suppression
+    #: apart from a request that never arrived. Press the control twice and this reads 2 against an
+    #: applied count of 1.
     ledger_posts_received: int
     explanation: str
+
+
+class FaultTargetView(BaseModel):
+    """One exception the fault-injection control can actually act on.
+
+    **The console cannot work this out for itself, and the attempt was a defect.** The queue
+    summary carries `decided` but no dispatch state, so the control filtered to *undecided*
+    exceptions — the exact set for which `inject_fault` has nothing to fault. Every default
+    selection returned 409, on the one screen a visitor is most likely to press.
+
+    Publishing the eligible set instead of enriching the queue schema is deliberate. "Has an
+    approved, priced posting still awaiting its first dispatch" is a precondition of a demo-only
+    endpoint, not queue information an operator needs, and putting it on `ExceptionSummary` would
+    have spread a demo concern across the production contract to spare one request.
+
+    No monetary amount: choosing which posting to fault does not require one, and a select option
+    is not a place to start rendering money.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    exception_id: uuid.UUID
+    psp_reference: str | None
+    classification: str
+    operation_id: str
+
+
+@router.get("/demo/fault-targets", response_model=list[FaultTargetView])
+async def list_fault_targets(
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+    session: Annotated[AsyncSession, Depends(_session)],
+) -> list[FaultTargetView]:
+    """The exceptions :func:`inject_fault` would accept, in the order the seeder creates them.
+
+    Eligibility is the endpoint's own precondition, read from the outbox rather than guessed:
+    an approved decision, a priced adjustment, and an outbox row still `PENDING` with no attempt
+    recorded and no outcome. The last three conditions are what distinguish a posting awaiting its
+    first dispatch from one already settled, dead-lettered or ambiguous — and a re-send of any of
+    those is a different demonstration with different correct behaviour.
+
+    Guarded exactly as the injector is, and for the same reasons: 404 outside demo mode, so the
+    route's existence is not confirmed to a deployment doing real work, and operator authority,
+    because the list is only useful to someone permitted to act on it.
+    """
+    settings: Settings = request.app.state.settings
+    if not settings.demo_mode:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    if not principal.may_work_operations_queues():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="the fault-injection control is an operator action",
+        )
+
+    rows = (
+        await session.execute(
+            select(ExceptionRecord, SettlementLine, Adjustment.operation_id)
+            .join(SettlementLine, ExceptionRecord.settlement_line_id == SettlementLine.id)
+            .join(Approval, Approval.exception_id == ExceptionRecord.id)
+            .join(Adjustment, Adjustment.approval_id == Approval.id)
+            .join(Outbox, Outbox.adjustment_id == Adjustment.id)
+            .where(Approval.decision == ApprovalDecision.APPROVED)
+            .where(Outbox.state == DispatchState.PENDING)
+            .where(Outbox.attempt_count == 0)
+            .where(Outbox.last_outcome.is_(None))
+            .order_by(ExceptionRecord.created_at)
+        )
+    ).all()
+
+    return [
+        FaultTargetView(
+            exception_id=record.id,
+            psp_reference=line.psp_reference,
+            classification=str(record.classification),
+            operation_id=operation_id,
+        )
+        for record, line, operation_id in rows
+    ]
 
 
 @router.post("/demo/exceptions/{exception_id}/inject-fault", response_model=InjectedFaultReport)
@@ -1136,7 +1244,6 @@ async def inject_fault(
     # identifier**, so it is still this operation's number and not a running total.
     inner = request.app.state.ledger_adapter
     faulted = FaultInjectingLedger(inner, fault=Fault.COMMIT_THEN_LOSE_RESPONSE)
-    received_before = inner.posts_received
 
     # A refusal here is the dispatcher working, not failing: it declines an operation that is
     # already finished, already in flight, or whose last outcome was ambiguous — §13.5 forbids
@@ -1169,11 +1276,12 @@ async def inject_fault(
         fault=Fault.COMMIT_THEN_LOSE_RESPONSE.value,
         recorded_outcome=outcome_code(result.outcome).value,
         ledger_applied_count=inner.applied_count(adjustment.operation_id),
-        # A delta, not the instance total. The ledger is shared across injections so that
-        # suppression is real, which makes its cumulative counter meaningless to a visitor — while
-        # the difference across this one call is exactly the number that distinguishes a suppressed
-        # duplicate from a request that never arrived.
-        ledger_posts_received=inner.posts_received - received_before,
+        # **Per operation, not per call and not per instance**, and getting this wrong made the
+        # field useless. A per-call delta is always 1, because this endpoint sends exactly once —
+        # so the two numbers were always 1 and 1 and could never show what they were there to show.
+        # The instance total is worse: it counts other operations. Counted per identifier, a second
+        # press reads 2 received against 1 applied, and that difference is the demonstration.
+        ledger_posts_received=inner.posts_received_for(adjustment.operation_id),
         explanation=(
             "The ledger committed the posting and the response was lost, so this system recorded "
             "the outcome as UNKNOWN rather than guessing. It did not retry: an ambiguous "

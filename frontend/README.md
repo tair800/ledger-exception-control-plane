@@ -40,9 +40,20 @@ cp .env.example .env.local        # then edit CONTROL_PLANE_BASE_URL if the API 
 npm run dev                       # http://localhost:3000
 ```
 
-Sign in with a bearer token for a principal configured in the control plane's `PRINCIPALS`
-registry. The console validates it against `GET /api/v1/exceptions` and stores it in an httpOnly
-cookie; it is never held in browser storage and never reaches page scripts.
+Sign in with a bearer token for a principal in the control plane's own registry — configured on the
+API and named in `docs/deployment.md`, never here. The console validates the token against the
+control plane and stores it in an httpOnly cookie; it is never held in browser storage and never
+reaches page scripts.
+
+The variable is deliberately not named in this file. The frontend scan forbids server-side
+configuration names in anything under `frontend/`, and it caught this paragraph: a console
+directory that mentions where the credential table lives is one edit away from a console that
+reads it.
+
+For the local demonstration — `make demo` then `make demo-api` from the repository root — the
+registry is loaded for you and the three tokens are `demo-controller`, `demo-operator` and
+`demo-analyst`. They are published on purpose and are safe only because of what they reach: a
+disposable database on localhost, with demo mode on. A deployment supplies its own registry.
 
 ### Environment variables
 
@@ -88,8 +99,15 @@ A **generated snapshot** of the control plane's own schema, committed so the con
 offline. It is not hand-maintained. Regenerate it from the repository root with:
 
 ```bash
-uv run python -c "import json; from ledger_exception_control_plane.api import create_app; from ledger_exception_control_plane.config import Settings; print(json.dumps(create_app(Settings()).openapi(), indent=2))" > frontend/openapi.json
+uv run python -c "import json, pathlib; from ledger_exception_control_plane.api import create_app; from ledger_exception_control_plane.config import Settings; pathlib.Path('frontend/openapi.json').write_text(json.dumps(create_app(Settings()).openapi(), indent=2, sort_keys=True) + '
+', encoding='utf-8', newline='
+')"
 ```
+
+`sort_keys` and the explicit `newline` are both load-bearing. Without the first, FastAPI's
+insertion order makes every regeneration a several-thousand-line diff of pure churn; without the
+second, a shell redirect on Windows rewrites every line ending and does the same. Neither changes
+the contract, and both hide the one line that did.
 
 `src/test/contract.test.ts` asserts the hand-written types in `src/lib/types.ts` against it, field
 by field. The types are hand-written on purpose: a generator would have produced the same shapes
@@ -112,22 +130,37 @@ Provenance for any exception is two clicks from the queue: click the row, read t
 
 ---
 
-## What this console needs and does not have
+## What this console asks the control plane for
 
-Four endpoints are specified and not implemented on the control plane. The console **asks** the
-control plane which of them exist — it reads the published endpoint list — rather than hard-coding
-the answer, so each control enables itself when its route is built, with no change here. Until then
-the control is disabled and carries the reason.
+Every optional control is gated on the control plane **publishing the route**, read from its own
+endpoint list rather than hard-coded here. That is what lets one console serve instances at
+different versions: a control whose route is absent disables itself and says why, instead of
+failing on click.
 
-| Needed | Used for | Behaviour today |
+| Endpoint | Used for | State |
 | --- | --- | --- |
-| `GET /api/v1/me` | The signed-in principal and role, so a control the role may not use is not rendered. | The console shows a persistent "role unverified" banner, renders the documented controls, and reports a 403 as an authority message. |
-| `GET /api/v1/meta` | `{demo_mode, version}`. | `demo_mode` is reported as **unknown**, distinct from `false`; the fault-injection control stays disabled. `version` is read from `/healthz` instead. |
-| `POST /api/v1/dlq/{dead_letter_id}/replay` | Replay from the console. | The replay button is disabled with an explanation. No replay is ever reported as having happened. |
-| `POST /api/v1/demo/inject-crash` | The live duplicate-suppression demonstration. | The control is disabled outside demo mode and while the endpoint is absent. |
+| `GET /api/v1/me` | The signed-in principal and the authority the server will actually enforce. | **Shipped.** Four capability booleans, not a role name for the console to interpret. |
+| `GET /api/v1/meta` | `{version, demo_mode, ledger_adapter}`. | **Shipped**, and unauthenticated. `demo_mode` is three-valued here — `true`, `false`, or `unknown` when the control plane could not be reached — because a fault control must never enable itself on a guess. |
+| `POST /api/v1/dlq/{dlq_id}/replay` | Replay a dead letter. | **Shipped**, operator only. |
+| `GET /api/v1/demo/fault-targets` | Which postings the injector would accept. | **Shipped**, demo mode only. The console used to derive this and derived it wrongly — see below. |
+| `POST /api/v1/demo/exceptions/{exception_id}/inject-fault` | The duplicate-suppression demonstration. | **Shipped**, demo mode only, operator only. |
+| `POST /api/v1/exceptions/{exception_id}/request-edit` | An analyst asking a controller to revise a treatment. | **Not implemented.** The control is disabled and carries the reason. |
 
 The expected request and response for each is written at the top of the corresponding route handler
 under `src/app/api/console/`.
+
+### A control that guessed, and was wrong
+
+The fault-injection screen used to populate its selector with **undecided** exceptions, reasoning
+that a posting awaiting dispatch must belong to one. It is the exact inverse: the injector needs an
+approved decision and a priced adjustment, which is what an undecided exception is defined by not
+having. Every default selection returned 409 on the first press.
+
+The console could not have derived the right answer — `ExceptionSummary` carries `decided` and
+nothing about dispatch state. So the eligibility rule, which is a precondition of a demo-only
+endpoint, is published by the demo namespace and read rather than inferred. The alternative was to
+put dispatch state on the production queue contract to serve a demonstration, which is the wrong
+direction.
 
 ### Backend observations
 
@@ -139,10 +172,12 @@ Noted while building against the API, and out of scope for this directory to fix
 - `ExceptionDetail` carries no recovery reference. The console matches `adjustment.id` against the
   open recovery queue instead, which cannot distinguish "never in recovery" from "already resolved";
   it says so rather than reporting the stronger of the two.
-- `POST /exceptions/{id}/approve` accepts an **analyst** token: `APPROVAL_ROLES` contains both
-  `ANALYST` and `CONTROLLER`, and only the `edit` route narrows to `EDIT_ROLES`. The documented rule
-  is that an analyst may reject and request an edit but never authorise. The console renders the
-  documented rule and does not offer an analyst the approve control.
+- **Fixed, and recorded here because the console found it.** `POST /exceptions/{id}/approve` once
+  accepted an analyst token — `APPROVAL_ROLES` held both `ANALYST` and `CONTROLLER` — while
+  `ADR-056`'s own table says an analyst may reject but never authorise. Building this console
+  against the documented rule is what surfaced the contradiction. Recording a decision and
+  authorising a posting are now separate rights (`may_record_decision`, `may_authorise`), enforced
+  on the decision path and asserted in both directions; see ADR-061.
 - `ExceptionDetail.proposal`, `approval`, `adjustment` and `outbox` are open string maps rather than
   declared models, so their fields do not appear in the OpenAPI document and the contract test
   cannot check them. Typed models would make the whole detail read verifiable.

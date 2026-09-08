@@ -9,7 +9,7 @@
         golden golden-check eval-verify observability-verify \
         eval-gate eval-gate-update eval-gate-verify label-packet label-packet-verify \
         eval-compare eval-compare-verify \
-        smoke-local smoke-selftest secret-scan deploy-check demo demo-reset
+        smoke-local smoke-selftest secret-scan deploy-check demo demo-api demo-reset
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -371,8 +371,42 @@ deploy-check: secret-scan smoke-selftest ## Everything the deployment lane gates
 # No credential and no model: a stand-in proposer supplies the proposal and says so in its own
 # rationale, which the console renders verbatim.
 
-demo: test-db-init migrate ## Seed the disposable database so the console has real rows to show
+# The demonstration's three principals. **Demo-only, and their tokens are published on purpose.**
+#
+# The registry holds SHA-256 hashes and never a token, so a deployment's registry reveals nothing.
+# But that property made the demonstration unusable: a reader following the README reached a
+# sign-in page with no way to compute a token that any hash matched, and `.env.example` carries
+# placeholder hashes that match nothing at all. A demonstration nobody can sign into is not one.
+#
+# So these three are recorded here beside their hashes, on the same footing as the development
+# PostgreSQL password in `docker-compose.yml`: they authenticate against a *disposable* database
+# on localhost with demo mode on, and a deployment supplies its own registry through
+# LECP_PRINCIPALS and reuses none of this. `docs/deployment.md` says how, and says why.
+DEMO_ANALYST_TOKEN = demo-analyst
+DEMO_CONTROLLER_TOKEN = demo-controller
+DEMO_OPERATOR_TOKEN = demo-operator
+DEMO_PRINCIPALS = {"analyst-a":{"role":"analyst","token_sha256":"cce657f16c436d5357567f215df4e4d5c56f8a19c32916e43562db7905035a04"},"controller-a":{"role":"controller","token_sha256":"5e443ce41f14ce2c5cf6062cad6f583092f065e4901791ae8b63f8667f4bf78d"},"operator-a":{"role":"operator","token_sha256":"9437e87fae95c03d3778f2575bb18ce30e647e51d86a8c37963364e1fc4f374e"}}
+
+# **The migration runs inside the recipe, not as a prerequisite, and that was a real defect.**
+# `demo: test-db-init migrate` reads correctly and is wrong: a prerequisite is a separate recipe
+# and does not inherit this one's environment, so `migrate` resolved the DSN from `Settings` and
+# applied every migration to `lecp` while the line below seeded `lecp_test`. On a clean checkout
+# the seeder's first statement then failed against tables that were never created.
+demo: test-db-init ## Seed the disposable database so the console has real rows to show
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run alembic upgrade head
 	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run python -m ledger_exception_control_plane.demo seed
+
+# Deliberately NOT `make up`. That target starts the Compose stack against the `lecp` database,
+# which the seeder is forbidden to touch — `assert_target_is_disposable` refuses any name outside
+# `lecp_(test|demo|fixtures)`. Pointing the documented demonstration at `make up` left a reader
+# with a correctly-running API serving an empty queue, which is the worst of the three outcomes:
+# nothing looks broken.
+demo-api: ## Serve the seeded demonstration on 127.0.0.1:8000 — demo mode on, demo principals loaded
+	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) \
+	LECP_DEMO_MODE=true \
+	LECP_PRINCIPALS='$(DEMO_PRINCIPALS)' \
+	uv run uvicorn ledger_exception_control_plane.api:create_app \
+	  --factory --host 127.0.0.1 --port 8000
 
 demo-reset: test-db-init ## Empty every table the demonstration writes, leaving the schema in place
 	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) uv run python -c "import asyncio; from ledger_exception_control_plane.config import Settings; from ledger_exception_control_plane.db.engine import create_engine; from ledger_exception_control_plane.demo.seed import reset_demo; from ledger_exception_control_plane.fixtures.loader import assert_target_is_disposable; s=Settings(); assert_target_is_disposable(s); e=create_engine(s); asyncio.run(reset_demo(e))"

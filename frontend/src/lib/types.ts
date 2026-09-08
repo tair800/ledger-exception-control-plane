@@ -299,6 +299,19 @@ export interface ReplayReportView {
  * and `ledger_applied_count` is the simulated ledger's own count for that operation identifier.
  * Rendering only one of them would show a visitor the wrong thing.
  */
+/**
+ * One exception the demo-mode fault injector would accept.
+ *
+ * Carries no monetary amount. Choosing which posting to fault does not need one, and a select
+ * option is not a place to start rendering money.
+ */
+export interface FaultTargetView {
+  exception_id: string;
+  psp_reference: string | null;
+  classification: string;
+  operation_id: string;
+}
+
 export interface InjectedFaultReport {
   adjustment_id: string;
   operation_id: string;
@@ -398,6 +411,7 @@ export interface ConsoleMeta {
   capabilities: {
     dlq_replay: boolean;
     demo_inject_crash: boolean;
+    demo_fault_targets: boolean;
     identity: boolean;
     meta: boolean;
     request_edit: boolean;

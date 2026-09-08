@@ -9,8 +9,14 @@ done. Three items remain and each needs the owner rather than more code — they
 **Where the work stands:** M0–M8 and M10–M11 are delivered. The 4.5 kill-test gate passed and is a
 standing CI step. The operations console, the local demo, the evaluation harness, the observability
 conventions and the gated deployment pipeline all exist and are tested. See ADR-059 for the kill
-test, ADR-061 for a critical authorisation defect found and fixed, and ADR-062 to ADR-065 for the
-console, evaluation, observability and deployment decisions.
+test, ADR-061 for a critical authorisation defect found and fixed, ADR-062 to ADR-065 for the
+console, evaluation, observability and deployment decisions, and **ADR-066 for the final review** —
+three independent reviewers, five confirmed blocking findings, every one of them the same thing: the
+repository worked and could not be shown to work. The documented demo command migrated the wrong
+database, the next command served a different one, no document published a token to sign in with,
+the fault-injection control offered only exceptions its endpoint refuses, and the README's Status
+section described a repository from four milestones earlier. All five are fixed and two new
+guards close the mechanically checkable part of the gap.
 
 **The whole deterministic core exists.** A settlement file is ingested, normalised and either
 accepted or quarantined; its lines are matched deterministically against ledger entries with
@@ -95,8 +101,8 @@ correctly *given* an enforcing ledger rather than that any particular ledger enf
 | **8.1 OpenTelemetry and Langfuse conventions** | **PARTIAL** | Conventions, §18's metrics, redaction and the correlation contract delivered as committed data with 81 tests, degrading to a no-op with no SDK installed. **§18's exit criterion is not discharged**: tracing one exception end to end in Langfuse needs the dependency and a collector. Two GenAI attributes recorded as absent by name, because no model call is made. ADR-064 |
 | 9.1 Measurement harness | **NOT DONE** | Superseded in practice by 6.3's comparison harness for the deterministic arm; the `Measured` table it would publish needs live capture, which is pending owner credentials |
 | **10.1 Fly.io + Neon with safe demo mode** | **DONE (not deployed)** | Gated pipeline, security stage, Fly configs, smoke tests validated against the built image and real PostgreSQL. Migrations as a release command — the image lacked `alembic.ini`, found by running it. **Nothing is deployed.** ADR-065 |
-| **11.1 README, architecture and decision record** | **DONE** | README rewritten recruiter-first; §11.1's link check and banned-phrase check written and passing; 65 ADRs including the unplanned failures with the wrong first hypothesis left in |
-| 11.2 Demo recording | **NOT DONE** | Screenshots captured from the running console; a screen recording is an owner-facing task |
+| **11.1 README, architecture and decision record** | **DONE** | README rewritten recruiter-first; §11.1's link check and banned-phrase check written and passing; 66 ADRs including the unplanned failures with the wrong first hypothesis left in. The final review found the rewrite had left the old milestone narrative below the new argument, with a Status section still saying the console, evaluation, observability and deployment did not exist; replaced (ADR-066) |
+| 11.2 Demo recording | **PARTIAL** | Four screenshots captured from the real running console against the seeded demonstration and committed under `docs/screenshots/` — the queue, one exception in full provenance, the manual-recovery queue, and the fault-injection control after the crash. A screen recording remains an owner-facing task |
 | 12.1 Career assets | **NOT DONE** | Deferred: written once the project genuinely works, which is now — but it is positioning material rather than engineering |
 
 ## What M0.2 delivered

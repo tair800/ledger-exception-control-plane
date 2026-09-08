@@ -15,6 +15,7 @@ import type {
   DecisionVerb,
   ExceptionDetail,
   ExceptionSummary,
+  FaultTargetView,
   RecoveryItemView,
   RecoveryResolution,
   TreatmentCode,
@@ -163,6 +164,16 @@ export function resolveRecovery(
     method: "POST",
     body: JSON.stringify({ resolution, posting_ref: postingRef ?? null }),
   });
+}
+
+/**
+ * Which exceptions the fault injector would accept.
+ *
+ * Asked rather than inferred: eligibility is "approved, priced, and still awaiting a first
+ * dispatch", and the queue summary carries none of those three.
+ */
+export function listFaultTargets(): Promise<Result<FaultTargetView[]>> {
+  return request<FaultTargetView[]>("/api/console/demo/fault-targets");
 }
 
 /** The demo-mode fault injector. Answers 501 until the control plane publishes the endpoint. */

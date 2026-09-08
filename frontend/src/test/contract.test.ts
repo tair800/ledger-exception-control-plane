@@ -153,6 +153,7 @@ describe("capability detection", () => {
     expect(capabilitiesFromDocument(document)).toEqual({
       dlq_replay: true,
       demo_inject_crash: true,
+      demo_fault_targets: true,
       identity: true,
       meta: true,
       request_edit: false,
@@ -164,6 +165,7 @@ describe("capability detection", () => {
       paths: {
         "/api/v1/dlq/{dlq_id}/replay": {},
         "/api/v1/demo/exceptions/{exception_id}/inject-fault": {},
+        "/api/v1/demo/fault-targets": {},
         "/api/v1/me": {},
         "/api/v1/meta": {},
         "/api/v1/exceptions/{exception_id}/request-edit": {},
@@ -172,6 +174,7 @@ describe("capability detection", () => {
     expect(detected).toEqual({
       dlq_replay: true,
       demo_inject_crash: true,
+      demo_fault_targets: true,
       identity: true,
       meta: true,
       request_edit: true,

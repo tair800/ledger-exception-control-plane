@@ -46,10 +46,13 @@ Verified against the code, not assumed, because it is what makes a public link s
 - **No route dispatches a financial write.** `routes.py` imports `operations.approval` and
   `operations.recovery` and not `operations.dispatcher`. Approval records a decision; the posting is
   driven separately.
-- **No fault-injection endpoint exists.** Faults are a test-time port (`ledger/faults.py`), not a
-  route. §16's "the demo fault-injection endpoint is disabled unless demo mode is configured"
-  therefore has nothing to disable yet — and will the moment the console adds one, which is why
-  `demo_mode` is listed as a prerequisite below.
+- **The fault-injection endpoint exists and is disabled by default.** `POST
+  /api/v1/demo/exceptions/{exception_id}/inject-fault` and `GET /api/v1/demo/fault-targets` both
+  answer **404** — not 403 — unless `LECP_DEMO_MODE` is true, and both additionally require operator
+  authority. 404 rather than 403 because 403 confirms the route exists and invites a search for the
+  credential. Neither Fly configuration sets `LECP_DEMO_MODE`, so neither deployment publishes them.
+  This is §16's "the demo fault-injection endpoint is disabled unless demo mode is explicitly
+  configured", discharged.
 - **No webhook endpoint exists.** §16 requires rate limiting on the settlement webhook; there is no
   such route, so there is nothing to rate limit. Ingestion is driven by the CLI.
 - **Every route but `/healthz`, `/readyz` and `/docs` requires a bearer token** resolving to a
@@ -112,9 +115,10 @@ demo_mode: bool = False
 ```
 
 Named `demo_mode`, so the environment variable is `LECP_DEMO_MODE`. The Fly configs in
-`deployment/` set every other `LECP_` name explicitly and will set this one too; it is left out for
-now because `Settings` rejects unknown `LECP_` variables at startup, so declaring it before the
-field exists would break the release rather than prepare for it.
+`deployment/` deliberately **do not set it**. Absent means false, false means the demo routes answer
+404, and a variable that has to be present and correct to keep a fault injector off a deployment is
+one edit away from being wrong. The local demonstration sets it explicitly, through `make demo-api`
+and nowhere else.
 
 ---
 
@@ -135,6 +139,8 @@ Every variable the application reads, derived from `Settings` in
 | `LECP_SERVICE_NAME` | no | Service identity on every log line. |
 | `LECP_READINESS_TIMEOUT_SECONDS` | no | Upper bound on each individual readiness probe. `8.0` deployed, `2.0` locally. |
 | `LECP_CORRELATION_ID_HEADER` | no | Header carrying an inbound correlation id. `X-Request-ID`. |
+| `LECP_DEMO_MODE` | no | Whether this instance is a seeded demonstration. **Leave unset in any deployment.** True publishes the two `/api/v1/demo/` routes, which dispatch a real financial write against whatever ledger adapter is configured. |
+| `LECP_CORS_ALLOW_ORIGINS` | no | Comma-separated browser origins permitted to call the API directly. Empty by default, and empty is correct for the shipped console: it talks only to its own origin and forwards server-side, so no allowlist is needed and none is configured. |
 | `LECP_RETRY_BASE_DELAY_SECONDS` | no | First delay before a re-send, in seconds. |
 | `LECP_RETRY_MULTIPLIER` | no | Growth factor per attempt. |
 | `LECP_RETRY_CAP_SECONDS` | no | Ceiling on the computed delay, before jitter. |
