@@ -422,15 +422,27 @@ def test_a_file_that_is_not_really_a_workbook_is_refused_rather_than_crashing(
         read_import(path, build_packet())
 
 
-def test_the_committed_golden_set_still_claims_no_human_label() -> None:
-    """The gap this module exists to make closable is still open, and says so.
+def test_the_committed_golden_set_carries_the_confirmed_hold_out_and_nothing_more() -> None:
+    """The gap this module existed to make closable is closed, and the closure is bounded.
 
-    OPEN-15 is discharged by a person confirming the slice, not by shipping the mechanism to do it.
-    Asserting the state here keeps the tooling and the claim honest about each other.
+    OPEN-15 was discharged by a person confirming the slice, not by shipping the mechanism — and
+    the distinction survives here: what is asserted is that the *committed confirmations* and the
+    *human-labelled records* are the same 25, so the artefact can never claim more provenance than
+    the confirmation file supports.
     """
+    from tests.evaluation.confirmations import load_confirmations
+
     golden = load_golden_set()
-    assert golden.human_labelled == ()
-    assert all(record.label_source == LabelSource.DERIVED.value for record in golden.records)
+    confirmed = load_confirmations()
+    assert confirmed is not None, "the committed confirmations are missing"
+
+    assert len(golden.human_labelled) == len(confirmed) == 25
+    assert {record.exception_id for record in golden.human_labelled} == set(confirmed.confirmations)
+    assert all(record.label_source == LabelSource.HUMAN.value for record in golden.human_labelled)
+
+    # And the confirmations were formed against this slice, not another one.
+    assert confirmed.hold_out_sha256 == build_packet().digest
+    assert confirmed.hold_out_version == HOLD_OUT_VERSION
 
 
 def _write_csv(path: pathlib.Path, rows: list[dict[str, str]]) -> None:

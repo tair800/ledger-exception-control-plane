@@ -81,6 +81,7 @@ from ledger_exception_control_plane.matching import (
     CandidateLine,
     match,
 )
+from tests.evaluation.confirmations import apply_confirmations, load_confirmations
 from tests.evaluation.labels import LabelRule, LabelSource, label_for
 
 __all__ = [
@@ -103,7 +104,13 @@ __all__ = [
 #: identifier, so every one of the 250 keys is different from version 1's. That is a bigger change
 #: than adding a field, and a version that only tracked the field list would have let a stale file
 #: load with keys that join to nothing.
-GOLDEN_SCHEMA_VERSION: Final = "2"
+#: Bumped to 3 when the hold-out slice acquired human confirmations: the record grew
+#: ``human_confirmed_by`` and ``human_confirmed_on``, and 25 records changed
+#: ``label_source`` from ``derived`` to ``human``. No ``expected_treatment`` moved —
+#: the confirmations agreed with the derivation on all 25 — so nothing that grades a
+#: proposal against this set changes. A version bump anyway, because the artefact's
+#: shape did.
+GOLDEN_SCHEMA_VERSION: Final = "3"
 
 #: The committed artefact. JSONL because it is append-friendly, line-diffable in review, and the
 #: format §20 names.
@@ -172,6 +179,15 @@ class GoldenRecord:
     label_why: str
     escalation_is_correct: bool
     held_out: bool
+
+    #: Who confirmed this label, and when. Empty for a derived label — which is every record
+    #: outside the hold-out slice, and every record at all until a person labelled one.
+    #:
+    #: Two fields rather than one composite, because "who" and "when" are asked separately by an
+    #: auditor and joining them into a string would make both unqueryable. Empty strings rather
+    #: than ``None`` so the artefact's every column has one type.
+    human_confirmed_by: str = ""
+    human_confirmed_on: str = ""
 
     def as_json(self) -> str:
         return json.dumps(dataclasses.asdict(self), sort_keys=True, separators=(",", ":"))
@@ -303,12 +319,21 @@ def build_golden_set(
     # Sorted by exception id so the file's order is a property of the data rather than of the
     # order two loops happened to run in — which is what makes the hold-out stride stable and the
     # drift check meaningful.
+    # The committed human confirmations, read once. `None` when nobody has labelled the slice,
+    # which is what every record looked like before the hold-out came back.
+    confirmed = load_confirmations()
+
     records: list[GoldenRecord] = []
     for index, decision in enumerate(sorted(decisions, key=lambda d: str(d.line_id))):
         movement = by_movement[decision.line_id]
         line = line_of[decision.line_id]
         originating = _originating_period(movement, movements)
         label = label_for(decision.classification, originating_period=originating)
+
+        # A confirmation that agrees upgrades the label's *provenance* and nothing else. One that
+        # disagrees raises out of this loop — see `confirmations.py` for why the generator is not
+        # allowed to decide which of the two is right.
+        confirmation = apply_confirmations(str(decision.line_id), label.treatment.value, confirmed)
         records.append(
             GoldenRecord(
                 exception_id=str(decision.line_id),
@@ -323,10 +348,12 @@ def build_golden_set(
                 has_merchant_reference=line.merchant_reference is not None,
                 expected_treatment=label.treatment.value,
                 label_rule=label.rule.value,
-                label_source=label.source.value,
+                label_source=(LabelSource.HUMAN.value if confirmation else label.source.value),
                 label_why=label.why,
                 escalation_is_correct=label.escalation_is_correct,
                 held_out=index % HOLD_OUT_EVERY == 0,
+                human_confirmed_by=confirmation.confirmed_by if confirmation else "",
+                human_confirmed_on=confirmation.confirmed_on if confirmation else "",
             )
         )
 

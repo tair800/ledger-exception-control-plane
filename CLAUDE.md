@@ -96,7 +96,8 @@ recorded.
 
 **What is pending owner action, and must be reported as pending:** live model quality, cost and
 latency are **NOT MEASURED** (no credential, and the committed cassettes are synthesised); the
-human-labelled hold-out slice is **PENDING OWNER LABEL REVIEW** (OPEN-15); and live deployment is
+human-labelled hold-out slice is **CONFIRMED** — 25 records labelled by the owner on 2026-09-09,
+agreeing with the derived table on all 25, so OPEN-15 is closed (ADR-068); and live deployment is
 **PENDING OWNER CLOUD CREDENTIALS** (nothing is deployed).
 
 **What is genuinely absent:** no orchestration wires the stages into a running service — the demo

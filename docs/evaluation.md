@@ -141,9 +141,27 @@ raises, `is_evaluation_evidence` is `False`, and the CLI exits non-zero. It must
 human, counted in any figure, or written into the golden set.
 
 Applying a confirmed import to the golden set is a **separate, reviewed change**: the label source
-becomes `human`, the record carries who confirmed it and when, and
-`test_no_record_claims_a_human_label_because_no_human_has_confirmed_one` is updated in the same
-commit that makes it false.
+becomes `human`, the record carries who confirmed it and when, and the test asserting nobody has
+confirmed one is updated in the same commit that makes it false.
+
+**That change has now happened.** The owner labelled all 25 on 2026-09-09 and every label agreed
+with the derived one. The confirmations are committed at `human-label-packet/confirmed.jsonl`, the
+generator reads them, and 25 records carry `label_source: human` with an attribution. The test that
+pinned the gap now pins its closure — that *exactly* the held-out records are human and the other
+225 are untouched.
+
+Three things about how that was applied are deliberate:
+
+- **An agreeing confirmation is applied; a disagreeing one is refused.** `confirmations.py` raises
+  rather than adopting a label that differs from the derived one. Agreement changes only
+  provenance; disagreement would change the answer key, and one spreadsheet may not do that
+  silently. The refusal branch never fired here, so it is tested directly.
+- **No `expected_treatment` moved**, and the evaluation gate is what proves it: re-running it
+  reported exactly two differences, the schema version and the set's hash, and no scorer figure.
+- **The result is four independent judgements, not 25.** The derived label is a pure function of
+  the classification across all 250 records, so the slice is four distinct questions repeated 3, 3,
+  10 and 9 times. It establishes the label table is right about its four classes. Quoting it as
+  "25/25" without that qualifier overstates its resolution roughly six-fold.
 
 ---
 

@@ -359,20 +359,41 @@ def test_the_hold_out_slice_is_stable_and_spread_across_the_classifications() ->
     assert len(classes) >= 2, f"the hold-out slice is one classification: {classes}"
 
 
-def test_no_record_claims_a_human_label_because_no_human_has_confirmed_one() -> None:
-    """**The honest state of §20's hold-out requirement, asserted rather than described.**
+def test_exactly_the_hold_out_slice_claims_a_human_label_and_says_who_confirmed_it() -> None:
+    """**The day the gap closed, asserted rather than described.**
 
-    The slice is selected, the mechanism to carry a human label exists, and nobody has confirmed
-    one. Marking these ``human`` without a person would be inventing provenance, which is worse
-    than the gap it would hide — so this test pins the gap, and it is the test that should fail on
-    the day the owner confirms the slice.
+    This test used to say the opposite. It read
+    ``test_no_record_claims_a_human_label_because_no_human_has_confirmed_one`` and pinned an open
+    gap: the slice was selected, the mechanism existed, and nobody had confirmed anything, so
+    marking a record ``human`` would have been inventing provenance. `docs/evaluation.md` §5 named
+    this as the test to update in the same commit that makes it false. This is that commit.
+
+    What it pins now is narrower and harder: **exactly** the held-out records are human, every one
+    of them names who confirmed it and when, and no record outside the slice has quietly acquired a
+    human label. The last clause matters most — 225 records were never sent to anybody, and a
+    generator bug that marked them confirmed would be a claim about a person that is not true.
     """
     golden = load_golden_set()
-    assert golden.human_labelled == (), (
-        "a record claims a human label; if a person really confirmed it, update this test and say "
-        "who and when"
+    human = golden.human_labelled
+
+    assert len(human) == 25
+    assert {record.exception_id for record in human} == {
+        record.exception_id for record in golden.hold_out
+    }, "the human labels and the hold-out slice must be the same set of records"
+
+    for record in human:
+        assert record.held_out
+        assert record.human_confirmed_by, f"{record.exception_id} claims human with no confirmer"
+        assert record.human_confirmed_on, f"{record.exception_id} claims human with no date"
+
+    outside = [r for r in golden.records if not r.held_out]
+    assert len(outside) == 225
+    assert all(record.label_source == LabelSource.DERIVED.value for record in outside), (
+        "a record nobody was asked about claims a human label"
     )
-    assert all(record.label_source == LabelSource.DERIVED.value for record in golden.records)
+    assert all(
+        not record.human_confirmed_by and not record.human_confirmed_on for record in outside
+    ), "a derived record carries an attribution"
 
 
 def test_the_label_distribution_is_imbalanced_and_the_set_says_so() -> None:

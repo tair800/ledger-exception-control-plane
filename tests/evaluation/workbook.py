@@ -28,6 +28,8 @@ from __future__ import annotations
 import datetime as dt
 import io
 import pathlib
+import re
+import zipfile
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
@@ -60,6 +62,19 @@ __all__ = [
 ARTIFACT_DIR: Final = pathlib.Path(__file__).resolve().parents[2] / "artifacts"
 WORKBOOK_PATH: Final = ARTIFACT_DIR / "human-label-packet.xlsx"
 WORKBOOK_JSONL_PATH: Final = ARTIFACT_DIR / "human-label-packet.jsonl"
+
+#: The one field in the saved container that still carries a wall clock. openpyxl writes it as
+#: it saves, after any value set on the document properties, so it is rewritten afterwards.
+_MODIFIED: Final = re.compile(rb"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)")
+
+#: The document timestamp written into the workbook, fixed rather than read from the clock. See
+#: :func:`render_workbook` for why.
+_STAMP: Final = dt.datetime(2026, 1, 1, tzinfo=dt.UTC).replace(tzinfo=None)
+
+#: The document author. The repository generates this file; naming a person would attribute it to
+#: somebody who did not write it, and leaving openpyxl's default would put the library's name in a
+#: field an auditor reads as provenance.
+_AUTHORED_BY: Final = "ledger-exception-control-plane"
 
 RECORDS_SHEET: Final = "HOLD_OUT"
 GUIDE_SHEET: Final = "LABEL_GUIDE"
@@ -336,9 +351,62 @@ def render_workbook(packet: Packet) -> bytes:
 
     _write_guide(book, packet)
 
+    # **Pinned, or this artefact is dirty in git every time anybody regenerates it.**
+    # openpyxl stamps `docProps/core.xml` with the wall clock, which made the committed workbook
+    # differ by one byte from an identical regeneration — the whole file the same except a
+    # timestamp nobody reads. Every other generated artefact here reproduces byte-identically and
+    # is drift-checked on that basis; a binary that cannot be is a permanent false positive.
+    #
+    # The instant is the packet's own hold-out epoch rather than "now", for the same reason the
+    # demonstration is dated rather than live: a fixed artefact can be described in a document.
+    book.properties.created = _STAMP
+    book.properties.modified = _STAMP
+    book.properties.creator = _AUTHORED_BY
+    book.properties.lastModifiedBy = _AUTHORED_BY
+
     buffer = io.BytesIO()
     book.save(buffer)
-    return buffer.getvalue()
+    return _normalise(buffer.getvalue())
+
+
+def _normalise(payload: bytes) -> bytes:
+    """Rebuild the container so the same packet always produces the same bytes.
+
+    **Setting the document properties was not enough, and finding that out is the point.** A first
+    attempt pinned `created` and `modified` and looked deterministic — because the check ran twice
+    inside one second. Two sources survived: openpyxl overwrites `dcterms:modified` with the wall
+    clock as it saves, and every zip member carries its own modification time.
+
+    So the archive is rewritten: one fixed timestamp on every entry, in the original order, with
+    `dcterms:modified` rewritten to match. Nothing about the spreadsheet changes — this touches
+    only the fields that record when it was written.
+
+    Why bother for a file nobody diffs: every other generated artefact in this repository
+    regenerates byte-identically and is drift-checked on that basis. One that cannot be is a
+    permanent dirty file in `git status`, and a permanent dirty file is one nobody looks at.
+    """
+    stamp = (_STAMP.year, _STAMP.month, _STAMP.day, _STAMP.hour, _STAMP.minute, _STAMP.second)
+    written = _STAMP.strftime("%Y-%m-%dT%H:%M:%SZ").encode("utf-8")
+
+    source = zipfile.ZipFile(io.BytesIO(payload))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target:
+        for entry in source.infolist():
+            content = source.read(entry.filename)
+            if entry.filename == "docProps/core.xml":
+                # A callable replacement rather than a backreference: pattern and substitution
+                # are both bytes here, and an escaped group reference inside a bytes literal is
+                # easy to get subtly wrong — the first attempt wrote two control characters into
+                # the XML and produced a workbook Excel refused to open. A lambda cannot
+                # misquote itself.
+                content = _MODIFIED.sub(
+                    lambda match: match.group(1) + written + match.group(2), content
+                )
+            fixed = zipfile.ZipInfo(entry.filename, date_time=stamp)
+            fixed.compress_type = entry.compress_type
+            fixed.external_attr = entry.external_attr
+            target.writestr(fixed, content)
+    return out.getvalue()
 
 
 def _write_guide(book: Any, packet: Packet) -> None:

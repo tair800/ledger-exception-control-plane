@@ -8,8 +8,8 @@
     "instances": 200,
     "profile": "canonical",
     "records": 13,
-    "schema_version": "2",
-    "sha256": "8a72240cd6c1aa37121e5197b89359881e6848e512d0e48493f355d08249ed94"
+    "schema_version": "3",
+    "sha256": "0b910835ebddad0edae2992ff704c095392ac86a67435d847959d23c84bb4ee9"
   },
   "providers": {
     "anthropic": {

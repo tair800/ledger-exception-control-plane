@@ -520,6 +520,33 @@ def test_a_workbook_without_the_records_sheet_is_refused(tmp_path: pathlib.Path)
         read_import(_write(tmp_path, buffer.getvalue()))
 
 
+def test_the_workbook_regenerates_byte_identically_across_time(packet: Any) -> None:
+    """**Every generated artefact here reproduces byte-for-byte, and this one nearly did not.**
+
+    The first version pinned the document properties and looked deterministic, because the check
+    ran twice inside one second. Two clocks survived it: openpyxl rewrites `dcterms:modified` as it
+    saves, and every zip member carries its own modification time. A file that changes on every
+    regeneration is permanently dirty in `git status`, and a permanently dirty file is one nobody
+    reads the diff of.
+
+    The sleep is the test. Without it this passes against a workbook that is not deterministic at
+    all — which is exactly what happened.
+    """
+    import time
+
+    first = render_workbook(packet)
+    time.sleep(2)
+    second = render_workbook(packet)
+
+    assert first == second, "the workbook is not byte-deterministic across a change of clock"
+
+    # And it is still a workbook, not just a stable pile of bytes.
+    reopened = load_workbook(io.BytesIO(first))
+    assert reopened.sheetnames == [RECORDS_SHEET, GUIDE_SHEET]
+    assert len(_data_rows(reopened[RECORDS_SHEET])) == 25
+    assert len(list(reopened[RECORDS_SHEET].data_validations.dataValidation)) == 1
+
+
 def test_the_committed_artifacts_match_their_generator(packet: Any) -> None:
     """`make label-packet` is the only way these files change, and drift is caught here.
 

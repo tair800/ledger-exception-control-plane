@@ -4196,6 +4196,71 @@ labelled when a person labels it.
 
 ---
 
+## ADR-068 — The hold-out came back, and what 25 of 25 does and does not establish
+
+**Status:** accepted. **Date:** 2026-09-09, on the owner's return of the labelled packet.
+
+The owner labelled all 25 held-out records and returned the workbook. It validated against hold-out
+version 1 and digest `cfa62715…`, carried an attribution on every row, and was not marked synthetic.
+**Every label agreed with the derived one.** OPEN-15 closes.
+
+### What was applied, and what could not have been
+
+The confirmations are committed at `tests/golden/human-label-packet/confirmed.jsonl` — normalised
+text, so the diff is readable — and the generator reads them. Twenty-five records now carry
+`label_source: human` with `human_confirmed_by` and `human_confirmed_on`. The golden set's schema
+version moves 2 → 3 because the record grew two fields.
+
+**No `expected_treatment` moved, and the evaluation gate is the proof rather than the claim.**
+Re-running it after the change reported exactly two differences — the schema version and the set's
+hash — and no scorer figure at all. A change that had altered an answer would have moved
+`agreeing`, and it did not. That is a better check than reading the diff, because it is the same
+gate that runs on every build.
+
+### The rule for applying a confirmation, and why it is asymmetric
+
+`confirmations.py` applies an agreeing label and **raises on a disagreeing one**.
+
+Agreement changes only provenance: the treatment is what it already was, and now a person stands
+behind it. Disagreement would change the **answer key**, silently, on the authority of one
+spreadsheet — and the hold-out exists to catch a wrong label table, so the correct response to it
+catching one is an argument between a person and `labels.py`, resolved in a reviewed commit. A
+generator that adopted whichever answer arrived last would be deciding, and deciding is the thing
+it must not do.
+
+That branch never fired, which is exactly why it is tested directly: a refusal nobody has seen work
+is a refusal nobody has seen work, and the one time it matters will be the time somebody's
+judgement contradicts the rules.
+
+### What 25 of 25 establishes — stated before anybody quotes it
+
+**Four independent judgements, not twenty-five.** The derived label is a pure function of the
+classification, across all 250 records and not merely this slice: `chargeback_reversal → rebook`
+(24/24), `cross_period_refund → accrue` (12/12), `fee_split → escalate` (72/72), `unclassified →
+escalate` (142/142). The slice contains those four questions repeated 3, 3, 10 and 9 times.
+
+So the honest statement is: **the owner confirmed the label table's four class rules, and disagreed
+with none of them.** An agreement rate of "25/25" quoted without that qualifier overstates the
+measurement's resolution by roughly six-fold, and this ADR exists partly so that nobody quotes it
+that way later — including the author of this repository.
+
+Three of the twenty-five are weaker still, and the owner said so unprompted. On the
+`chargeback_reversal` rows the settlement period and the originating period coincide, so `rebook`
+and `accrue` would post to the same period and the evidence cannot separate them; the returned
+workbook records that in `HUMAN_NOTE` on all three. An adversarial audit of the packet had
+identified the same ambiguity before the packet was issued, which is the reason the guide asked for
+it to be noted rather than offering a tie-break rule — a rule would have been the answer for those
+rows.
+
+### What this does not establish
+
+Nothing about a model. The hold-out tests the *label table* that model answers are graded against.
+Live model quality, cost and latency remain **NOT MEASURED**, and confirming the labels does not
+move that: the committed cassettes are still synthesised, and the scorer still refuses to call a
+run over them a model measurement.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.
@@ -4298,7 +4363,14 @@ degrade correctly when a capability is absent, and the results table states in i
 suppression under `ENFORCES_KEY` is performed by a simulated ledger written here. What remains is
 purely the vendor half: establishing a real provider's three declarations from its documentation.
 
-## OPEN-15 — Human confirmation of the golden set's hold-out slice
+## OPEN-15 — Human confirmation of the golden set's hold-out slice — **CLOSED 2026-09-09**
+
+**Resolved.** The owner labelled all 25 held-out records and confirmed both judgements below; every
+label agreed with the derived one, and the golden set now carries `label_source: human` on exactly
+those records with an attribution each. See **ADR-068**, which also records what the result does not
+establish: the derived label is a pure function of the classification, so this is four independent
+judgements rather than twenty-five. The original entry is kept below unedited, because a closed
+question is more useful with the question still legible.
 
 **Must decide:** whether the two priceable label rules are accounting-correct, and whether the 25
 held-out records carry the right treatment. Both are recorded in `tests/evaluation/labels.py` with a

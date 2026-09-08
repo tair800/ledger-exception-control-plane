@@ -594,9 +594,12 @@ Stated plainly, because a reviewer will find them anyway.
   proposal flow is exercised through injected fakes and recorded cassettes, and the committed
   cassettes are synthesised rather than captured. **Live model quality, cost and latency are not
   measured.**
-- **The human-labelled hold-out slice is not labelled yet.** 25 records are selected
-  deterministically and the packet is generated; every one still says `label_source: derived`,
-  because no person has confirmed one. A test asserts that rather than letting it drift.
+- **The human-labelled hold-out is confirmed, and narrower than "25 records" sounds.** All 25 were
+  labelled by the owner and agree with the derived table on every record. But the derived label is a
+  pure function of the classification across all 250 records, so the slice is four distinct
+  questions repeated — **four independent judgements, not 25**. It establishes that the label table
+  is right about its four classes; it is not a 25-sample accuracy measurement and is not reported
+  as one.
 - **Not deployed.** Everything up to the deploy step is built and validated; the deploy itself
   needs cloud credentials.
 - **No orchestration.** Nothing calls the stages in sequence as a running service; the demo seeder
@@ -1242,9 +1245,10 @@ buried, because each is the kind of thing a reader is entitled to assume was qui
    nothing under `llm/` imports an HTTP client, and the committed cassettes are *synthesised* — their
    treatments are assigned round-robin by position. The scorer takes a required `origin` and refuses
    to describe such a run as a model measurement.
-2. **The human-labelled hold-out slice is not labelled.** Twenty-five records are selected
-   deterministically and the packet is generated; every one still reads `label_source: derived`,
-   and a test asserts that rather than letting it drift (OPEN-15).
+2. **The human-labelled hold-out is confirmed** — 25 records labelled by the owner on 2026-09-09,
+   agreeing with the derived table on all 25, committed with an attribution per record. No
+   `expected_treatment` moved. What it establishes is four independent judgements rather than 25,
+   because the derived label is a pure function of the classification (ADR-067).
 3. **Nothing is deployed.** The pipeline is built, gated and validated against the built image and
    a real database. The deploy step itself needs cloud credentials.
 
