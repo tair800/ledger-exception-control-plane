@@ -397,7 +397,7 @@ endpoint is what publishes it.
 uv sync --frozen              # exact pinned dependencies
 make db-up                    # PostgreSQL only
 make migrate                  # apply migrations to head
-uv run pytest                 # 1723 unit tests, no Docker needed for these
+uv run pytest                 # 1725 unit tests, no Docker needed for these
 make gate                     # format, lint, strict types, unit tests — CI order
 ```
 
@@ -534,7 +534,7 @@ live latency are **NOT MEASURED** and are reported that way in the three-arm tab
 
 | Layer | What it covers |
 |---|---|
-| Unit | 1723 tests, no Docker: matching, tolerance, amount computation, key derivation, rounding, schema guards |
+| Unit | 1725 tests, no Docker: matching, tolerance, amount computation, key derivation, rounding, schema guards |
 | Property | Amount invariants — sign, currency, quantisation, determinism |
 | Schema guard | No numeric type, no amount-like field name, no extra fields in the model response schema |
 | Boundary guard | The calculator must not import the proposal model; `src/` must not import `naive/` |
