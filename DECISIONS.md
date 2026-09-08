@@ -4112,6 +4112,90 @@ Both were introduced by earlier work in this window and neither was visible to t
 
 ---
 
+## ADR-067 — The owner-facing hold-out workbook, and the limit on what the slice can measure
+
+**Status:** accepted. **Date:** the first of the owner-assisted external validations.
+
+§20's hold-out is labelled by a person, and a person labelling twenty-five rows opens a spreadsheet.
+The packet already existed as CSV, JSONL and a README (ADR-060); this adds the workbook the owner
+actually receives, at `artifacts/human-label-packet.xlsx`, with a `LABEL_GUIDE` sheet beside the
+records.
+
+### What was added, and the one property that makes it safe
+
+The workbook restates each record in prose — a one-line evidence summary, what the reference
+evidence supports, what is known about a counterpart, and what is being asked. Twenty-five rows of
+bare field values ask a reviewer to do reading a generator can do for them.
+
+**Prose is also exactly where an answer leaks.** One sentence mentioning what the label rule
+concluded and the hold-out is worthless. So the guarantee is not a word filter, which a paraphrase
+defeats: every derived column is a **pure function of the permitted view**, and
+`test_every_derived_cell_is_recomputable_from_the_permitted_view` rebuilds each cell from the nine
+allowlisted fields and asserts equality. A derivation that consulted the golden record, the label,
+the rule or the corpus would produce a different string and the test would fail. A second test bans
+the phrasings that would turn a restatement into a conclusion — a function *could* map permitted
+facts to "so this should be rebook", and that would be derived and still fatal.
+
+Because every column is a function of the permitted view, the workbook adds no facts. So
+`hold_out_sha256` is unchanged, `HOLD_OUT_VERSION` stays at `1`, and a label formed against the CSV
+and one formed against the workbook are labels about the same slice. The version is for a change to
+*what a labeller is shown*, and restating the same nine fields is not one.
+
+### What the hold-out can and cannot measure — the honest limit
+
+Measured while preparing the packet, and it is the most important thing about this slice:
+
+| Classification | Records in slice | Derived treatment |
+|---|---|---|
+| `chargeback_reversal` | 3 | one value, the same for all three |
+| `cross_period_refund` | 3 | one value, the same for all three |
+| `fee_split` | 10 | one value |
+| `unclassified` | 9 | one value |
+
+**The derived label is a pure function of the classification, across all 250 records and not just
+this slice.** Four classifications, four answers, no mixing anywhere in the corpus.
+
+That is not a leak — the packet never states the mapping, and the classification is the case itself,
+which a labeller must see to judge anything at all. But it bounds the result: twenty-five rows carry
+at most **four independent judgements**, and a reviewer labelling consistently will agree or
+disagree with each rule wholesale rather than record by record. An accuracy figure of "n/25" from
+this slice would overstate its resolution by a factor of six.
+
+This is recorded before the labels are collected rather than discovered afterwards, because
+discovering it afterwards is how a weak measurement gets published as a strong one. Nineteen of the
+twenty-five records rest on a single rule — that the account policy configures nothing for
+`fee_split` and `unclassified`, so the correct action is to escalate — and a disagreement there is
+the most valuable outcome the exercise can produce.
+
+### Smaller decisions
+
+- **The accepted token is the enum's lower-case value.** `TreatmentCode` names are `REBOOK`,
+  `ACCRUE`, `WRITE_OFF`, `ESCALATE`; the strings it accepts are `rebook`, `accrue`, `write_off`,
+  `escalate`, and the validator refuses anything else exactly. Rather than relax that, the workbook
+  puts a **dropdown** on `HUMAN_LABEL` offering the four tokens, so the common way to produce an
+  invalid label — typing it — is not available. The guide carries both spellings. The dropdown is a
+  convenience and never the enforcement; the importer validates regardless.
+- **Whitespace is stripped and nothing else is normalised**, and a test pins that edge. `"escalate "`
+  is a spreadsheet artefact; `"write-off"`, `"write off"` and `"WRITE_OFF"` stay refusals, because
+  each of those is a decision about what somebody meant.
+- **A file that is not a workbook is refused, not crashed.** Naming nine bytes `.xlsx` used to raise
+  `BadZipFile`, which tells an owner nothing about what they did wrong.
+- **"Candidate ledger evidence" is reported as what exists.** The golden record carries no candidate
+  ledger entry — the matcher found none, which is why the line is an exception. The column says that,
+  and names the originating period where one was established. Inventing a candidate column and
+  filling it from nothing would be fabricating evidence.
+- **`openpyxl` is a dev dependency**, and a guard test asserts `src/` never imports it. A control
+  plane that ships a spreadsheet writer has acquired a dependency for a reason that is not its job.
+- **Both owner artefacts are committed**, against the `artifacts/*` ignore rule. A label is a
+  judgement about a specific set of facts, so the facts must be recoverable later at the digest the
+  labels declare — an uncommitted packet makes the import's fingerprint check unfalsifiable. Both
+  regenerate byte-identically, so committing them adds no churn.
+
+**OPEN-15 is not discharged by this.** The mechanism is complete and no label exists. The slice is
+labelled when a person labels it.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.

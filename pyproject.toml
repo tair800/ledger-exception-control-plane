@@ -53,6 +53,14 @@ dev = [
     "httpx==0.28.1",
     "pytest-asyncio==1.4.0",
     "asyncpg-stubs>=0.31.3",
+    # openpyxl — writes the owner-facing hold-out label packet as a real workbook, and reads the
+    # filled-in one back. A dev dependency and not a runtime one: the packet generator lives under
+    # `tests/` with the rest of the evaluation harness, and nothing the application serves has ever
+    # produced a spreadsheet. A guard test asserts the shipped package still does not import it.
+    "openpyxl==3.1.5",
+    # Its stubs, because mypy runs strict over `tests/` too and an untyped spreadsheet library
+    # would otherwise need a blanket ignore — which is how a whole module stops being checked.
+    "types-openpyxl==3.1.5.20260827",
 ]
 
 [build-system]

@@ -246,6 +246,16 @@ def _packet() -> int:
     ):
         path.write_text(text, encoding="utf-8", newline="\n")
         print(f"wrote {path.relative_to(PACKET_DIR.parents[1])}")
+
+    # The owner-facing pair, under `artifacts/`. Imported here rather than at module scope so the
+    # rest of this CLI — the golden set, the gate, the scorer — still runs with no spreadsheet
+    # library installed.
+    from tests.evaluation.workbook import write_artifacts
+
+    root = PACKET_DIR.parents[2]
+    for artefact in write_artifacts(packet):
+        print(f"wrote {artefact.relative_to(root)}")
+
     print()
     print(f"  {len(packet.records)} records, hold-out version {packet.hold_out_version}")
     print(f"  hold_out_sha256 {packet.digest}")

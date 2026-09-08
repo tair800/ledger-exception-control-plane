@@ -27,7 +27,7 @@ Exactly one of these per row. Nothing else is accepted.
 | Label | What it means as an accounting action |
 |---|---|
 | `accrue` | Recognise the same movement in the period it economically belongs to — the period of the movement it reverses. Needs a known originating period; without one there is nothing to accrue into. |
-| `escalate` | Refer the case to a person because it cannot be resolved from the facts shown. This is a real answer, not a failure to answer — for some conditions it is the only correct one. |
+| `escalate` | Refer the case to a person because it cannot be resolved from the facts shown. This is a real answer and not a failure to answer. |
 | `rebook` | Post the movement the ledger is missing, recognised in the accounting period the settlement line itself settled in. |
 | `write_off` | Recognise the residual as a loss rather than as the movement it appeared to be. |
 
@@ -49,11 +49,15 @@ An empty `originating_period` means no single counterpart movement was establish
 does not exist.
 
 **Deliberately withheld:** the expected treatment, the rule that produced it and its reasoning; any
-model's proposal; the corpus's construction metadata; and **the account policy**. The last one is
-the least obvious and the most important. For some classes the derived label follows mechanically
-from what the account policy configures, so a labeller shown that table would reproduce the derived
-label instead of testing it. This slice exists to catch a wrong label table, and it can only do
-that from an independent judgement.
+model's proposal; the corpus's construction metadata; and **the account policy** — the table mapping
+a classification to a ledger account. The last one is the least obvious and the most important: it
+is an input to the derived labels this slice exists to test, so a labeller who had it would be
+re-running the derivation instead of checking it. Judge each case on its own facts.
+
+**If two labels would post the same thing.** Where the period a treatment would recognise the
+movement in is the same under two labels, the evidence cannot separate them. Pick the one whose
+*reason* fits and say so in `HUMAN_NOTE`. No tie-break rule is given here, because a rule would be
+the answer for the rows it applies to.
 
 **Disagreement is the useful outcome.** If your label differs from the derived one, that is a
 finding to argue about, not an error in your row.

@@ -50,6 +50,7 @@ import hashlib
 import io
 import json
 import pathlib
+import zipfile
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Final
 
@@ -167,9 +168,15 @@ LABEL_DEFINITIONS: Final[Mapping[str, str]] = {
     TreatmentCode.WRITE_OFF.value: (
         "Recognise the residual as a loss rather than as the movement it appeared to be."
     ),
+    # **The trailing clause was removed after an audit named it.** It used to read "for some
+    # conditions it is the only correct one", which is not the accounting meaning of escalate — the
+    # first sentence already gives that. It is an assertion about the *answer key*: that a set of
+    # conditions exists where escalate is uniquely right. An attacker reading the packet alone
+    # joined it to the withheld-policy note and reconstructed most of the slice from the two.
+    # Neither sentence helped a labeller decide anything, so both were cut rather than defended.
     TreatmentCode.ESCALATE.value: (
         "Refer the case to a person because it cannot be resolved from the facts shown. This is a "
-        "real answer, not a failure to answer — for some conditions it is the only correct one."
+        "real answer and not a failure to answer."
     ),
 }
 
@@ -409,11 +416,15 @@ An empty `originating_period` means no single counterpart movement was establish
 does not exist.
 
 **Deliberately withheld:** the expected treatment, the rule that produced it and its reasoning; any
-model's proposal; the corpus's construction metadata; and **the account policy**. The last one is
-the least obvious and the most important. For some classes the derived label follows mechanically
-from what the account policy configures, so a labeller shown that table would reproduce the derived
-label instead of testing it. This slice exists to catch a wrong label table, and it can only do
-that from an independent judgement.
+model's proposal; the corpus's construction metadata; and **the account policy** — the table mapping
+a classification to a ledger account. The last one is the least obvious and the most important: it
+is an input to the derived labels this slice exists to test, so a labeller who had it would be
+re-running the derivation instead of checking it. Judge each case on its own facts.
+
+**If two labels would post the same thing.** Where the period a treatment would recognise the
+movement in is the same under two labels, the evidence cannot separate them. Pick the one whose
+*reason* fits and say so in `HUMAN_NOTE`. No tie-break rule is given here, because a rule would be
+the answer for the rows it applies to.
 
 **Disagreement is the useful outcome.** If your label differs from the derived one, that is a
 finding to argue about, not an error in your row.
@@ -581,14 +592,35 @@ def validate_import(rows: Iterable[Mapping[str, Any]], packet: Packet) -> LabelI
 
 
 def read_import(path: pathlib.Path, packet: Packet | None = None) -> LabelImport:
-    """Read and validate a returned CSV or JSONL. Refuses anything else by extension."""
+    """Read and validate a returned workbook, CSV or JSONL. Refuses anything else by extension.
+
+    ``.xlsx`` is read through :mod:`tests.evaluation.workbook`, imported lazily so that the CSV and
+    JSONL paths — the ones CI exercises — keep working with no spreadsheet library installed.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".xlsx":
+        from tests.evaluation.workbook import read_workbook_rows
+
+        try:
+            rows: list[Mapping[str, Any]] = list(read_workbook_rows(path))
+        except (KeyError, ValueError, OSError, zipfile.BadZipFile) as unreadable:
+            # A refusal, not a traceback. A file that is not a workbook, or a workbook without the
+            # records sheet, is the same kind of mistake as a missing label — the owner attached
+            # the wrong file — and it should read like one.
+            raise ImportRejected(
+                [f"{path.name}: not a readable label workbook ({unreadable})"]
+            ) from unreadable
+        return validate_import(rows, packet or build_packet())
+
     text = path.read_text(encoding="utf-8-sig")
-    if path.suffix.lower() == ".csv":
-        rows: list[Mapping[str, Any]] = list(_read_csv(text))
-    elif path.suffix.lower() in {".jsonl", ".json"}:
+    if suffix == ".csv":
+        rows = list(_read_csv(text))
+    elif suffix in {".jsonl", ".json"}:
         rows = list(_read_jsonl(text))
     else:
-        raise ImportRejected([f"{path.name}: expected a .csv or .jsonl file, not {path.suffix!r}"])
+        raise ImportRejected(
+            [f"{path.name}: expected a .xlsx, .csv or .jsonl file, not {path.suffix!r}"]
+        )
     return validate_import(rows, packet or build_packet())
 
 

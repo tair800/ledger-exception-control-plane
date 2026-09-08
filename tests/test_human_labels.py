@@ -400,9 +400,25 @@ def test_a_returned_jsonl_is_accepted_too(tmp_path: pathlib.Path) -> None:
 
 
 def test_an_unrecognised_file_type_is_refused(tmp_path: pathlib.Path) -> None:
+    """A file the importer has no reader for is refused by extension, before it is opened."""
+    path = tmp_path / "labels.txt"
+    path.write_bytes(b"not a csv")
+    with pytest.raises(ImportRejected, match=r"expected a \.xlsx, \.csv or \.jsonl"):
+        read_import(path, build_packet())
+
+
+def test_a_file_that_is_not_really_a_workbook_is_refused_rather_than_crashing(
+    tmp_path: pathlib.Path,
+) -> None:
+    """**A wrong attachment is a mistake, not a stack trace.**
+
+    Naming a file `.xlsx` routes it to the workbook reader, and a reader handed nine bytes raises
+    `BadZipFile` — which tells the owner nothing about what they did. It surfaces as the same kind
+    of refusal every other bad import gets.
+    """
     path = tmp_path / "labels.xlsx"
     path.write_bytes(b"not a csv")
-    with pytest.raises(ImportRejected, match=r"expected a \.csv or \.jsonl"):
+    with pytest.raises(ImportRejected, match="not a readable label workbook"):
         read_import(path, build_packet())
 
 

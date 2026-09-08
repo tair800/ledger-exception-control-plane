@@ -57,10 +57,17 @@ Thumbs.db
 *.log
 logs/
 
-# Generated demo artifacts. The committed M2 snapshot is the one exception: it is small,
-# deterministic, and useful to a reader who will not clone and run anything.
+# Generated demo artifacts. Three are committed exceptions: each is small, regenerates
+# byte-identically, and is useful to a reader who will not clone and run anything.
+#
+# The two label-packet files are committed for a further reason. They are the exact artefact the
+# owner's hold-out labels will be formed against, and a label is a judgement about a specific set
+# of facts — so the facts have to be recoverable later, from the repository, at the digest the
+# labels declare. An uncommitted packet would make the import's fingerprint check unfalsifiable.
 artifacts/*
 !artifacts/m2-demo.html
+!artifacts/human-label-packet.xlsx
+!artifacts/human-label-packet.jsonl
 
 # The chaos suite's per-cell observations (M4.5). Working state: the run writes them, the renderer
 # reads them, and the reviewed artefact is the table they produce in README.md. Committing them
