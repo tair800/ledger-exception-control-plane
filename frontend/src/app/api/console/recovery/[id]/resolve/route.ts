@@ -11,6 +11,13 @@ import { NextResponse } from "next/server";
 import { callControlPlane } from "@/lib/server/backend";
 import { RECOVERY_RESOLUTIONS, type RecoveryItemView, type ResolveRequest } from "@/lib/types";
 
+// Vercel's Hobby plan caps a function at 10 seconds by default and 60 with this set. The cap
+// matters here because the control plane runs on a free tier that scales to zero: the first
+// request after an idle period waits for a container to start, which is tens of seconds, not
+// milliseconds. At the default the console would time out on every cold start and show an error
+// for a backend that was merely asleep.
+export const maxDuration = 60;
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function refuse(message: string) {

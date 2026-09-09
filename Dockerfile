@@ -41,6 +41,13 @@ COPY fixtures/ ./fixtures/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
+# The entrypoint applies migrations, optionally bootstraps the demonstration, then execs uvicorn on
+# the platform's `$PORT`. Marked executable here rather than relying on the checkout's mode bit
+# surviving a clone on a filesystem that does not carry one — Windows does not.
+#
+# Copied before the user switch so the `chown` below covers it.
+COPY --chmod=0755 deployment/entrypoint.sh /app/entrypoint.sh
+
 # Run unprivileged. Nothing in the image needs to write outside /tmp.
 RUN useradd --create-home --uid 10001 appuser \
     && chown -R appuser:appuser /app
@@ -49,5 +56,8 @@ USER appuser
 EXPOSE 8000
 
 # No secrets are baked in. Configuration arrives through LECP_* environment variables.
-CMD ["uvicorn", "ledger_exception_control_plane.api:create_app", \
-     "--factory", "--host", "0.0.0.0", "--port", "8000"]
+#
+# ENTRYPOINT rather than CMD, so `docker run <image> <args>` cannot accidentally replace the
+# migration step with a bare shell command — the schema must come up before the app serves, and
+# that ordering should not be one flag away from being skipped.
+ENTRYPOINT ["/app/entrypoint.sh"]

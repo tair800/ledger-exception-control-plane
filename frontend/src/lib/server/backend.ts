@@ -120,11 +120,26 @@ function statusMessage(status: number): string {
   return `The control plane refused the request (${status}).`;
 }
 
-/** A transport failure: the console reached nothing, so it has nothing to explain. */
+/**
+ * A transport failure: the console reached nothing, so it has nothing to explain.
+ *
+ * **A timeout is told apart from an outage, and the reason is the deployed demonstration.** The
+ * control plane runs on a free tier that scales to zero, so the first request after an idle period
+ * waits for a container to start — tens of seconds. That is not a broken backend, and telling a
+ * visitor to "check that it is running and that CONTROL_PLANE_BASE_URL is correct" would be
+ * developer instructions offered to somebody who cannot act on them and a wrong diagnosis besides.
+ *
+ * `AbortSignal.timeout()` rejects with a `TimeoutError`, which is what makes the two separable at
+ * all. Every other transport failure keeps the original wording: for those, the configuration
+ * really is the first thing to check.
+ */
 export function unreachable(detail: string): ApiFailure {
+  const timedOut = detail === "TimeoutError";
   return {
     status: 0,
-    message: `The control plane could not be reached (${detail}). Check that it is running and that CONTROL_PLANE_BASE_URL is correct.`,
+    message: timedOut
+      ? "The control plane did not answer in time. It runs on a free tier that sleeps when idle, so the first request after a quiet period can take up to a minute while it starts. Try again in a moment."
+      : `The control plane could not be reached (${detail}). Check that it is running and that CONTROL_PLANE_BASE_URL is correct.`,
     authority: false,
     not_implemented: false,
   };

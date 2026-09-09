@@ -1,0 +1,73 @@
+# Render blueprint for the **public portfolio demonstration**. Free tier, no paid resource.
+#
+# This is not a production financial deployment and the repository does not describe it as one.
+# It runs a simulated ledger against a disposable database of synthetic rows, so the worst a
+# visitor can do is move imaginary money between imaginary accounts. See `docs/deployment.md`
+# for the full limitation list, which is deliberately not short.
+#
+# **What is NOT here, and why that is not an omission.** There is no worker service. This
+# repository has no background worker: the retry and reconciliation passes are bounded one-shot
+# functions invoked by a CLI, `src/` contains no scheduler or queue library, and a module named
+# `workers` is *forbidden* by a guard test. So the usual free-tier compromise — cramming an API
+# and a worker into one container and hoping the semantics survive — does not arise. Nothing was
+# collapsed to fit the free tier.
+#
+# Databases and Redis are deliberately **not** declared here. Render's own free PostgreSQL expires
+# after 30 days, which would take the demonstration down on a schedule; Neon and Upstash are used
+# instead and attached by environment variable. Declaring them here would create resources nobody
+# asked for.
+
+services:
+  - type: web
+    name: lecp-demo-api
+    runtime: docker
+    plan: free
+    region: frankfurt # closest Render region to Neon eu-central-1 and Upstash eu-central-1
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+
+    # `/healthz` and not `/readyz`, and the distinction is load-bearing. Readiness probes
+    # PostgreSQL and Redis; liveness checks nothing external by design. Pointing the platform's
+    # restart trigger at readiness would restart a perfectly healthy process every time Neon's
+    # free tier paused a branch — turning a dependency blip into a crash loop. The API's own
+    # `/readyz` remains the thing to look at when diagnosing one.
+    healthCheckPath: /healthz
+
+    envVars:
+      # ---- Set automatically -------------------------------------------------------------
+      # Render injects PORT; the entrypoint binds it. Declared here so the coupling is visible.
+      - key: PORT
+        value: 10000
+
+      # ---- Non-secret configuration ------------------------------------------------------
+      - key: LECP_ENVIRONMENT
+        value: staging # not `production`: that suppresses /docs, and the API browser is
+        # genuinely useful on a portfolio demonstration.
+      - key: LECP_LOG_LEVEL
+        value: INFO
+
+      # Publishes the two `/api/v1/demo/` routes, including the fault injector. Correct for a
+      # demonstration and wrong everywhere else — `docs/deployment.md` says so at length.
+      - key: LECP_DEMO_MODE
+        value: "true"
+
+      # Empty on purpose. The console talks only to its own origin and forwards server-side, so
+      # the browser never calls this API directly and no allowlist is required. An origin here
+      # would widen the surface for no functional gain.
+      - key: LECP_CORS_ALLOW_ORIGINS
+        value: ""
+
+      # Neon's free tier suspends an idle branch; the first connection after that pays the
+      # resume. The default probe timeout is tuned for a local container and is too tight for it.
+      - key: LECP_READINESS_TIMEOUT_SECONDS
+        value: "8.0"
+
+      # ---- Secrets: set in the Render dashboard, never in this file -----------------------
+      # `sync: false` means Render prompts for the value and stores it encrypted. The value never
+      # enters the repository, the blueprint, or a build log.
+      - key: LECP_POSTGRES_DSN
+        sync: false
+      - key: LECP_REDIS_DSN
+        sync: false
+      - key: LECP_PRINCIPALS
+        sync: false

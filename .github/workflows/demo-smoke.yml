@@ -1,0 +1,105 @@
+# Smoke the public demonstration after CI passes.
+#
+# **Why this is separate from `deploy.yml`, and much smaller.** That workflow drives Fly: it builds
+# an image, promotes the exact digest staging tested, and gates production behind an approval
+# environment. Render and Vercel do none of that — both deploy themselves when `main` moves, and
+# neither free plan offers a manual approval gate. Writing one here would be a job that waits for a
+# click and then does nothing, which is worse than not having one: it would look like a control.
+#
+# So the free-tier lifecycle is honestly shorter — Preflight → Tests → Security → Build → *provider
+# deploys on push* → Smoke — and this workflow is the last step. `docs/deployment.md` records the
+# missing approval gate as a limitation rather than pretending it exists.
+#
+# Skips silently when the URLs are not configured. An unconfigured repository is not a defect, and
+# a red X on every fork's first build teaches people to ignore red X's.
+
+name: Demo smoke
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Smoke the public demonstration
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Decide whether there is anything to smoke
+        id: configured
+        env:
+          # Repository *variables*, not secrets: a public demonstration's URL is public by
+          # definition, and putting it in a secret would only make it harder to read in a log.
+          API_URL: ${{ vars.DEMO_API_URL }}
+          CONSOLE_URL: ${{ vars.DEMO_CONSOLE_URL }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "workflow_run" ] && [ "$CONCLUSION" != "success" ]; then
+            echo "::notice::CI did not pass; not smoking a deployment that should not exist"
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ -z "$API_URL" ]; then
+            echo "::notice::DEMO_API_URL is not set; the demonstration is not deployed from here"
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the repository
+        if: steps.configured.outputs.run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        if: steps.configured.outputs.run == 'true'
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.15"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        if: steps.configured.outputs.run == 'true'
+        run: uv python install
+
+      - name: Install dependencies from the lockfile
+        if: steps.configured.outputs.run == 'true'
+        run: uv sync --frozen
+
+      - name: Smoke the control plane
+        if: steps.configured.outputs.run == 'true'
+        env:
+          SMOKE_BASE_URL: ${{ vars.DEMO_API_URL }}
+          # Optional. Without it the authenticated read is skipped rather than failed — the
+          # unauthenticated checks are the ones that prove the deployment is up.
+          SMOKE_TOKEN: ${{ vars.DEMO_SMOKE_TOKEN }}
+        run: |
+          # `--wait-seconds 180`: the backend's free plan scales to zero, so the first request
+          # after a quiet period is a container start. Waiting is the correct behaviour here and
+          # is not the same as ignoring a failure — liveness must still arrive.
+          #
+          # `--environment staging`: the demonstration deliberately leaves the interactive API
+          # browser reachable, which the production profile asserts is suppressed.
+          uv run python scripts/smoke/smoke.py \
+            --environment staging \
+            --wait-seconds 180 \
+            --timeout 30
+
+      - name: Check the console is served
+        if: steps.configured.outputs.run == 'true' && vars.DEMO_CONSOLE_URL != ''
+        env:
+          CONSOLE_URL: ${{ vars.DEMO_CONSOLE_URL }}
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-delay 5 "$CONSOLE_URL")
+          echo "console returned $code"
+          [ "$code" = "200" ] || { echo "::error::the console did not return 200"; exit 1; }

@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
             "has real rows to show."
         ),
     )
-    parser.add_argument("command", choices=("render", "verify", "seed"))
+    parser.add_argument("command", choices=("render", "verify", "seed", "bootstrap"))
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--instances", type=int, default=DEFAULT_INSTANCES)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
@@ -49,6 +49,14 @@ def main(argv: list[str] | None = None) -> int:
         from ledger_exception_control_plane.demo.seed import run_seed
 
         return run_seed()
+
+    if args.command == "bootstrap":
+        # The deployed entrypoint's command: seed only if the demonstration is not already there.
+        # `seed` resets first, which is right locally and destroys a visitor's work on a container
+        # that cold-starts.
+        from ledger_exception_control_plane.demo.seed import run_bootstrap
+
+        return run_bootstrap()
 
     page = _page(args.seed, args.instances)
 

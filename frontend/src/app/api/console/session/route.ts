@@ -19,6 +19,13 @@ import { cookieSecure } from "@/lib/server/config";
 import { probeCapabilities } from "@/lib/server/capabilities";
 import { ROLES, type ConsoleSession, type ExceptionSummary, type Role } from "@/lib/types";
 
+// Vercel's Hobby plan caps a function at 10 seconds by default and 60 with this set. The cap
+// matters here because the control plane runs on a free tier that scales to zero: the first
+// request after an idle period waits for a container to start, which is tens of seconds, not
+// milliseconds. At the default the console would time out on every cold start and show an error
+// for a backend that was merely asleep.
+export const maxDuration = 60;
+
 const SIGNED_OUT: ConsoleSession = {
   signed_in: false,
   authority: "unverified",

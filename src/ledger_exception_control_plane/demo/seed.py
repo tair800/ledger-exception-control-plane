@@ -85,7 +85,14 @@ from ledger_exception_control_plane.operations.retry import DeadLetterReason, de
 from ledger_exception_control_plane.operations.service import enqueue_posting
 from ledger_exception_control_plane.security import Principal, Role
 
-__all__ = ["DemoSummary", "reset_demo", "run_seed", "seed_demo"]
+__all__ = [
+    "DemoSummary",
+    "bootstrap_demo",
+    "reset_demo",
+    "run_bootstrap",
+    "run_seed",
+    "seed_demo",
+]
 
 #: Matches an evidence identifier as it appears in the prompt the system builds. The pack's
 #: identifiers are UUIDs and they are in the user message so that a model can cite them.
@@ -331,6 +338,28 @@ async def _count(engine: AsyncEngine, table: str, where: str = "TRUE") -> int:
         return int(result.scalar_one())
 
 
+async def bootstrap_demo(engine: AsyncEngine) -> DemoSummary | None:
+    """Seed the demonstration **only if it is not already there**. ``None`` when it already is.
+
+    The difference from :func:`seed_demo` is the whole reason this exists, and it is a deployment
+    concern rather than a local one. `seed_demo` resets before it seeds, which is right on a
+    developer's disposable database and wrong on a deployed demonstration: a free-tier container
+    scales to zero and cold-starts often, so a reset-on-boot would silently discard whatever a
+    visitor had just approved, every time the service woke up.
+
+    So the deployed path asks whether the demonstration exists and leaves it alone if it does.
+    Repeated bootstrap is then genuinely idempotent — not "resets to the same state", which
+    destroys work, but "makes no change at all".
+
+    Emptiness is judged on `exception` rather than on a settlement batch: a batch could exist from a
+    partial run, whereas an exception is the first row the console actually renders, and a database
+    holding none has nothing to show regardless of what else is in it.
+    """
+    if await _count(engine, "exception") > 0:
+        return None
+    return await seed_demo(engine)
+
+
 async def seed_demo(engine: AsyncEngine) -> DemoSummary:
     """Ingest, match, classify, approve, price, dispatch — and leave two failures behind.
 
@@ -557,6 +586,43 @@ async def _line_facts(
             )
         ).one()
     return decimal.Decimal(str(row[0])), str(row[1]), row[2]
+
+
+def run_bootstrap() -> int:
+    """Seed the configured database only if the demonstration is not already present.
+
+    The deployed entrypoint's command. Reports what it found either way, because "already seeded"
+    and "seeded 7 exceptions" are different facts about a deploy and a log line saying neither is
+    the one you want at three in the morning.
+
+    Keeps :func:`~.fixtures.loader.assert_target_is_disposable`. A deployed demonstration is exactly
+    where that guard earns its place: the database name has to match `lecp_(test|demo|fixtures)`, so
+    pointing this at anything else refuses rather than writing invented transactions into it.
+    """
+    import asyncio
+
+    from ledger_exception_control_plane.config import Settings
+    from ledger_exception_control_plane.db.engine import create_engine
+    from ledger_exception_control_plane.fixtures.loader import assert_target_is_disposable
+
+    settings = Settings()
+    assert_target_is_disposable(settings)
+
+    async def run() -> DemoSummary | None:
+        engine = create_engine(settings)
+        try:
+            return await bootstrap_demo(engine)
+        finally:
+            await engine.dispose()
+
+    summary = asyncio.run(run())
+    if summary is None:
+        print("the demonstration is already seeded; nothing was written")
+        return 0
+    print("seeded the demonstration database:")
+    for line in summary.as_lines():
+        print(f"  {line}")
+    return 0
 
 
 def run_seed() -> int:

@@ -9,7 +9,8 @@
         golden golden-check eval-verify observability-verify \
         eval-gate eval-gate-update eval-gate-verify label-packet label-packet-verify \
         eval-compare eval-compare-verify \
-        smoke-local smoke-selftest secret-scan deploy-check demo demo-api demo-reset
+        smoke-local smoke-selftest secret-scan deploy-check demo demo-api demo-reset \
+        demo-principals demo-smoke
 
 # Every Docker command goes through this seam so the whole file can be pointed at a throwaway
 # Compose project — which is how the clean-environment bootstrap is proved without destroying
@@ -360,6 +361,12 @@ secret-scan: ## Scan tracked files for credentials, unsafe config and frontend e
 deploy-check: secret-scan smoke-selftest ## Everything the deployment lane gates on, no Docker needed
 	uv run --no-project --with pyyaml python -c "import pathlib, yaml; [yaml.safe_load(p.read_text(encoding='utf-8')) for p in pathlib.Path('.github/workflows').glob('*.yml')]; print('workflows parse')"
 
+# Smoke a *deployed* demonstration. The backend's free plan scales to zero, so the wait is long on
+# purpose: liveness still has to arrive, it is just allowed to take a container start to do it.
+demo-smoke: ## Smoke a deployed demonstration. Pass URL=https://... (and optionally TOKEN=...)
+	@test -n "$(URL)" || { echo "usage: make demo-smoke URL=https://your-service.onrender.com"; exit 2; }
+	SMOKE_BASE_URL="$(URL)" SMOKE_TOKEN="$(TOKEN)" uv run python scripts/smoke/smoke.py 	  --environment staging --wait-seconds 180 --timeout 30
+
 # --- the local demonstration (M7 support) ---
 #
 # `demo` leaves a disposable database holding an exception in every state the console renders,
@@ -401,6 +408,9 @@ demo: test-db-init ## Seed the disposable database so the console has real rows 
 # `lecp_(test|demo|fixtures)`. Pointing the documented demonstration at `make up` left a reader
 # with a correctly-running API serving an empty queue, which is the worst of the three outcomes:
 # nothing looks broken.
+demo-principals: ## Print the demonstration's principal registry, for a deployment's env var
+	@echo '$(DEMO_PRINCIPALS)'
+
 demo-api: ## Serve the seeded demonstration on 127.0.0.1:8000 — demo mode on, demo principals loaded
 	LECP_POSTGRES_DSN=$(LECP_TEST_DSN) \
 	LECP_DEMO_MODE=true \
