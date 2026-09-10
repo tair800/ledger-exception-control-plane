@@ -83,6 +83,38 @@ correctly *given* an enforcing ledger rather than that any particular ledger enf
 
 ---
 
+## Open finding — an intermittent duplicate send, seen once in CI
+
+**2026-09-11.** `tests/test_retry_postgres.py::test_two_runners_over_one_queue_apply_each_operation_once`
+failed once in CI (run 34530849003, commit `9cade72`):
+
+```
+AssertionError: 6 sends for 4 operations: a duplicate reached the ledger and was
+suppressed there rather than prevented here
+```
+
+**What did and did not hold.** All four `applied_count == 1` assertions passed — no financial
+effect doubled, and the `effectively-once effect` claim, which §13 permits only where the adapter
+enforces a key, is intact because the reference ledger enforced. What failed is the stronger
+property that test exists to check: that a duplicate is **prevented on our side** rather than
+absorbed by the adapter. Two sends left the client that should not have.
+
+**It is rare and it is not this commit.** First failure of that job in twelve runs; green on the
+immediately preceding commit; six consecutive local passes against real PostgreSQL; and the commit
+it failed on touched only the LLM adapter, the live-evaluation harness under `tests/`, docs and
+evaluation artefacts — nothing in the retry, dispatch or outbox path. A re-run of the same job on
+the same commit passed.
+
+**Recorded rather than re-run away, and the assertion is not being weakened.** It was added
+because three reviewers pointed out the test had been green by construction, and an intermittent
+failure of the one assertion that can fail is worth more attention than a green re-run. The open
+question is which of the two mechanisms the docstring names — `SKIP LOCKED` on the claim, or the
+write-ahead unique constraint — did not hold, and whether the interleaving can be forced
+deterministically instead of waited for. That is an M4 investigation and is out of scope for the
+6.4 evaluation increment that observed it.
+
+---
+
 ## Milestone progress
 
 | Increment | Status | Notes |
