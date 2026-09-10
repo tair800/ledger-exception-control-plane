@@ -476,9 +476,18 @@ def test_live_eval_refuses_when_the_route_is_not_configured(
 ) -> None:
     """Both opt-ins set and no route: still refused, and the missing names are listed.
 
-    The refusal names variables, never asks for a value, and cannot be satisfied by accident —
-    which is what makes it safe for this test to set both opt-ins in a suite CI runs.
+    **This is the one test in the repository that sets both live opt-ins**, so its safety is made
+    structural rather than left to the order of its own statements. Deleting the route variables is
+    what makes the refusal fire — and on a developer machine where the credential *is* exported, a
+    future edit that reordered these lines would spend 250 real calls from a unit test. So the
+    runner itself is replaced with something that raises: if the refusal ever stops working, this
+    test fails loudly instead of quietly buying a measurement.
     """
+
+    async def must_not_run(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("live-eval reached the runner from a test")
+
+    monkeypatch.setattr(cli, "run_live_evaluation", must_not_run)
     monkeypatch.setenv(cli.LIVE_EVAL_OPT_IN, "1")
     monkeypatch.setenv(CAPTURE_OPT_IN, "1")
     for name in (BASE_URL_VARIABLE, MODEL_VARIABLE, API_KEY_VARIABLE):
