@@ -4261,6 +4261,111 @@ run over them a model measurement.
 
 ---
 
+## ADR-069 — The demonstration is live, at zero cost, and the audit came before the deploy
+
+**Status:** accepted. **Date:** 2026-09-10, on the first successful public smoke.
+
+ADR-065 built the whole deployment pipeline and deliberately deployed nothing, because a deploy
+needs an account and an account is owner action. The accounts now exist on free tiers, and the
+demonstration is reachable:
+
+- console <https://ledger-exception-control-plane-livid.vercel.app> (Vercel Hobby, `fra1`)
+- API <https://lecp-demo-api.onrender.com> (Render Free, Docker, Frankfurt)
+- PostgreSQL on Neon Free (`eu-central-1`, database `lecp_demo`), Redis on Upstash Free
+
+`docs/demo-deployment.md` is the full account, including every limitation. This entry records the
+four decisions worth arguing about.
+
+### 1. The compatibility audit ran before anything was deployed, and it earned its keep
+
+The tempting order is deploy, then fix what breaks. It was done the other way, and the audit found
+a defect that **would have produced a deployment reporting itself healthy while serving nothing**.
+
+Neon issues a DSN ending `?sslmode=require&channel_binding=require`. `/readyz` calls
+`asyncpg.connect(dsn_string)`, and asyncpg parses a URL itself, understands `sslmode`, and
+connects — **the probe goes green**. Every real query goes through SQLAlchemy's asyncpg dialect,
+which splits the query string into *keyword arguments* and calls `asyncpg.connect(**kwargs)`. That
+signature has no `**kwargs` catch-all, so both parameters raise `TypeError` and **every query
+fails**.
+
+A green health check over a dead database is the worst shape a failure can take, because the thing
+built to notice is the thing that is lying. `db/engine.py` now normalises the DSN — `sslmode` → `ssl`,
+`channel_binding` dropped (asyncpg negotiates SCRAM channel binding itself; it is not a connect
+argument), and a `-pooler.` host additionally gets `prepared_statement_cache_size=0` because
+pgBouncer in transaction mode does not keep a prepared statement across checkouts.
+
+**Unrecognised parameters are kept, not dropped.** A normaliser that discarded a future provider's
+required option would fail with no error at all, which is worse than the failure it fixes.
+`tests/test_engine_dsn.py` pins all sixteen cases, including the original failing one, and needs no
+database.
+
+### 2. There was no worker to collapse, and that is a claim this repository can prove
+
+The usual free-tier compromise is to cram an API and a background worker into one container and
+hope the reliability semantics survive. **That question does not arise here.** No queue or scheduler
+library is a dependency; nothing in `src/` imports one; the retry and reconciliation passes are
+bounded one-shot functions rather than daemons; and a module or package named `workers` has been
+forbidden by a guard test at any depth since 4.3, precisely so this stays true.
+
+So the free tier runs the same topology a paid one would. No process was merged, faked or deleted
+to make the deployment fit, and **no financial or reliability semantic changed to reach zero cost**.
+
+What it does cost is stated rather than hidden: nothing schedules the bounded passes in this
+deployment, so a dead letter waits for a person. That is a gap in the deployment, not a compromise
+in the architecture.
+
+### 3. Migrating on boot contradicts the Dockerfile, and the exemption is a property of the plan
+
+The Dockerfile argues at length that migrating on start is wrong — it races every other replica for
+the same DDL, and a rolling deploy runs two schemas at once — which is why `deployment/fly.*.toml`
+uses a `release_command`. Render's free instance type has **no release or pre-deploy hook**; it is a
+paid feature. The choice is migrate-on-boot or migrate-by-hand.
+
+Migrate-on-boot is taken, and the Dockerfile's reasoning does not apply *to this deployment* for one
+specific reason: **the free plan runs exactly one instance.** There is no second replica to race.
+
+**That is a property of the plan, not of the design.** Scale to two instances and the race returns
+immediately. Recorded as a limitation rather than resolved, because resolving it means paying for a
+release hook. A failed migration stops the container (`set -e`) and the app never serves against a
+schema it does not expect.
+
+### 4. A destructive endpoint was published, and the guard is what makes that defensible
+
+The live demonstration exposed a defect no amount of reading would have found: **the centrepiece is
+consumable.** The seeder leaves exactly one posting awaiting a first dispatch, injecting §19.1's
+fault settles it, and every visitor after the first found a disabled button. It worked once.
+
+`POST /api/v1/demo/reset` puts it back. Publishing a route that deletes rows needs a reason it
+cannot be pointed at something that matters, and the reason is `assert_target_is_disposable`: the
+route refuses outright unless the configured database is named `lecp_(test|demo|fixtures)`. It is
+also demo-mode-only (404 otherwise) and operator-only.
+
+That guard lived in `fixtures/loader.py`, and a production module may not import `fixtures.*` — the
+fixture-truth firewall bans it at package granularity, because the corpus knows the answer to every
+case it contains. **The response to a guard objecting is almost never an exemption.** The check is a
+statement about a DSN rather than fixture truth, so it moved to `disposable.py` and the loader
+re-exports it. One implementation, no exemption, every existing caller unchanged.
+
+A visitor can reset another visitor's state. True, documented, and acceptable at this concurrency;
+the alternative is per-visitor state, which is a different product.
+
+### What is deployed is not a production financial deployment, and nothing may say otherwise
+
+Every row is synthetic, the ledger is `SimulatedLedger` in-process, and there is no real ledger
+integration in this repository for a deployment to acquire by accident. The proposal shown in the
+console declares itself `stand-in` and says in its own rationale that no model produced it. The
+three demo principals are published beside their hashes and are safe **because of what they reach**
+— a disposable database of invented rows behind a simulated ledger — and for no other reason.
+
+**Live model quality, cost and latency remain NOT MEASURED.** Deploying the system did not measure
+the model, and this entry exists partly so the two are never conflated: no provider credential is
+configured on any of the four services.
+
+Resolves **OPEN-10**: the hosting ceiling is zero and the demonstration sleeps when idle, which is
+the trade this tier makes. Portfolio decision D4 still applies to the other nine projects.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.
@@ -4388,9 +4493,13 @@ to record it already exists.
 **Needed before:** 6.2's threshold is set against a model measurement. The deterministic arm and the
 gate machinery do not depend on it.
 
-## OPEN-10 — Hosting cost ceiling and shutdown policy
+## OPEN-10 — Hosting cost ceiling and shutdown policy — **RESOLVED 2026-09-10 (ADR-069)**
 
-**Must decide:** the monthly ceiling for Fly.io and Neon, and whether the demo sleeps when idle.
-**Context:** portfolio decision D4 is still open and applies across all ten projects. A dead demo link
-is worse than no demo link.
-**Needed before:** increment 10.1.
+**Ceiling: zero.** The demonstration runs on Vercel Hobby, Render Free, Neon Free and Upstash Free,
+and no paid resource exists. **It sleeps when idle** — Render scales to zero after ~15 minutes and
+Neon's branch suspends, so the first request afterwards waits on a container start. That is the
+trade this tier makes, and the console reports a cold start rather than an error.
+
+The original question assumed Fly.io and a recurring bill. The answer turned out to be that the
+whole topology fits inside free tiers **without collapsing a process or weakening a semantic** —
+see ADR-069 §2. Portfolio decision D4 is still open and still applies to the other nine projects.

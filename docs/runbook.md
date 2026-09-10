@@ -1,7 +1,15 @@
 # Operator runbook
 
-Procedures for a deployed instance. **Nothing is deployed yet** — `docs/deployment.md` covers
-getting there. This document is what to do once it is.
+Procedures for a deployed instance, **written for the Fly.io deployment `deployment.md` describes**
+— an instance with a release hook, a scheduler for the bounded passes, and a database holding
+something worth reconciling.
+
+**The live public demonstration is not that instance.** It runs on free tiers, it is described in
+[`demo-deployment.md`](demo-deployment.md), and the procedures below apply to it only where they do
+not assume `flyctl` or a scheduled pass. Its own limitations — no scheduler, one instance,
+migrate-on-boot, a consumable fault target with a reset button — are listed there rather than here,
+because a runbook that quietly mixed the two would send an operator to a command that does not
+exist on the host they are on.
 
 **Every command below exists in this repository or in `flyctl`.** Nothing is invented; where a
 capability is missing, this document says so rather than describing a command that would be

@@ -3,9 +3,13 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current status: PROJECT 1 PORTFOLIO MVP COMPLETE.** Every repository-side engineering task is
-done. Three items remain and each needs the owner rather than more code — they are listed under
-*Pending owner-assisted validation* below and none of them blocks the MVP.
+**Current status: PROJECT 1 PORTFOLIO MVP COMPLETE, AND LIVE.**
+Console <https://ledger-exception-control-plane-livid.vercel.app> ·
+API <https://lecp-demo-api.onrender.com> — sign in as `demo-controller`, `demo-operator` or
+`demo-analyst`. Every repository-side engineering task is done. Of the three items that needed the
+owner rather than more code, **two are now discharged** — the human hold-out and the deployment —
+and **one remains pending**: no live model measurement exists. They are listed under *Pending
+owner-assisted validation* below.
 **Where the work stands:** M0–M8 and M10–M11 are delivered. The 4.5 kill-test gate passed and is a
 standing CI step. The operations console, the local demo, the evaluation harness, the observability
 conventions and the gated deployment pipeline all exist and are tested. See ADR-059 for the kill
@@ -52,14 +56,15 @@ observed cells matches an expectation declared before the run. §19's results ta
 
 ### Pending owner-assisted validation
 
-Three things are built but not *validated*, and each needs an action only the owner can take. Every
-one is reported as pending rather than counted as done.
+Three things were built but not *validated*, each needing an action only the owner could take. Two
+are now discharged and are recorded here with their evidence; the third is still pending and is
+reported as pending rather than counted as done.
 
 | Item | State | What unblocks it |
 |---|---|---|
 | **Live model quality, cost and latency** | **NOT MEASURED** | Provider credentials. The committed cassettes are synthesised and their treatments are assigned round-robin, so agreement with the golden labels is arithmetic. `live-eval` exists, refuses to run without an explicit opt-in, and documents the variable **names** only. No paid call has been made. |
 | **Human-labelled hold-out slice** | **CONFIRMED — OPEN-15 closed** | 25 records, frozen at `hold_out_sha256 cfa62715…`, hold-out version 1, labelled by the owner on 2026-09-09 and **agreeing with the derived table on all 25**. The confirmations are committed at `tests/golden/human-label-packet/confirmed.jsonl`; the golden set now carries `label_source: human` on exactly those 25, with who confirmed each and when. **No `expected_treatment` moved** — the evaluation gate reported only a schema version and a hash as different, which is the independent proof that nothing but provenance changed. **What it establishes is narrower than 25 rows suggests (ADR-067, ADR-068): the derived label is a pure function of the classification, so this is four independent judgements, not 25.** A disagreeing confirmation would have been refused rather than applied, and that branch is tested. |
-| **Live deployment** | **PENDING OWNER CLOUD CREDENTIALS** | Fly.io and Neon accounts plus the secret **names** in `docs/deployment.md`. The pipeline is green today and its deploy jobs skip until the secrets exist. Nothing is deployed and no cloud resource has been created. |
+| **Live deployment** | **LIVE — OPEN-10 closed** | Console <https://ledger-exception-control-plane-livid.vercel.app> (Vercel Hobby, `fra1`), API <https://lecp-demo-api.onrender.com> (Render Free, Docker, Frankfurt), PostgreSQL on Neon Free and Redis on Upstash Free, all `eu-central-1`. **Zero cost, and no process was merged or semantic weakened to fit** — there is no worker to collapse, and a guard test has forbidden one since 4.3 (ADR-069 §2). A compatibility audit run *before* deploying caught a DSN incompatibility that would have produced a deployment reporting itself healthy while every query failed (§1). Migrations run at container start, which contradicts the Dockerfile, and the exemption is a property of the free plan's single instance rather than of the design (§3). **It is not a production financial deployment**: synthetic rows, a simulated ledger, a `stand-in` proposal and published demo principals. Every limitation is in `docs/demo-deployment.md`; `docs/deployment.md` is the Fly.io path and is not the live one. |
 
 Also not done, and not required for the MVP: no orchestration wires the stages into a running
 service (the demo seeder composes them and says so); §18's Langfuse trace is not discharged; and
@@ -100,8 +105,8 @@ correctly *given* an enforcing ledger rather than that any particular ledger enf
 | **7.2 Approval flow, DLQ view and fault-injection demo** | **DONE** | Approval round-trips; the DLQ replays through 4.3's own path; the demo control injects §19.1's fault through 4.5's port and shows the ledger's applied count beside what the system concluded. 404 outside demo mode. A defect in the first version — a fresh ledger per injection destroying the suppression — is recorded in ADR-062 §4 |
 | **8.1 OpenTelemetry and Langfuse conventions** | **PARTIAL** | Conventions, §18's metrics, redaction and the correlation contract delivered as committed data with 81 tests, degrading to a no-op with no SDK installed. **§18's exit criterion is not discharged**: tracing one exception end to end in Langfuse needs the dependency and a collector. Two GenAI attributes recorded as absent by name, because no model call is made. ADR-064 |
 | 9.1 Measurement harness | **NOT DONE** | Superseded in practice by 6.3's comparison harness for the deterministic arm; the `Measured` table it would publish needs live capture, which is pending owner credentials |
-| **10.1 Fly.io + Neon with safe demo mode** | **DONE (not deployed)** | Gated pipeline, security stage, Fly configs, smoke tests validated against the built image and real PostgreSQL. Migrations as a release command — the image lacked `alembic.ini`, found by running it. **Nothing is deployed.** ADR-065 |
-| **11.1 README, architecture and decision record** | **DONE** | README rewritten recruiter-first; §11.1's link check and banned-phrase check written and passing; 66 ADRs including the unplanned failures with the wrong first hypothesis left in. The final review found the rewrite had left the old milestone narrative below the new argument, with a Status section still saying the console, evaluation, observability and deployment did not exist; replaced (ADR-066) |
+| **10.1 Deployment with safe demo mode** | **DONE, AND DEPLOYED** | Gated pipeline, security stage, Fly configs, smoke tests validated against the built image and real PostgreSQL. Migrations as a release command — the image lacked `alembic.ini`, found by running it. ADR-065. **Since then it is actually deployed**, on free tiers rather than Fly.io: `render.yaml`, `deployment/entrypoint.sh`, `frontend/vercel.json`, a `/api/v1/meta` that reports the deployed commit so a claim about what is running can be checked rather than assumed, and a `demo-smoke` workflow that runs the smoke suite against the public URL after every deploy. ADR-069 |
+| **11.1 README, architecture and decision record** | **DONE** | README rewritten recruiter-first; §11.1's link check and banned-phrase check written and passing; a decision record of 66 entries at that point — **71 now** — including the unplanned failures with the wrong first hypothesis left in. The final review found the rewrite had left the old milestone narrative below the new argument, with a Status section still saying the console, evaluation, observability and deployment did not exist; replaced (ADR-066) |
 | 11.2 Demo recording | **PARTIAL** | Four screenshots captured from the real running console against the seeded demonstration and committed under `docs/screenshots/` — the queue, one exception in full provenance, the manual-recovery queue, and the fault-injection control after the crash. A screen recording remains an owner-facing task |
 | 12.1 Career assets | **NOT DONE** | Deferred: written once the project genuinely works, which is now — but it is positioning material rather than engineering |
 

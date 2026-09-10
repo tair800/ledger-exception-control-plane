@@ -1304,19 +1304,26 @@ finished. The three that remain need something no amount of engineering here can
 | **11.2 — a screen recording** | The screenshots below are real and committed; a recording is an owner-facing task. |
 | **12.1 — career assets** | Positioning material, not engineering. |
 
-**Three claims this repository deliberately does not make.** They are listed here rather than
-buried, because each is the kind of thing a reader is entitled to assume was quietly skipped:
+**One claim this repository deliberately does not make**, listed here rather than buried, because
+it is exactly the kind of thing a reader is entitled to assume was quietly skipped:
 
-1. **Live model quality, cost and latency are NOT MEASURED.** No provider SDK is a dependency,
-   nothing under `llm/` imports an HTTP client, and the committed cassettes are *synthesised* — their
-   treatments are assigned round-robin by position. The scorer takes a required `origin` and refuses
-   to describe such a run as a model measurement.
-2. **The human-labelled hold-out is confirmed** — 25 records labelled by the owner on 2026-09-09,
+**Live model quality, cost and latency are NOT MEASURED.** No provider SDK is a dependency, nothing
+under `llm/` imports an HTTP client, and the committed cassettes are *synthesised* — their
+treatments are assigned round-robin by position. The scorer takes a required `origin` and refuses to
+describe such a run as a model measurement. **The live deployment did not change this**: no provider
+credential is configured on any of its four services, and the proposal the console shows declares
+itself `stand-in` in its own rationale.
+
+Two claims that used to sit beside it are now discharged, and the evidence rather than the promise
+is in the repository:
+
+1. **The human-labelled hold-out is confirmed** — 25 records labelled by the owner on 2026-09-09,
    agreeing with the derived table on all 25, committed with an attribution per record. No
    `expected_treatment` moved. What it establishes is four independent judgements rather than 25,
-   because the derived label is a pure function of the classification (ADR-067).
-3. **Nothing is deployed.** The pipeline is built, gated and validated against the built image and
-   a real database. The deploy step itself needs cloud credentials.
+   because the derived label is a pure function of the classification (ADR-067, ADR-068).
+2. **It is deployed** — the [live demo](#-live-demo) above, at zero cost, with no process merged and
+   no semantic weakened to fit. What that deployment is *not* is stated at the same length in
+   [`docs/demo-deployment.md`](docs/demo-deployment.md) (ADR-069).
 
 [`PROJECT_STATUS.md`](PROJECT_STATUS.md) is the authority on exactly what exists;
 [`DECISIONS.md`](DECISIONS.md) on why; [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) lists all

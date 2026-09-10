@@ -94,11 +94,20 @@ of §11's ten fields are deliberately null here, with the reason recorded rather
 quietly left blank — this system is not an agent, and it makes no model call whose region could be
 recorded.
 
-**What is pending owner action, and must be reported as pending:** live model quality, cost and
-latency are **NOT MEASURED** (no credential, and the committed cassettes are synthesised); the
-human-labelled hold-out slice is **CONFIRMED** — 25 records labelled by the owner on 2026-09-09,
-agreeing with the derived table on all 25, so OPEN-15 is closed (ADR-068); and live deployment is
-**PENDING OWNER CLOUD CREDENTIALS** (nothing is deployed).
+**Two of the three owner-pending items are now discharged.** The human-labelled hold-out slice is
+**CONFIRMED** — 25 records labelled by the owner on 2026-09-09, agreeing with the derived table on
+all 25, so OPEN-15 is closed (ADR-068); read what that does and does not establish before quoting
+it, because the derived label is a pure function of the classification and the slice is therefore
+four independent judgements rather than twenty-five. **The demonstration is LIVE** at
+<https://ledger-exception-control-plane-livid.vercel.app>, on Vercel Hobby, Render Free, Neon Free
+and Upstash Free at zero cost, with no process merged and no semantic weakened to fit — ADR-069 and
+`docs/demo-deployment.md`, which also states every limitation. `docs/deployment.md` describes the
+Fly.io path and is **not** the live one. OPEN-10 closes.
+
+**One remains, and must still be reported as pending:** live model quality, cost and latency are
+**NOT MEASURED** — no provider credential is configured anywhere, including on the four deployed
+services, and the committed cassettes are synthesised. Deploying the system did not measure the
+model.
 
 **What is genuinely absent:** no orchestration wires the stages into a running service — the demo
 seeder composes them and says so; §18's Langfuse trace is not discharged; and there is no real
