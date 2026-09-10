@@ -108,8 +108,8 @@ Fly.io path and is **not** the live one. OPEN-10 closes.
 2026-09-10 — 250 records, 251 calls against a 750 ceiling, through an OpenAI-compatible OmniRoute
 route — measured **99.2% schema-valid, 97.2% accurate on the 36 priceable records, and 27.8%
 overall against an 85.6% constant-answer baseline**. The model is good at the judgement and bad at
-declining to make one: 178 of the 214 records whose correct answer is *escalate* got a concrete
-treatment. **That is the number that makes the approval gate load-bearing rather than well-argued**
+declining to make one: of the 212 escalate-labelled records it answered, 178 came back with a
+concrete treatment. **That is the number that makes the approval gate load-bearing rather than well-argued**
 (ADR-070). Live **cost** remains unmeasured and unmeasurable from here — a subscription-backed
 route returns no billing field, and no list-price equivalent is estimated.
 

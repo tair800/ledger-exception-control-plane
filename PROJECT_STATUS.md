@@ -12,8 +12,8 @@ live model evaluation. They are listed with their evidence under *Owner-assisted
 
 **The model measurement is a negative result and is reported as one.** 27.8% accuracy over the 250
 golden records against an 85.6% constant-answer baseline; 97.2% on the 36 records where a proposal
-changes what happens; 178 of 214 escalate-labelled records answered with a concrete treatment
-instead. The approval gate is what stands between that and 178 unwarranted postings (ADR-070).
+changes what happens; 178 of the 212 escalate-labelled records it answered came back with a
+concrete treatment instead (the set holds 214; the two provider failures carried that label too). The approval gate is what stands between that and 178 unwarranted postings (ADR-070).
 **Where the work stands:** M0–M8 and M10–M11 are delivered. The 4.5 kill-test gate passed and is a
 standing CI step. The operations console, the local demo, the evaluation harness, the observability
 conventions and the gated deployment pipeline all exist and are tested. See ADR-059 for the kill

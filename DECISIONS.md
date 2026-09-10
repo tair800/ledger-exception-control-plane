@@ -4393,7 +4393,7 @@ interesting number, and the breakdown says why:
 
 **On the 36 priceable records — the ones where a proposal changes what happens — the model is
 97.2% accurate (35 of 36).** On the 214 where the correct answer is *refer this to a human*, it
-proposes a concrete treatment 178 times.
+answered 212 and proposed a concrete treatment in **178** of them.
 
 ### What that actually means
 
@@ -4402,7 +4402,8 @@ The model is good at the judgement and bad at declining to make one.
 Every single hold-out disagreement runs the same direction: expected `escalate`, got a treatment.
 Not one is a wrong answer on a priceable case. Set against §19's question — what would this system
 do if it trusted the model — the answer is now measured rather than argued: **it would have posted
-178 ledger treatments that a human was supposed to look at.**
+178 ledger treatments that a human was supposed to look at.** (178 of the 212 escalate-labelled
+records it answered; the set holds 214, and the two the provider failed on carried that label too.)
 
 So the approval gate is not ceremony, and this is the first evidence in the repository that says
 so with a number. ADR-056 separated recording a decision from authorising a posting on the strength

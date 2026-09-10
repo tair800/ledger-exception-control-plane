@@ -256,8 +256,10 @@ breakdown says why:
 | `unclassified` | 140 | `escalate` | 20.7% |
 
 The model is good at the judgement and bad at declining to make one. On the 214 records whose
-correct answer is *refer this to a human*, it proposed a concrete treatment 178 times. Every
-hold-out disagreement runs that same direction; not one is a wrong answer on a priceable case.
+correct answer is *refer this to a human*, it proposed a concrete treatment **178 of the 212 times
+it answered** — the remaining two of those 214 are the provider failures, which also carried that
+label. Every hold-out disagreement runs the same direction; not one is a wrong answer on a
+priceable case.
 
 **That is the measurement this repository was built to be able to take.** Without the approval gate,
 this model would have driven 178 ledger treatments a human was supposed to see. The gate was
