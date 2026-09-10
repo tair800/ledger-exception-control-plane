@@ -322,9 +322,12 @@ def test_meta_is_unauthenticated_and_names_the_ledger_it_is_talking_to(
     body = response.json()
     assert body["demo_mode"] is True
     assert body["ledger_adapter"] == "simulated-ledger"
-    assert set(body) == {"version", "demo_mode", "ledger_adapter"}, (
+    assert set(body) == {"version", "demo_mode", "ledger_adapter", "revision"}, (
         "meta must carry nothing else; it is unauthenticated"
     )
+    # Empty locally: no platform sets a build commit for a test client. A deployment sets it, and
+    # `test_meta_revision.py` covers both directions without needing one.
+    assert body["revision"] == ""
 
 
 def test_injecting_the_lost_response_fault_applies_the_money_exactly_once(
@@ -491,6 +494,77 @@ def test_the_fault_targets_are_absent_outside_demo_mode() -> None:
 def test_the_fault_targets_are_operator_work(client: TestClient) -> None:
     """The list is only useful to a principal permitted to act on it, so it is refused to others."""
     assert client.get("/api/v1/demo/fault-targets", headers=CONTROLLER).status_code == 403
+
+
+def test_resetting_the_demonstration_restores_a_fault_target(
+    client: TestClient, pending_target: str
+) -> None:
+    """**The fix for a defect the deployed demonstration exhibited on its first visitor.**
+
+    The seeder leaves exactly one posting awaiting dispatch and the fault injector spends it, so
+    the public demonstration's centrepiece worked once and then showed a disabled button forever.
+    Reset restores it.
+
+    Asserted as a *cycle* rather than as a single call: spend the target, prove none is left, reset,
+    prove one is back. A test that only reset a fresh demonstration would pass without the bug ever
+    having been fixed.
+    """
+    del pending_target
+    target = _awaiting_dispatch(client)
+    assert (
+        client.post(f"/api/v1/demo/exceptions/{target}/inject-fault", headers=OPERATOR).status_code
+        == 200
+    )
+    assert client.get("/api/v1/demo/fault-targets", headers=OPERATOR).json() == [], (
+        "the injector must actually consume the target, or this test proves nothing"
+    )
+
+    reset = client.post("/api/v1/demo/reset", headers=OPERATOR)
+    assert reset.status_code == 200, reset.text
+    report = reset.json()
+    assert report["exceptions"] == 7
+    assert report["awaiting_dispatch"] == 1
+
+    restored = client.get("/api/v1/demo/fault-targets", headers=OPERATOR).json()
+    assert len(restored) == 1, "reset must leave the control something to act on again"
+
+
+def test_reset_is_operator_work(client: TestClient) -> None:
+    """It discards recorded decisions, so it is not the approver's button."""
+    assert client.post("/api/v1/demo/reset", headers=CONTROLLER).status_code == 403
+    assert client.post("/api/v1/demo/reset", headers=ANALYST).status_code == 403
+
+
+def test_reset_is_absent_outside_demo_mode() -> None:
+    """404, like every other demo route: a destructive control must not announce itself."""
+    with TestClient(create_app(_settings(demo_mode=False))) as plain:
+        response = plain.post("/api/v1/demo/reset", headers=OPERATOR)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "not found"
+
+
+def test_reset_refuses_a_database_that_is_not_disposable() -> None:
+    """**The guard that makes a destructive public route safe to publish.**
+
+    `assert_target_is_disposable` refuses any database outside `lecp_(test|demo|fixtures)`. Without
+    it, a deployment whose DSN pointed somewhere real would expose a button that deletes rows to
+    anybody holding the published operator token.
+
+    409 rather than 500, and the refusal names the database rather than the DSN — the message must
+    not carry a password.
+    """
+    settings = Settings(
+        postgres_dsn=SecretStr("postgresql://lecp:pw@localhost:15432/production_ledger"),
+        principals=REGISTRY,
+        demo_mode=True,
+    )
+    with TestClient(create_app(settings)) as risky:
+        response = risky.post("/api/v1/demo/reset", headers=OPERATOR)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "production_ledger" in detail
+    assert "pw" not in detail, "the refusal must not echo the DSN's password"
 
 
 def _awaiting_dispatch(client: TestClient) -> str:

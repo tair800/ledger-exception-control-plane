@@ -26,8 +26,9 @@ operator-shaped hole in the ambiguity gate. §13.5's manual branch is where the 
 from __future__ import annotations
 
 import datetime as dt
+import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -65,6 +66,10 @@ from ledger_exception_control_plane.db.control import (
     TreatmentProposalEvidence,
 )
 from ledger_exception_control_plane.db.models import SettlementLine
+from ledger_exception_control_plane.disposable import (
+    UnsafeTargetError,
+    assert_target_is_disposable,
+)
 from ledger_exception_control_plane.ledger import (
     Fault,
     FaultInjectingLedger,
@@ -101,7 +106,7 @@ _REFUSAL_STATUS: Final[dict[RefusalReason, int]] = {
     RefusalReason.SELF_COUNTERSIGNED_EDIT: status.HTTP_403_FORBIDDEN,
     RefusalReason.TOKEN_ALREADY_USED: status.HTTP_409_CONFLICT,
     RefusalReason.ALREADY_DECIDED: status.HTTP_409_CONFLICT,
-    RefusalReason.TREATMENT_INCONSISTENT_WITH_DECISION: status.HTTP_422_UNPROCESSABLE_ENTITY,
+    RefusalReason.TREATMENT_INCONSISTENT_WITH_DECISION: status.HTTP_422_UNPROCESSABLE_CONTENT,
     RefusalReason.UNKNOWN_SUBJECT: status.HTTP_404_NOT_FOUND,
     RefusalReason.SUPERSESSION_BLOCKED: status.HTTP_409_CONFLICT,
 }
@@ -113,8 +118,8 @@ _RECOVERY_STATUS: Final[dict[RecoveryRefusal, int]] = {
     RecoveryRefusal.ROLE_MAY_NOT_RECOVER: status.HTTP_403_FORBIDDEN,
     RecoveryRefusal.APPROVER_MAY_NOT_RESOLVE: status.HTTP_403_FORBIDDEN,
     RecoveryRefusal.ALREADY_RESOLVED: status.HTTP_409_CONFLICT,
-    RecoveryRefusal.CONFIRMED_WITHOUT_REFERENCE: status.HTTP_422_UNPROCESSABLE_ENTITY,
-    RecoveryRefusal.REFERENCE_WITHOUT_CONFIRMATION: status.HTTP_422_UNPROCESSABLE_ENTITY,
+    RecoveryRefusal.CONFIRMED_WITHOUT_REFERENCE: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    RecoveryRefusal.REFERENCE_WITHOUT_CONFIRMATION: status.HTTP_422_UNPROCESSABLE_CONTENT,
     RecoveryRefusal.UNKNOWN_ITEM: status.HTTP_404_NOT_FOUND,
 }
 
@@ -1047,6 +1052,34 @@ class MetaView(BaseModel):
     #: this repository — see OPEN-11. A demo that quietly implied a real provider would be the
     #: overclaim this project exists to avoid.
     ledger_adapter: str
+    #: The commit this instance was built from, or ``""`` where the platform does not say.
+    #:
+    #: **Added because "which revision is actually deployed" had no answer from outside.** The
+    #: version string is `0.1.0` and has been since M0; it identifies the project, not the build.
+    #: Checking a deployment against the commit it was supposed to be meant reading a provider
+    #: dashboard — which is fine for a person and useless to a smoke test.
+    #:
+    #: Not a secret: it is the hash of a public commit in a public repository. Empty rather than
+    #: invented where the platform sets nothing, because a deployment that cannot say what it is
+    #: should say that instead of guessing.
+    revision: str
+
+
+#: Where each platform records the commit it built. Read from the process environment rather than
+#: from ``Settings``, which is ``extra="forbid"`` over the ``LECP_`` namespace: these are set by
+#: the host, not configured by this project, and adding them to the settings model would mean
+#: declaring every platform this could ever run on.
+_REVISION_VARIABLES: Final = ("RENDER_GIT_COMMIT", "VERCEL_GIT_COMMIT_SHA", "GIT_COMMIT_SHA")
+
+
+def deployed_revision(environ: Mapping[str, str] | None = None) -> str:
+    """The commit this instance was built from, or ``""`` when the platform does not say."""
+    source = os.environ if environ is None else environ
+    for name in _REVISION_VARIABLES:
+        value = source.get(name, "").strip()
+        if value:
+            return value
+    return ""
 
 
 @router.get("/meta", response_model=MetaView)
@@ -1057,6 +1090,7 @@ async def meta(request: Request) -> MetaView:
         version=__version__,
         demo_mode=settings.demo_mode,
         ledger_adapter=str(request.app.state.ledger_adapter.name),
+        revision=deployed_revision(),
     )
 
 
@@ -1086,6 +1120,92 @@ class InjectedFaultReport(BaseModel):
     #: applied count of 1.
     ledger_posts_received: int
     explanation: str
+
+
+class DemoResetReport(BaseModel):
+    """What a reset of the public demonstration left behind."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exceptions: int
+    approved: int
+    dispatched: int
+    dead_lettered: int
+    in_recovery: int
+    awaiting_dispatch: int
+    explanation: str
+
+
+@router.post("/demo/reset", response_model=DemoResetReport)
+async def reset_demonstration(
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> DemoResetReport:
+    """Put the demonstration back to its seeded state.
+
+    **This exists because the demonstration is consumable and the deployed one ran out.** The
+    seeder leaves exactly one posting awaiting its first dispatch, which is what the fault-injection
+    control acts on. Press that control and the posting is spent — so on the public demonstration
+    the centrepiece worked once, for the first visitor, and every visitor afterwards found a
+    disabled button. Found by exercising the deployed instance rather than by reading it.
+
+    Three guards, the same ones the injector carries plus one:
+
+    * **404 outside demo mode**, so this does not exist on an instance doing real work;
+    * **operator authority**, because resetting discards recorded decisions;
+    * **the target database must be disposable** — `assert_target_is_disposable` refuses any name
+      outside ``lecp_(test|demo|fixtures)``. That is the guard that makes a destructive route safe
+      to publish at all: pointed at anything else it refuses rather than deleting.
+
+    It is destructive *by design and only of invented rows*. Everything it removes was written by
+    the seeder from a settlement file this repository generates, against a simulated ledger. There
+    is no path from here to a real financial system, because this repository contains no adapter
+    that reaches one.
+    """
+    settings: Settings = request.app.state.settings
+    if not settings.demo_mode:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    if not principal.may_work_operations_queues():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="resetting the demonstration discards decisions; that is an operator action",
+        )
+
+    # Imported here rather than at module scope: `demo.seed` pulls in the whole pipeline, and this
+    # route is the only thing in the API that needs it. `disposable` is a top-level import below —
+    # it must not come from `fixtures`, which a firewall forbids production modules from touching.
+    from ledger_exception_control_plane.demo.seed import reset_demo, seed_demo
+
+    try:
+        assert_target_is_disposable(settings)
+    except UnsafeTargetError as refusal:
+        # 409 and not 500: the deployment is misconfigured, and saying so is more useful than a
+        # stack trace. The message names no DSN — `UnsafeTargetError` carries only the name.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(refusal)) from refusal
+
+    engine = request.app.state.engine
+    await reset_demo(engine)
+    summary = await seed_demo(engine)
+
+    # The ledger is the instance's own and remembers what it applied. Resetting the database
+    # without it would leave the simulated books holding postings for operations that no longer
+    # exist, and the next fault injection would be suppressed against a ghost.
+    request.app.state.ledger_adapter = type(request.app.state.ledger_adapter)()
+
+    return DemoResetReport(
+        exceptions=summary.exceptions,
+        approved=summary.approved,
+        dispatched=summary.dispatched,
+        dead_lettered=summary.dead_lettered,
+        in_recovery=summary.in_recovery,
+        awaiting_dispatch=summary.awaiting_dispatch,
+        explanation=(
+            "The demonstration was reset to its seeded state. Every row removed was synthetic and "
+            "every row written was produced by the shipped pipeline from a generated settlement "
+            "file. The simulated ledger was replaced too, so its applied counts match the "
+            "operations that now exist."
+        ),
+    )
 
 
 class FaultTargetView(BaseModel):

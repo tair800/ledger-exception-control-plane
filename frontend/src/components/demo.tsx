@@ -23,7 +23,7 @@ import { useEffect, useState } from "react";
 import { useConsole } from "@/components/console-session";
 import { Badge } from "@/components/primitives";
 import { Failure, Loading } from "@/components/states";
-import { injectCrash, listFaultTargets } from "@/lib/client";
+import { injectCrash, listFaultTargets, resetDemonstration } from "@/lib/client";
 import type { ApiFailure, FaultTargetView } from "@/lib/types";
 
 export function DemoControl() {
@@ -33,6 +33,8 @@ export function DemoControl() {
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [observed, setObserved] = useState<unknown>(null);
+  const [resetting, setResetting] = useState(false);
+  const [restored, setRestored] = useState<string | null>(null);
 
   // **Asked, not derived.** An earlier version listed the *undecided* exceptions, reasoning that
   // an undispatched posting must belong to one. It is the inverse: the injector needs an approved
@@ -56,6 +58,36 @@ export function DemoControl() {
     !meta.capabilities.demo_inject_crash || !meta.capabilities.demo_fault_targets;
   const demoMode = meta.demo_mode;
   const enabled = demoMode === true && !endpointMissing && selected.length > 0 && !pending;
+
+  /** Reload the eligible targets. Called after a reset, which creates a new one. */
+  async function refreshTargets() {
+    const result = await listFaultTargets();
+    if (result.ok) {
+      setCandidates(result.data);
+      setSelected(result.data[0]?.exception_id ?? "");
+    } else {
+      setCandidates([]);
+      setSelected("");
+    }
+  }
+
+  async function reset() {
+    setResetting(true);
+    setFailure(null);
+    setObserved(null);
+    setRestored(null);
+    const result = await resetDemonstration();
+    if (result.ok) {
+      setRestored(
+        `Restored: ${result.data.exceptions} exceptions, ${result.data.approved} approved, ` +
+          `${result.data.awaiting_dispatch} awaiting dispatch.`,
+      );
+      await refreshTargets();
+    } else {
+      setFailure(result.failure);
+    }
+    setResetting(false);
+  }
 
   async function inject() {
     setPending(true);
@@ -142,7 +174,7 @@ export function DemoControl() {
                 className="tabular rounded border border-edge bg-surface px-2 py-1.5 text-ink disabled:opacity-40"
               >
                 {candidates.length === 0 ? (
-                  <option value="">no posting is awaiting a first dispatch</option>
+                  <option value="">no posting is awaiting a first dispatch — reset below</option>
                 ) : (
                   candidates.map((row) => (
                     <option key={row.exception_id} value={row.exception_id}>
@@ -167,8 +199,31 @@ export function DemoControl() {
             >
               {pending ? "Injecting…" : "Crash after the socket write"}
             </button>
+            {meta.capabilities.demo_reset ? (
+              <button
+                type="button"
+                disabled={resetting || pending}
+                onClick={() => void reset()}
+                title="Re-seed the demonstration so the fault control has a target again."
+                className="rounded border border-edge px-3 py-1.5 font-medium text-ink hover:bg-surface disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {resetting ? "Resetting…" : "Reset the demonstration"}
+              </button>
+            ) : null}
           </div>
         )}
+
+        {restored !== null ? (
+          <p className="mt-3 text-deterministic">{restored}</p>
+        ) : null}
+
+        {candidates !== null && candidates.length === 0 && !resetting ? (
+          <p className="mt-3 max-w-prose text-ink-dim">
+            The demonstration has no posting awaiting a first dispatch, which means somebody has
+            already run this. It is a consumable: the seeder leaves exactly one, and injecting the
+            fault spends it. Reset to seed a fresh one.
+          </p>
+        ) : null}
 
         {failure !== null ? (
           <div className="mt-3">

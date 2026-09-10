@@ -14,6 +14,7 @@ import type {
   DecisionResponse,
   DecisionVerb,
   ExceptionDetail,
+  DemoResetReport,
   ExceptionSummary,
   FaultTargetView,
   RecoveryItemView,
@@ -174,6 +175,11 @@ export function resolveRecovery(
  */
 export function listFaultTargets(): Promise<Result<FaultTargetView[]>> {
   return request<FaultTargetView[]>("/api/console/demo/fault-targets");
+}
+
+/** Put the demonstration back to its seeded state, so the fault control has a target again. */
+export function resetDemonstration(): Promise<Result<DemoResetReport>> {
+  return request<DemoResetReport>("/api/console/demo/reset", { method: "POST" });
 }
 
 /** The demo-mode fault injector. Answers 501 until the control plane publishes the endpoint. */

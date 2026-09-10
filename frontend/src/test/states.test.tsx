@@ -229,6 +229,7 @@ describe("controls whose endpoint does not exist", () => {
           dlq_replay: true,
           demo_inject_crash: false,
           demo_fault_targets: false,
+          demo_reset: false,
           identity: true,
           meta: false,
           request_edit: false,

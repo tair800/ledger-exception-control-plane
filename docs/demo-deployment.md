@@ -1,5 +1,17 @@
 # The public demonstration: a zero-cost deployment, and what it is not
 
+> **Live.** Console <https://ledger-exception-control-plane-livid.vercel.app> ·
+> API <https://lecp-demo-api.onrender.com>
+>
+> ```
+> Browser
+>   └─ Vercel (Hobby, fra1) ......... Next.js console; the token never reaches the browser
+>        └─ Render (Free, Frankfurt) . FastAPI in Docker; migrations at container start
+>             ├─ Neon (Free, eu-central-1) ..... PostgreSQL `lecp_demo`, synthetic only
+>             └─ Upstash (Free, eu-central-1) .. Redis, readiness probe only
+> ```
+
+
 `deployment.md` describes deploying this control plane to Fly.io and Neon the way you would deploy
 something that mattered. This document describes something different and smaller: a **public
 portfolio demonstration** on free tiers, whose entire purpose is that a stranger can click a link
@@ -13,12 +25,12 @@ imaginary money between imaginary accounts.
 
 ## 1. The stack, and why each piece
 
-| Layer | Service | Plan | Region |
-|---|---|---|---|
-| Console | Vercel | Hobby | `fra1` |
-| Control plane | Render Web Service (Docker) | Free | Frankfurt |
-| PostgreSQL | Neon | Free | `eu-central-1` |
-| Redis | Upstash | Free | `eu-central-1` |
+| Layer | Service | Plan | Region | Live URL |
+|---|---|---|---|---|
+| Console | Vercel | Hobby | `fra1` | <https://ledger-exception-control-plane-livid.vercel.app> |
+| Control plane | Render Web Service (Docker) | Free | Frankfurt | <https://lecp-demo-api.onrender.com> |
+| PostgreSQL | Neon | Free | `eu-central-1` | `lecp_demo` (not public) |
+| Redis | Upstash | Free | `eu-central-1` | (not public) |
 
 One region, chosen so the database is next to the thing querying it. No multi-region anything.
 
@@ -138,6 +150,20 @@ system actually is.
   offers a promotion gate, so the pipeline is Preflight → Tests → Security → Build → *provider
   deploys* → Smoke, and there is no approval step. An approval job that waited for a click and then
   did nothing would be worse than none.
+
+**The demonstration is consumable, and resets**
+
+- **The fault-injection control spends its target.** The seeder leaves exactly one posting awaiting
+  a first dispatch; injecting the fault settles it. This was found by exercising the deployed
+  instance, not by reading it: the centrepiece worked once, for the first visitor, and everyone
+  afterwards found a disabled button.
+- **`POST /api/v1/demo/reset` puts it back**, and the console offers it as a button beside the
+  injector. It is demo-mode-only, operator-only, and refuses outright unless the target database is
+  named as disposable — that last guard is what makes a destructive route safe to publish, because
+  pointed anywhere else it refuses rather than deleting.
+- **A visitor can therefore reset another visitor's state.** True, documented, and acceptable at
+  this concurrency. The alternative — per-visitor state — is a session-scoped database, which is a
+  different product.
 
 **What the demonstration is made of**
 

@@ -278,6 +278,51 @@
         "title": "DecisionResponse",
         "type": "object"
       },
+      "DemoResetReport": {
+        "additionalProperties": false,
+        "description": "What a reset of the public demonstration left behind.",
+        "properties": {
+          "approved": {
+            "title": "Approved",
+            "type": "integer"
+          },
+          "awaiting_dispatch": {
+            "title": "Awaiting Dispatch",
+            "type": "integer"
+          },
+          "dead_lettered": {
+            "title": "Dead Lettered",
+            "type": "integer"
+          },
+          "dispatched": {
+            "title": "Dispatched",
+            "type": "integer"
+          },
+          "exceptions": {
+            "title": "Exceptions",
+            "type": "integer"
+          },
+          "explanation": {
+            "title": "Explanation",
+            "type": "string"
+          },
+          "in_recovery": {
+            "title": "In Recovery",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "exceptions",
+          "approved",
+          "dispatched",
+          "dead_lettered",
+          "in_recovery",
+          "awaiting_dispatch",
+          "explanation"
+        ],
+        "title": "DemoResetReport",
+        "type": "object"
+      },
       "DependencyReport": {
         "additionalProperties": false,
         "description": "One dependency's readiness result: a name and a status, never a reason string.",
@@ -742,6 +787,10 @@
             "title": "Ledger Adapter",
             "type": "string"
           },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
           "version": {
             "title": "Version",
             "type": "string"
@@ -750,7 +799,8 @@
         "required": [
           "version",
           "demo_mode",
-          "ledger_adapter"
+          "ledger_adapter",
+          "revision"
         ],
         "title": "MetaView",
         "type": "object"
@@ -1145,6 +1195,56 @@
           }
         },
         "summary": "List Fault Targets",
+        "tags": [
+          "control-plane"
+        ]
+      }
+    },
+    "/api/v1/demo/reset": {
+      "post": {
+        "description": "Put the demonstration back to its seeded state.\n\n**This exists because the demonstration is consumable and the deployed one ran out.** The\nseeder leaves exactly one posting awaiting its first dispatch, which is what the fault-injection\ncontrol acts on. Press that control and the posting is spent \u2014 so on the public demonstration\nthe centrepiece worked once, for the first visitor, and every visitor afterwards found a\ndisabled button. Found by exercising the deployed instance rather than by reading it.\n\nThree guards, the same ones the injector carries plus one:\n\n* **404 outside demo mode**, so this does not exist on an instance doing real work;\n* **operator authority**, because resetting discards recorded decisions;\n* **the target database must be disposable** \u2014 `assert_target_is_disposable` refuses any name\n  outside ``lecp_(test|demo|fixtures)``. That is the guard that makes a destructive route safe\n  to publish at all: pointed at anything else it refuses rather than deleting.\n\nIt is destructive *by design and only of invented rows*. Everything it removes was written by\nthe seeder from a settlement file this repository generates, against a simulated ledger. There\nis no path from here to a real financial system, because this repository contains no adapter\nthat reaches one.",
+        "operationId": "reset_demonstration_api_v1_demo_reset_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoResetReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reset Demonstration",
         "tags": [
           "control-plane"
         ]

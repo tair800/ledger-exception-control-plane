@@ -1,12 +1,25 @@
-# Deployment
+# Deployment — the Fly.io path (not the live one)
 
-**Nothing in this repository is deployed.** No Fly app exists, no Neon project exists, no
-credential exists, and no deploy has ever run. What exists is deployment-*ready* configuration and a
-pipeline that stays green and inert until the credentials below are added. This document is the
-instruction set for making it live; `docs/runbook.md` is what to do once it is.
+> **This is not what is deployed.** The public demonstration runs on **Vercel + Render + Neon +
+> Upstash** and is live at <https://ledger-exception-control-plane-livid.vercel.app>. For the
+> architecture that is actually running, its URLs and its limitations, read
+> [`demo-deployment.md`](demo-deployment.md).
+>
+> This document describes the **Fly.io** path: what this system would get if it were deployed the
+> way something that mattered gets deployed — one image per commit promoted by digest, a
+> staging→production pipeline behind an approval gate, and migrations applied as a release command
+> rather than from the application process.
+>
+> It is kept for two reasons. It is the better architecture, and the free tier's compromises are
+> only legible against it — `demo-deployment.md` §5 explains why migrations moved to the container
+> entrypoint by pointing at the reasoning here. And `deploy.yml` still implements it, gated on
+> secrets that are not set, so it stays green and inert.
+>
+> **No Fly app exists and no deploy on this path has ever run.**
 
-Read this document end to end before the first deploy. The [prerequisites](#0-prerequisites-that-block-the-first-deploy)
-section lists three changes outside this lane's ownership that the first deploy fails without.
+Read this document end to end before deploying on this path. The [prerequisites](#0-prerequisites-that-block-the-first-deploy)
+section lists three changes outside this lane's ownership that the first deploy fails without;
+`docs/runbook.md` is what to do once it is live.
 
 ---
 

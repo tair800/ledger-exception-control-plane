@@ -10,7 +10,54 @@ by pure typed Python. A committed chaos suite proves the reliability claim again
 unsafe baseline that double-posts — because a suite that passes on both branches proves nothing.
 
 Python 3.12 · FastAPI · PostgreSQL 16 · SQLAlchemy 2 · Alembic · Next.js 15 + TypeScript · Docker ·
-GitHub Actions · Fly.io
+GitHub Actions · Vercel · Render · Neon · Upstash
+
+---
+
+## ▶ Live demo
+
+**<https://ledger-exception-control-plane-livid.vercel.app>**
+
+Sign in with any of three published tokens — they are meant to be public:
+
+| Token | Role | What it can do |
+|---|---|---|
+| `demo-controller` | controller | Approve or edit a treatment. **Cannot** work the failure queues. |
+| `demo-operator` | operator | Dead letters, recovery, and the fault-injection control. **Cannot** approve. |
+| `demo-analyst` | analyst | Read everything, reject a treatment. **Cannot** authorise a posting. |
+
+The separation is enforced server-side, not by hiding buttons: signing in as the analyst and
+calling approve returns `403 role_may_not_approve`.
+
+**Start here:** open an exception → read the evidence and the proposal → look at the *Demo* tab and
+press **Crash after the socket write**. That injects the failure §19.1 names — the ledger commits
+the posting and the response is lost — and shows you what the system concluded beside what actually
+happened at the ledger. Press it a second time: the applied count stays at **1** while the received
+count goes to **2**. Two requests, one financial effect.
+
+### What this demo is, and is not
+
+- **Every row is synthetic.** A settlement file this repository generates. No customer data, no
+  real merchant, no real money.
+- **The ledger is simulated.** An in-process double. This repository contains **no real ledger
+  integration at all**, so a deployment cannot accidentally acquire one.
+- **No live model is called.** The proposal you see is a declared stand-in — its `model_id` reads
+  `stand-in` and its rationale opens by saying it was not produced by a model. No provider
+  credential is configured anywhere in the deployment. **Live model quality, cost and latency
+  remain NOT MEASURED.**
+- **The backend sleeps.** Render's free tier scales to zero, so the first request after a quiet
+  period waits up to a minute while a container starts. The console tells you that rather than
+  showing an error.
+- **The demo tokens are published on purpose.** They are safe because of what they reach — a
+  disposable database of invented rows behind a simulated ledger — and for no other reason. They
+  grant no access to anything else.
+
+Backend: <https://lecp-demo-api.onrender.com> ([health](https://lecp-demo-api.onrender.com/healthz)
+· [readiness](https://lecp-demo-api.onrender.com/readyz) ·
+[API browser](https://lecp-demo-api.onrender.com/docs))
+
+Deployment topology, region choice and the full free-tier limitation list:
+[`docs/demo-deployment.md`](docs/demo-deployment.md).
 
 ---
 
@@ -549,18 +596,36 @@ an earlier version. Where a fence was found to be measuring nothing, the fix is 
 
 ## Deployment
 
-Deployment-ready and **not deployed**. Fly.io for the app, Neon for PostgreSQL, migrations applied as
-a release command rather than from the application process — a process that migrates on boot races
-every replica for the same DDL.
+**Deployed, on free tiers, as a public demonstration.**
 
-The pipeline is `preflight → tests → security → build → deploy staging → staging smoke →
-production approval → deploy production → production smoke`. Deploy jobs are **gated on the presence
-of their secrets**, so the pipeline is green today and becomes live when the owner adds them. One
-image per commit, identified downstream by digest, so production deploys the exact artifact staging
-smoke-tested.
+```
+Browser
+  └─ Vercel (Hobby, fra1) ......... Next.js console; the bearer token never leaves the server
+       └─ Render (Free, Frankfurt) . FastAPI in Docker; migrations run at container start
+            ├─ Neon (Free, eu-central-1) ..... PostgreSQL `lecp_demo`, synthetic rows only
+            └─ Upstash (Free, eu-central-1) .. Redis — read by the readiness probe and nothing else
+```
 
-`docs/deployment.md` carries the full environment contract by variable **name**, the manual setup
-steps, and rollback. `docs/runbook.md` carries the operator procedures.
+One region throughout, so the database sits next to what queries it. The demonstration is
+[described above](#-live-demo); [`docs/demo-deployment.md`](docs/demo-deployment.md) carries the
+compatibility audit, the environment contract by variable **name**, and the limitations in full —
+cold start, one instance, no scheduled passes, no approval gate on either free plan.
+
+Two things that had to be handled rather than hoped past, both found before deploying:
+
+- **Neon's connection string breaks SQLAlchemy while leaving the health check green.** `asyncpg`
+  parses a DSN *string* and understands `sslmode`; SQLAlchemy splits the query into *keyword
+  arguments*, and `asyncpg.connect` has no `**kwargs`. So `/readyz` passes and every query raises.
+  `db/engine.py` normalises the DSN and `tests/test_engine_dsn.py` pins it, database-free.
+- **Migrations move to the container entrypoint**, because Render's free plan has no release hook.
+  That contradicts the Dockerfile's own argument against migrating on boot, and the exemption is
+  specific rather than convenient: the free plan runs exactly one instance, so there is no replica
+  to race. The limitation returns the moment it is scaled, and is recorded as such.
+
+**A separate Fly.io path remains in the repository** — `deployment/fly.*.toml` and `deploy.yml`,
+with a digest-promoted staging→production pipeline behind an approval gate. It is the deployment
+this system would get if it mattered, it deploys nothing today, and it skips cleanly when
+unconfigured. `docs/deployment.md` describes it; `docs/runbook.md` carries the operator procedures.
 
 ## Repository structure
 

@@ -673,6 +673,17 @@ def test_the_generator_imports_nothing_that_could_make_it_a_matcher() -> None:
         "ledger_exception_control_plane.fixtures",
         "ledger_exception_control_plane.db",
         "ledger_exception_control_plane.config",
+        # Added deliberately, and this list is short so that adding to it is a visible edit.
+        #
+        # `disposable` holds the "is this database safe to destroy" rule, which used to live in
+        # `loader.py` itself. It moved because the demo reset endpoint needs the same guard and a
+        # production module may not import the fixtures package — see `disposable.py`. The loader
+        # now re-exports from it, which is what makes this import necessary.
+        #
+        # Safe against what this guard is protecting: the module reads a DSN and matches a name
+        # against a regex. It holds no corpus, no scenario label, and nothing resembling a matching
+        # rule, so it cannot turn the generator into a matcher.
+        "ledger_exception_control_plane.disposable",
     )
 
     for name, tree in _fixture_sources():
@@ -775,9 +786,13 @@ def test_the_loader_refuses_anything_else(name: str) -> None:
 
     The developer machine this was built on runs an unrelated PostgreSQL on the default port,
     so 'it will probably be configured correctly' is not a control.
+
+    The refusal says "destructive operation" rather than "load fixtures" because the guard moved
+    out of the fixtures package: the demo reset endpoint asks it the same question before deleting
+    a row, and a message naming only fixtures would be wrong in the case that matters most.
     """
     settings = Settings(postgres_dsn=SecretStr(f"postgresql://u:p@localhost:15432/{name}"))
-    with pytest.raises(UnsafeTargetError, match="refusing to load fixtures"):
+    with pytest.raises(UnsafeTargetError, match="refusing a destructive operation"):
         assert_target_is_disposable(settings)
 
 

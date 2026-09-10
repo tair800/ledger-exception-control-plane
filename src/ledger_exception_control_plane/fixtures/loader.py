@@ -22,16 +22,30 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-import re
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ledger_exception_control_plane.config import Settings
-from ledger_exception_control_plane.db.engine import async_dsn, create_engine
+from ledger_exception_control_plane.db.engine import create_engine
 from ledger_exception_control_plane.db.models import LedgerEntry, SettlementBatch, SettlementLine
+
+# Re-exported for every existing caller. `as` form because mypy's strict re-export rule wants a
+# module to say explicitly which names it passes on, and these are part of this module's published
+# surface even though the rule they implement now lives elsewhere.
+from ledger_exception_control_plane.disposable import (
+    DISPOSABLE_DATABASE as DISPOSABLE_DATABASE,
+)
+from ledger_exception_control_plane.disposable import (
+    UnsafeTargetError as UnsafeTargetError,
+)
+from ledger_exception_control_plane.disposable import (
+    assert_target_is_disposable as assert_target_is_disposable,
+)
+from ledger_exception_control_plane.disposable import (
+    database_name as database_name,
+)
 from ledger_exception_control_plane.fixtures.generator import (
     MANIFEST_PATH,
     RECORDS_PATH,
@@ -45,17 +59,10 @@ from ledger_exception_control_plane.fixtures.schema import (
 )
 from ledger_exception_control_plane.fixtures.serialise import content_digest
 
-#: Databases a fixture load may target. Deliberately a closed pattern rather than a warning:
-#: the primary application database and anything unrecognised are both refused.
-DISPOSABLE_DATABASE = re.compile(r"^lecp_(test|demo|fixtures)$")
-
-
-class UnsafeTargetError(RuntimeError):
-    """Raised when a target is not one the fixture system may write to.
-
-    Covers both destructive targets: the database a corpus would be loaded into, and the
-    directory a corpus would be written to. One idea, one exception.
-    """
+# The disposability rule lives in `disposable.py` and is re-exported here, because the demo
+# reset endpoint needs the same guard and a production module may not import this package — see
+# that module's docstring. Re-exported rather than moved-and-rewired so every existing caller and
+# test keeps working against one implementation.
 
 
 class CorpusIntegrityError(RuntimeError):
@@ -114,47 +121,6 @@ def read_corpus(root: Path) -> LoadedCorpus:
         manifest=manifest,
         root=root,
     )
-
-
-#: What a database name may look like before it is safe to put in an error message.
-_PRINTABLE_NAME = re.compile(r"^[A-Za-z0-9_.\-]{0,63}$")
-
-
-def database_name(settings: Settings) -> str:
-    """The database a DSN points at.
-
-    ``urlsplit`` ends the netloc at the first ``/``, so a password containing an unencoded
-    slash pushes the rest of the credential — and the user, host and port — into what looks
-    like a path. The value returned here is therefore *not* guaranteed to be only a database
-    name, and callers must not print it blindly. See :func:`_printable`.
-    """
-    return urlsplit(async_dsn(settings)).path.lstrip("/")
-
-
-def _printable(name: str) -> str:
-    """A database name that is safe to put in an error message, or a placeholder.
-
-    §17 treats an error message as a log line waiting to happen. A malformed DSN is exactly
-    the case where the parsed 'name' may carry credential material, and it is also exactly the
-    case someone is most likely to be debugging with the message in front of them.
-    """
-    return repr(name) if _PRINTABLE_NAME.fullmatch(name) else "<not a valid database name>"
-
-
-def assert_target_is_disposable(settings: Settings) -> str:
-    """Refuse to load into anything that is not obviously a throwaway database.
-
-    Named databases only. Checking the port instead would be weaker — a disposable database can
-    live on any port, and the primary one can live on the project's — and checking a flag would
-    put the decision in whichever caller forgot to pass it.
-    """
-    name = database_name(settings)
-    if not DISPOSABLE_DATABASE.fullmatch(name):
-        raise UnsafeTargetError(
-            f"refusing to load fixtures into {_printable(name)}: "
-            f"the target must match {DISPOSABLE_DATABASE.pattern}"
-        )
-    return name
 
 
 async def load(loaded: LoadedCorpus, settings: Settings, *, reset: bool = False) -> dict[str, int]:

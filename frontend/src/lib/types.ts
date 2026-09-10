@@ -305,6 +305,17 @@ export interface ReplayReportView {
  * Carries no monetary amount. Choosing which posting to fault does not need one, and a select
  * option is not a place to start rendering money.
  */
+/** What a reset of the public demonstration left behind. */
+export interface DemoResetReport {
+  exceptions: number;
+  approved: number;
+  dispatched: number;
+  dead_lettered: number;
+  in_recovery: number;
+  awaiting_dispatch: number;
+  explanation: string;
+}
+
 export interface FaultTargetView {
   exception_id: string;
   psp_reference: string | null;
@@ -412,6 +423,7 @@ export interface ConsoleMeta {
     dlq_replay: boolean;
     demo_inject_crash: boolean;
     demo_fault_targets: boolean;
+    demo_reset: boolean;
     identity: boolean;
     meta: boolean;
     request_edit: boolean;

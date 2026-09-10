@@ -47,6 +47,7 @@ export function meta(overrides: Partial<ConsoleMeta> = {}): ConsoleMeta {
       dlq_replay: false,
       demo_inject_crash: false,
       demo_fault_targets: false,
+      demo_reset: false,
       identity: true,
       meta: false,
       request_edit: false,
