@@ -171,10 +171,13 @@ system actually is.
   is no customer data, no real merchant, no real amount.
 - **The ledger is simulated.** `SimulatedLedger` is an in-process double. There is no real ledger
   integration in this repository at all, so a deployment cannot accidentally acquire one.
-- **The proposal is a stand-in, not a model.** No provider credential is configured and no live
-  call is made. The proposal shown in the console declares itself: its `model_id` is `stand-in` and
-  its rationale opens by saying it was not produced by a model. **Live model quality, cost and
-  latency remain NOT MEASURED.**
+- **The proposal is a stand-in, not a model.** No provider credential is configured on any of the
+  four services and no live call is made from any of them. The proposal shown in the console
+  declares itself: its `model_id` is `stand-in` and its rationale opens by saying it was not
+  produced by a model. **A live model has since been measured — on a workstation, over the golden
+  set, and reported in `docs/evaluation.md` §8 — and that measurement is not a capability of this
+  deployment.** Pointing the demonstration at a provider would need a credential nobody has set
+  here, which is the intended state.
 - **The demo principals are published.** `demo-controller`, `demo-operator` and `demo-analyst` are
   in the `Makefile` beside their hashes, and a test asserts they appear nowhere else. They are safe
   because of what they reach — a disposable database of invented rows behind a simulated ledger —

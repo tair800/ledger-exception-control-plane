@@ -3,13 +3,17 @@
 Resume point for every session. Read this after `CLAUDE.md`, then check `git status` and recent
 commits before doing anything.
 
-**Current status: PROJECT 1 PORTFOLIO MVP COMPLETE, AND LIVE.**
+**Current status: PROJECT 1 COMPLETE — deployed, human-validated, and model-measured.**
 Console <https://ledger-exception-control-plane-livid.vercel.app> ·
 API <https://lecp-demo-api.onrender.com> — sign in as `demo-controller`, `demo-operator` or
-`demo-analyst`. Every repository-side engineering task is done. Of the three items that needed the
-owner rather than more code, **two are now discharged** — the human hold-out and the deployment —
-and **one remains pending**: no live model measurement exists. They are listed under *Pending
-owner-assisted validation* below.
+`demo-analyst`. Every repository-side engineering task is done, and **all three items that needed
+the owner rather than more code are now discharged** — the human hold-out, the deployment, and the
+live model evaluation. They are listed with their evidence under *Owner-assisted validation* below.
+
+**The model measurement is a negative result and is reported as one.** 27.8% accuracy over the 250
+golden records against an 85.6% constant-answer baseline; 97.2% on the 36 records where a proposal
+changes what happens; 178 of 214 escalate-labelled records answered with a concrete treatment
+instead. The approval gate is what stands between that and 178 unwarranted postings (ADR-070).
 **Where the work stands:** M0–M8 and M10–M11 are delivered. The 4.5 kill-test gate passed and is a
 standing CI step. The operations console, the local demo, the evaluation harness, the observability
 conventions and the gated deployment pipeline all exist and are tested. See ADR-059 for the kill
@@ -54,15 +58,16 @@ scenarios**; `main` applies **at most once in all twenty-one cells**; and every 
 observed cells matches an expectation declared before the run. §19's results table is generated into
 `README.md` from what that run recorded at the ledger.
 
-### Pending owner-assisted validation
+### Owner-assisted validation
 
-Three things were built but not *validated*, each needing an action only the owner could take. Two
-are now discharged and are recorded here with their evidence; the third is still pending and is
-reported as pending rather than counted as done.
+Three things were built but not *validated*, each needing an action only the owner could take.
+**All three are now discharged**, and each is recorded here with the evidence rather than the
+claim. Nothing in this table is pending.
 
 | Item | State | What unblocks it |
 |---|---|---|
-| **Live model quality, cost and latency** | **NOT MEASURED** | Provider credentials. The committed cassettes are synthesised and their treatments are assigned round-robin, so agreement with the golden labels is arithmetic. `live-eval` exists, refuses to run without an explicit opt-in, and documents the variable **names** only. No paid call has been made. |
+| **Live model quality and latency** | **MEASURED 2026-09-10 (ADR-070)** | One bounded run, 250 records, **251 live calls** against a declared ceiling of 750, through an OpenAI-compatible OmniRoute route (alias `auto/best-free`; every response named `gpt-5.5`, and the physical upstream is not verifiable from here so it is not claimed). **Schema-valid 248/250 = 99.2%**; 2 truncated tool arguments, refused rather than coerced. **Accuracy 27.8% over all 250 against an 85.6% constant-answer baseline — a −57.8% lift — and 97.2% on the 36 priceable records.** Abstention 13.7%, none of it on a priceable case. Latency min 2.20s / p50 4.80s / p95 8.15s / max 17.97s. Tokens 799,492 in, 46,703 out. **The finding: the model is good at the judgement and bad at declining to make one** — 178 of 214 escalate-labelled records got a concrete treatment. The cassette is committed with `origin: captured` and replays offline to the identical 248 proposals. |
+| **Live model cost** | **NOT MEASURED, and cannot be from here** | The calls ran through the owner's subscription-backed OmniRoute route, which returns no billing or cost field. A list-price equivalent is deliberately **not** estimated: it would need the physical upstream behind the routed alias, which cannot be verified, and an estimate printed beside measured figures becomes a measured figure by proximity. |
 | **Human-labelled hold-out slice** | **CONFIRMED — OPEN-15 closed** | 25 records, frozen at `hold_out_sha256 cfa62715…`, hold-out version 1, labelled by the owner on 2026-09-09 and **agreeing with the derived table on all 25**. The confirmations are committed at `tests/golden/human-label-packet/confirmed.jsonl`; the golden set now carries `label_source: human` on exactly those 25, with who confirmed each and when. **No `expected_treatment` moved** — the evaluation gate reported only a schema version and a hash as different, which is the independent proof that nothing but provenance changed. **What it establishes is narrower than 25 rows suggests (ADR-067, ADR-068): the derived label is a pure function of the classification, so this is four independent judgements, not 25.** A disagreeing confirmation would have been refused rather than applied, and that branch is tested. |
 | **Live deployment** | **LIVE — OPEN-10 closed** | Console <https://ledger-exception-control-plane-livid.vercel.app> (Vercel Hobby, `fra1`), API <https://lecp-demo-api.onrender.com> (Render Free, Docker, Frankfurt), PostgreSQL on Neon Free and Redis on Upstash Free, all `eu-central-1`. **Zero cost, and no process was merged or semantic weakened to fit** — there is no worker to collapse, and a guard test has forbidden one since 4.3 (ADR-069 §2). A compatibility audit run *before* deploying caught a DSN incompatibility that would have produced a deployment reporting itself healthy while every query failed (§1). Migrations run at container start, which contradicts the Dockerfile, and the exemption is a property of the free plan's single instance rather than of the design (§3). **It is not a production financial deployment**: synthetic rows, a simulated ledger, a `stand-in` proposal and published demo principals. Every limitation is in `docs/demo-deployment.md`; `docs/deployment.md` is the Fly.io path and is not the live one. |
 
@@ -100,7 +105,8 @@ correctly *given* an enforcing ledger rather than that any particular ledger enf
 | **4.5 KILL-TEST GATE — the chaos suite and the `naive/` RED baseline** | **PASSED** | 54 scenario runs, both branches, three capability configurations, real PostgreSQL. `naive/` double-posts in 5 of 7 scenarios; `main` applies at most once in all 21 cells; all 42 observed cells match the expectation declared before the run. Faults are a closed enum injected through a port; a five-mutant battery proves the instrumentation can still go red; §19's table is generated from the run |
 | **6.1 Golden set and treatment-proposal scorer** | **DONE** | 250 labelled exceptions generated by running the shipped deterministic stages over a seeded corpus; labels derived from the classifier's output and the account policy, never from the corpus's answer key. Scorer reports §20's accuracy, abstention rate and confusion — plus the constant-answer baseline, accuracy on the 36 priceable records, and abstention split by whether escalating was correct, because 85.6% of the set is one label. A synthesised-cassette run is refused the words "model accuracy". ADR-060; **OPEN-15** opened for the human hold-out confirmation |
 | **6.2 CI evaluation gate** | **DONE** | A reproduction gate: replays the committed cassette through the shipped proposal path for both providers and compares every scorer figure with a committed baseline, exactly. Labelled in its own artefact as **not** a model-quality gate, because the cassettes are synthesised and their treatments assigned round-robin. **OPEN-6 deliberately not resolved** — a threshold cannot be chosen before a real capture. ADR-063 |
-| **6.3 Three-arm comparison harness** | **DONE** | Deterministic arm measured (pair precision, recall, p95 per line, described as wall clock on the machine that produced it). LLM-as-matcher and the hybrid's model half report `NOT MEASURED` with the reason. Cost from provider usage fields or no number at all. ADR-063 |
+| **6.3 Three-arm comparison harness** | **DONE** | Deterministic arm measured (pair precision, recall, p95 per line, described as wall clock on the machine that produced it). LLM-as-matcher and the hybrid's model half report `NOT MEASURED` with the reason — and **still do after 6.4**, because that arm asks a model to do the *matching*, which is a different task. Cost from provider usage fields or no number at all. ADR-063 |
+| **6.4 Live model evaluation** | **DONE — and a negative result** | One bounded run over all 250 golden records: 251 live calls against a declared 750 ceiling, **99.2% schema-valid**, **97.2% accurate on the 36 priceable records**, **27.8% overall against an 85.6% constant-answer baseline**, abstention 13.7% with none on a priceable case, p95 8.15s, 846,195 tokens. The model is good at the judgement and bad at declining to make one: 178 of 214 escalate-labelled records got a concrete treatment, which is what makes the approval gate load-bearing. An OpenAI-compatible route accepted `response_format` and did not enforce it — found by probing *before* the run, so a tool-calling envelope was added rather than a gateway limitation being published as a model score. The guard keeping `src/` free of HTTP clients was **not** weakened: the transport lives under `tests/`. ADR-070 |
 | **7.1 Exception queue and detail** | **DONE** | Next.js 15 + TypeScript. All fifteen required elements reachable; provenance in two clicks. The token never reaches the browser; the console performs no arithmetic on money; it probes the control plane's published paths rather than assuming. 82 frontend tests, production build green. ADR-062 |
 | **7.2 Approval flow, DLQ view and fault-injection demo** | **DONE** | Approval round-trips; the DLQ replays through 4.3's own path; the demo control injects §19.1's fault through 4.5's port and shows the ledger's applied count beside what the system concluded. 404 outside demo mode. A defect in the first version — a fresh ledger per injection destroying the suppression — is recorded in ADR-062 §4 |
 | **8.1 OpenTelemetry and Langfuse conventions** | **PARTIAL** | Conventions, §18's metrics, redaction and the correlation contract delivered as committed data with 81 tests, degrading to a no-op with no SDK installed. **§18's exit criterion is not discharged**: tracing one exception end to end in Langfuse needs the dependency and a collector. Two GenAI attributes recorded as absent by name, because no model call is made. ADR-064 |

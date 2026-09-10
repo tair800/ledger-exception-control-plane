@@ -279,9 +279,11 @@ cassette-verify: ## Prove the harness replays the whole corpus offline (no key, 
 # accuracy and abstention thresholds a build should fail on remain OPEN-6, and cannot be chosen
 # before a real capture exists.
 #
-# `live-eval` is deliberately absent from this file. It is the one command that would reach a paid
-# API, it is gated on an explicit environment opt-in, and putting it behind a `make` target would
-# make it one tab-completion away from a run nobody meant to pay for.
+# `live-eval` is deliberately absent from this file, and stays absent now that it works. It is the
+# one command that reaches a paid API, it is gated on two explicit environment opt-ins, and putting
+# it behind a `make` target would make it one tab-completion away from a run nobody meant to pay
+# for. 6.4 ran it as `python -m tests.evaluation live-eval` with both switches set in the shell for
+# the length of the run, which is the friction the omission is there to preserve.
 #
 # A second `.PHONY` rather than an edit to the one at the top of the file. Make accumulates them,
 # so a block that declares its own targets can be added or removed in one piece.

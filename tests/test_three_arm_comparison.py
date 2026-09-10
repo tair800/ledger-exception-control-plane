@@ -18,10 +18,13 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import decimal
+import inspect
+import pathlib
 import uuid
 
 import pytest
 
+import ledger_exception_control_plane
 from ledger_exception_control_plane.db.control import (
     ConfidenceBand,
     EvidenceKind,
@@ -29,7 +32,12 @@ from ledger_exception_control_plane.db.control import (
     TreatmentCode,
 )
 from ledger_exception_control_plane.fixtures.schema import Profile
-from ledger_exception_control_plane.llm.cassette import Cassette, Origin, load_cassette
+from ledger_exception_control_plane.llm.cassette import (
+    CAPTURE_OPT_IN,
+    Cassette,
+    Origin,
+    load_cassette,
+)
 from ledger_exception_control_plane.llm.evidence import (
     CandidateEntryFact,
     EvidenceItem,
@@ -38,10 +46,12 @@ from ledger_exception_control_plane.llm.evidence import (
     evidence_id_for,
 )
 from ledger_exception_control_plane.llm.port import ProviderId
+from ledger_exception_control_plane.llm.providers import openai_tools
 from ledger_exception_control_plane.llm.schema import EvidenceRef, TreatmentProposal
 from ledger_exception_control_plane.matching import DEFAULT_POLICY
 from tests.cassette_builder import corpus_subjects
 from tests.evaluation import __main__ as cli
+from tests.evaluation import livetransport
 from tests.evaluation.arms import (
     ARM_INSTANCES,
     ARM_ORDER,
@@ -59,6 +69,11 @@ from tests.evaluation.arms import (
     render_comparison,
 )
 from tests.evaluation.golden import GOLDEN_INSTANCES, GOLDEN_PROFILE, GOLDEN_SEED
+from tests.evaluation.livetransport import (
+    API_KEY_VARIABLE,
+    BASE_URL_VARIABLE,
+    MODEL_VARIABLE,
+)
 from tests.evaluation.replay import REPLAY_CASSETTE, origin_of
 from tests.evaluation.scorer import CassetteOrigin
 
@@ -428,22 +443,75 @@ def test_live_eval_refuses_without_the_opt_in(
     assert "is not set to 1" in stderr
 
 
-def test_live_eval_refuses_even_with_the_opt_in_because_there_is_no_transport(
+def test_live_eval_refuses_with_only_one_of_the_two_opt_ins(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """**The second refusal, and the honest one.**
+    """**The second gate, and it is now the honest one.**
 
-    Nothing under ``llm/`` imports an HTTP client and no transport that speaks HTTP exists in this
-    repository. That is the property that makes every other evaluation command provably offline, so
-    the opt-in being set does not make a capture possible — it only records that somebody intends
-    one.
+    This test used to assert that a capture was impossible because no HTTP transport existed in
+    the repository. 6.4 made one exist — under ``tests/``, so the guard on ``llm/`` is untouched —
+    and the assertion was narrowed rather than deleted, because the claim underneath it never
+    depended on the transport being absent.
+
+    Capturing a fixture and *measuring a model against a paid API* are different decisions. One
+    variable for both would mean anyone recording a cassette had also authorised a measurement
+    run, so each is required and neither implies the other.
+    """
+    for name in (BASE_URL_VARIABLE, MODEL_VARIABLE, API_KEY_VARIABLE):
+        monkeypatch.setenv(name, "unused-by-this-test")
+
+    monkeypatch.setenv(cli.LIVE_EVAL_OPT_IN, "1")
+    monkeypatch.delenv(CAPTURE_OPT_IN, raising=False)
+    assert cli.main(["live-eval"]) == 1
+    assert f"{CAPTURE_OPT_IN} is not set to 1" in capsys.readouterr().err
+
+    monkeypatch.delenv(cli.LIVE_EVAL_OPT_IN, raising=False)
+    monkeypatch.setenv(CAPTURE_OPT_IN, "1")
+    assert cli.main(["live-eval"]) == 1
+    assert f"{cli.LIVE_EVAL_OPT_IN} is not set to 1" in capsys.readouterr().err
+
+
+def test_live_eval_refuses_when_the_route_is_not_configured(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both opt-ins set and no route: still refused, and the missing names are listed.
+
+    The refusal names variables, never asks for a value, and cannot be satisfied by accident —
+    which is what makes it safe for this test to set both opt-ins in a suite CI runs.
     """
     monkeypatch.setenv(cli.LIVE_EVAL_OPT_IN, "1")
-    assert cli.main(["live-eval"]) == 1
+    monkeypatch.setenv(CAPTURE_OPT_IN, "1")
+    for name in (BASE_URL_VARIABLE, MODEL_VARIABLE, API_KEY_VARIABLE):
+        monkeypatch.delenv(name, raising=False)
 
+    assert cli.main(["live-eval"]) == 1
     stderr = capsys.readouterr().err
-    assert "no transport that speaks HTTP" in stderr
-    assert "necessary and not sufficient" in stderr
+    for name in (BASE_URL_VARIABLE, MODEL_VARIABLE, API_KEY_VARIABLE):
+        assert name in stderr
+
+
+def test_the_live_transport_is_not_in_the_shipped_package() -> None:
+    """6.4 added an HTTP transport. It is under ``tests/``, and that is the whole design.
+
+    ``test_proposal_firewall.py`` fails the build if anything under ``src/…/llm/`` imports an HTTP
+    client. That guard was not widened, exempted or moved to let a live run happen — the transport
+    was put where the cassette module always said it belonged: *"recording wraps a transport an
+    operator supplies and nothing here owns a socket."*
+
+    Asserted from this side too, because a future edit that "tidied" the transport into the
+    package would be caught by the firewall guard with a message about imports, and this one says
+    what the actual mistake was.
+    """
+    package = pathlib.Path(inspect.getfile(ledger_exception_control_plane)).parent
+    assert not (package / "llm" / "livetransport.py").exists()
+    transport = pathlib.Path(inspect.getfile(livetransport)).resolve()
+    assert transport.parent.name == "evaluation"
+    assert package.resolve() not in transport.parents
+
+    # The adapter that made the live run possible *is* shipped, and must stay dial-free.
+    source = pathlib.Path(inspect.getfile(openai_tools)).read_text(encoding="utf-8")
+    for banned in ("httpx", "requests", "aiohttp", "urllib", "socket"):
+        assert f"import {banned}" not in source
 
 
 def test_live_eval_names_the_variables_and_prints_no_value(
@@ -456,20 +524,20 @@ def test_live_eval_names_the_variables_and_prints_no_value(
     waiting to happen in any repository secret scan — and a repository whose secret scan cries wolf
     is one where the real hit gets waved through.
     """
-    fake_anthropic = "sk-" + "ant-" + "n" * 24
-    fake_openai = "sk-" + "n" * 28
+    fake_key = "sk-" + "n" * 28
 
     monkeypatch.setenv(cli.LIVE_EVAL_OPT_IN, "1")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", fake_anthropic)
-    monkeypatch.setenv("OPENAI_API_KEY", fake_openai)
+    monkeypatch.delenv(CAPTURE_OPT_IN, raising=False)
+    monkeypatch.setenv(API_KEY_VARIABLE, fake_key)
+    monkeypatch.setenv(BASE_URL_VARIABLE, "https://example.invalid/v1")
+    monkeypatch.setenv(MODEL_VARIABLE, "some/alias")
 
     cli.main(["live-eval"])
     stderr = capsys.readouterr().err
 
-    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CASSETTE_CAPTURE"):
+    for name in (API_KEY_VARIABLE, BASE_URL_VARIABLE, MODEL_VARIABLE, CAPTURE_OPT_IN):
         assert name in stderr
-    assert fake_anthropic not in stderr
-    assert fake_openai not in stderr
+    assert fake_key not in stderr
     assert "sk-" not in stderr, "nothing credential-shaped may reach the output at all"
 
 

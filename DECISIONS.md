@@ -4366,6 +4366,173 @@ the trade this tier makes. Portfolio decision D4 still applies to the other nine
 
 ---
 
+## ADR-070 — The live model evaluation, and the number that justifies the whole architecture
+
+**Status:** accepted. **Date:** 2026-09-10, on the owner's authorisation of a bounded live run.
+
+Every model figure in this repository read `NOT MEASURED` until now, and the reason was always the
+same: no credential, and cassettes that were synthesised rather than captured. The owner authorised
+a bounded run through a subscription-backed OmniRoute endpoint. It ran once, over all 250 golden
+records, and produced a result worth arguing about.
+
+### The headline, and it is not flattering
+
+**Treatment-proposal accuracy: 27.8%, against a constant-answer baseline of 85.6%. A lift of
+−57.8%.** Answering `escalate` to every exception would have scored three times better.
+
+That number is published first, unrounded and unexplained-away, because a portfolio that only
+publishes results that flatter its own architecture is marketing. But it is also not the
+interesting number, and the breakdown says why:
+
+| classification | records | correct label | model accuracy |
+|---|---|---|---|
+| `cross_period_refund` | 12 | `accrue` | **100.0%** |
+| `chargeback_reversal` | 24 | `rebook` | **95.8%** |
+| `fee_split` | 72 | `escalate` | 6.9% |
+| `unclassified` | 140 | `escalate` | 20.7% |
+
+**On the 36 priceable records — the ones where a proposal changes what happens — the model is
+97.2% accurate (35 of 36).** On the 214 where the correct answer is *refer this to a human*, it
+proposes a concrete treatment 178 times.
+
+### What that actually means
+
+The model is good at the judgement and bad at declining to make one.
+
+Every single hold-out disagreement runs the same direction: expected `escalate`, got a treatment.
+Not one is a wrong answer on a priceable case. Set against §19's question — what would this system
+do if it trusted the model — the answer is now measured rather than argued: **it would have posted
+178 ledger treatments that a human was supposed to look at.**
+
+So the approval gate is not ceremony, and this is the first evidence in the repository that says
+so with a number. ADR-056 separated recording a decision from authorising a posting on the strength
+of a specification clause. ADR-061 fixed a defect in it. This measurement is what makes both of them
+load-bearing: the gate is the only thing standing between a confident model and 178 unwarranted
+postings.
+
+It also relocates the risk. The dangerous failure for a control plane is a *wrong amount*, and the
+architecture forbids that structurally — the model has no numeric field to put one in. The failure
+this measurement found is *over-confidence about scope*, and the architecture handles that with a
+person. Both defences were designed before the number existed, which is the only order in which
+that claim is worth anything.
+
+### Abstention: the mechanism works and the model under-uses it
+
+34 of 248 answers abstained (13.7%). **All 34 were cases where escalating was correct, and not one
+priceable case was declined.** The abstention channel is therefore behaving exactly as ADR-048
+intended — an abstaining proposal carries `escalate`, and the model never used it to dodge a case
+it could price. It is simply used too rarely: 34 abstentions against 214 records that wanted one.
+
+### What was measured, precisely
+
+| | |
+|---|---|
+| Route | OmniRoute, OpenAI-compatible, `POST /v1/chat/completions` |
+| Model alias requested | `auto/best-free` — a routed alias, not a model |
+| Model the route named | `gpt-5.5`, on every one of the 250 responses |
+| Records | 250 (the whole golden set) |
+| Live calls | **251**, against a declared ceiling of 750 |
+| Retries | 1 |
+| Schema-valid responses | **248 / 250 (99.2%)** |
+| Malformed | 2, both truncated tool arguments |
+| Latency | min 2.20s · p50 4.80s · p95 8.15s · max 17.97s |
+| Tokens | 799,492 prompt · 46,703 completion · 846,195 total |
+| Cost | **not measured** — see below |
+
+**The upstream is reported, not inferred.** `auto/best-free` is an alias a router resolves per call.
+Every response named `gpt-5.5`, and that is recorded as *what the route said*. This repository has
+no way to verify which physical model or provider sat behind that name, so it does not claim one,
+and the adapter reports `model_version: unversioned` rather than inventing a snapshot date.
+
+**Actual marginal API cost was not measured; the calls were executed through the owner's
+subscription-backed OmniRoute route.** No billing or cost field appears in any response. A
+list-price equivalent is not computed either: that would require knowing the physical upstream, and
+the previous paragraph is exactly why it is not known. An estimate presented beside measured
+figures becomes a measured figure by proximity.
+
+**The token counts include the router's own overhead.** A one-sentence prompt through this route
+reported 2,024 prompt tokens before any of our content, so the 3,198-token mean is not the size of
+our evidence document. It is what the route billed for the call, which is the honest thing to
+report and the wrong thing to quote as prompt size.
+
+**Temperature is not pinned.** Neither adapter sends one, so the provider default applies and a
+re-run would not reproduce these answers token-for-token. *Scoring* is reproducible — the captured
+cassette replays offline to the identical 248 proposals, and a test asserts it — but the sampling is
+not. Recorded as a limitation rather than fixed after the fact, because pinning it now and re-running
+would be changing the experiment after seeing the result.
+
+### The change that made it possible, and the guard that did not move
+
+The repository shipped no HTTP transport, on purpose: a guard walks `src/…/llm/` and fails the build
+if anything there imports `httpx`, `urllib`, `socket` or a sibling. **That guard was not weakened,
+exempted, or widened.** The transport went where the cassette module always said it belonged —
+*"recording wraps a transport an operator supplies and nothing here owns a socket"* — in
+`tests/evaluation/livetransport.py`, beside the harness that uses it, on a dev dependency that was
+already there. `src/` is still provably offline and every other suite still needs no credential.
+
+One thing *was* added to the shipped package, and it earned its place by being measured first.
+
+**`response_format` with `strict: true` is an OpenAI feature, not a property of the wire format.**
+The route accepts the key, returns 200, and ignores it: probed before any evaluation call, the
+answer came back with `evidence_ids` instead of `evidence_refs` and no `confidence` at all, and
+`validated_proposal` rejected it. The same schema sent as a **forced tool call** came back exactly
+conformant.
+
+Had the run gone ahead on the existing adapter, it would have reported a schema-valid rate near
+zero — a statement about the gateway's feature support, published as if it were a statement about a
+model's ability to follow a contract. That is the same error as scoring a synthesised cassette and
+calling it model accuracy. So `providers/openai_tools.py` carries the identical
+`proposal_wire_schema()` in `tools[0].function.parameters` with `tool_choice` pinned, and every
+answer still passes through the identical `validated_proposal`. **One definition of the contract,
+two envelopes**, and a test asserts the two are the same object rather than two copies that could
+drift.
+
+It also sends `stream: false` explicitly. The same route switches to server-sent events the moment
+a request carries `tools` or `response_format` and no `stream` key — a 200 whose body is `data:`
+frames. Real OpenAI defaults it to false; a router in front of it need not, and one key on the wire
+removes a failure that would have arrived as an unparseable response from a provider that did
+nothing wrong.
+
+### What the run refused to do
+
+- **The prompt cannot carry the answer, and the harness proves it rather than asserting it.**
+  `assert_no_answer_leaks` walks all 250 prompts before the first call and fails the run if any
+  answer-bearing field name — or any label's actual text — appears in one. Subjects are rebuilt
+  from the seeded corpus by a function that never reads a golden record; the labels are joined back
+  on `exception_id` after the model has answered. Both halves of the check are tested against a
+  deliberately poisoned prompt, and the forbidden-field list is asserted against the dataclass so a
+  new label field cannot quietly fall outside it.
+- **The run is bounded by arithmetic, not intent.** `CallBudget` raises on the call that would
+  exceed the ceiling. 251 of 750 were spent. There was no adaptive sampling, no second pass, and no
+  expansion after the score was seen.
+- **Both opt-ins are required.** `LECP_LIVE_EVAL=1` says a measurement was intended and
+  `CASSETTE_CAPTURE=1` says a recording was; neither implies the other, both are construction-time
+  refusals, and CI sets neither. `live-eval` is still deliberately not a `make` target.
+- **The synthesised cassette was not touched.** Live interactions are written to their own file and
+  stamped `captured` by the only class permitted to claim it, which is what lets the scorer's
+  `MEASURES_A_MODEL` set decide whether a headline may be quoted as model accuracy.
+
+### What this does not establish
+
+**The public demonstration still has no model.** No provider credential is configured on any of the
+four deployed services, the console still shows a proposal declaring itself `stand-in`, and nothing
+about this run changed that. A measurement made on a workstation is not a capability of a deployment.
+
+**The hold-out slice is still four independent judgements.** It reports 36.0% agreement (9 of 25)
+and 100% on its 6 priceable records, and both figures are the same four class rules seen again.
+ADR-068 said so before there was a model score to attach to them, and attaching one does not make
+them independent.
+
+**Nothing here is a threshold.** OPEN-6 asks what accuracy a build should fail on. One run of one
+routed alias is not the basis for that number, and inventing one now would be fitting a gate to the
+only measurement that exists.
+
+**The three-arm comparison's LLM-as-matcher cell is still `NOT MEASURED`.** That arm asks a model to
+do the *matching*, which is a different task from proposing a treatment. This run measured the
+second and says nothing about the first.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.
@@ -4414,12 +4581,26 @@ requirement names is currently discarded at persistence. See ADR-050.
 **Needed before:** the measured provider comparison (6.3) claims to be evaluating models on the
 evidence FR-5 specifies.
 
-## OPEN-6 — Evaluation threshold for the CI gate
+## OPEN-6 — Evaluation threshold for the CI gate — **STILL OPEN, and now informed (ADR-070)**
 
 **Must decide:** the accuracy and abstention thresholds that fail the build.
-**Constraint:** cannot be chosen before a baseline exists, or the threshold is arbitrary. Set it after
-the first scorer run, and record the reasoning.
-**Needed before:** increment 6.2.
+**Constraint:** cannot be chosen before a baseline exists, or the threshold is arbitrary.
+
+A baseline now exists and is deliberately *not* being turned into a threshold. The first live run
+(ADR-070) scored 27.8% overall, 97.2% on the priceable subset, and 13.7% abstention, through one
+routed alias on one afternoon. Three reasons that is not yet a gate:
+
+- **A single run of a routed alias is not a distribution.** `auto/best-free` resolves per call and
+  resolved to `gpt-5.5` throughout this one; nothing guarantees the next run meets the same model.
+- **The overall figure would gate the wrong thing.** 27.8% is below the 85.6% constant-answer
+  baseline, so a naive accuracy floor would fail every build while the model is 97.2% correct
+  wherever a proposal changes what happens. The figure worth gating is the priceable one, possibly
+  with an *escalation-recall* floor beside it — the model's actual weakness.
+- **Fitting a threshold to the only measurement that exists is fitting it to noise**, and this
+  repository has spent a lot of effort not doing that elsewhere.
+
+**Needed before:** the gate becomes a quality gate rather than a reproduction gate. It is a
+reproduction gate today and says so.
 
 ## OPEN-7 — Measurement load profile
 

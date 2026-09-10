@@ -33,10 +33,19 @@
     Render §20's three-arm comparison as markdown. Cells with no run print ``NOT MEASURED``.
 
 ``live-eval``
-    The one command that *would* reach a provider, and the only one that is gated. It refuses
-    without an explicit environment opt-in, and it refuses again for a second reason that is not
-    going away by itself: this repository ships **no transport that speaks HTTP** (ADR-051), so a
-    capture needs an operator to supply one. It is never invoked by CI and never by a test.
+    The one command that reaches a provider, and the only one that is gated. Two independent
+    opt-ins, both required, and neither implies the other: ``LECP_LIVE_EVAL=1`` says a measurement
+    run was intended, ``CASSETTE_CAPTURE=1`` says a recording was. It is bounded by a call budget
+    that raises rather than warns, it prints its plan before the first call, and it refuses
+    outright if any prompt it is about to send carries part of the answer key.
+
+    **The shipped package still ships no HTTP client**, and the guard on ``llm/`` is unchanged and
+    still passes. The transport lives beside this harness in
+    :mod:`tests.evaluation.livetransport`, which is exactly the shape the cassette module was
+    written for: *"recording wraps a transport an operator supplies and nothing here owns a
+    socket."* ``--plan-only`` prints the plan and runs the leakage check without dialling.
+
+    It is never invoked by CI: both opt-ins are absent there and so is the credential.
 
 Every other command is offline by construction: no HTTP client is in the dependency graph of any
 module they import, and none of them takes a credential.
@@ -45,14 +54,20 @@ module they import, and none of them takes a credential.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import dataclasses
 import json
+import math
 import os
 import pathlib
 import sys
-from typing import Final
+from typing import Any, Final
 
 from ledger_exception_control_plane.db.control import TreatmentCode
 from ledger_exception_control_plane.llm.cassette import CAPTURE_OPT_IN
+from ledger_exception_control_plane.llm.evidence import assemble_evidence
+from ledger_exception_control_plane.llm.prompt import build_prompt
+from ledger_exception_control_plane.matching import DEFAULT_POLICY
 from tests.evaluation.arms import compare_arms, render_comparison
 from tests.evaluation.gate import (
     BASELINE_PATH,
@@ -63,6 +78,7 @@ from tests.evaluation.gate import (
 )
 from tests.evaluation.golden import (
     GOLDEN_PATH,
+    GoldenSet,
     build_golden_set,
     load_golden_set,
     render_golden_set,
@@ -78,6 +94,22 @@ from tests.evaluation.humanlabels import (
     render_packet_csv,
     render_packet_jsonl,
     render_packet_readme,
+)
+from tests.evaluation.livecapture import (
+    LIVE_CASSETTE_PATH,
+    LIVE_PROPOSALS_PATH,
+    LIVE_RUN_PATH,
+    LiveOutcome,
+    assert_no_answer_leaks,
+    build_subjects,
+    plan,
+    run_live_evaluation,
+)
+from tests.evaluation.livetransport import (
+    API_KEY_VARIABLE,
+    BASE_URL_VARIABLE,
+    MODEL_VARIABLE,
+    CallBudget,
 )
 from tests.evaluation.scorer import CassetteOrigin, Proposal, score
 
@@ -320,51 +352,168 @@ def _compare() -> int:
 LIVE_EVAL_OPT_IN: Final = "LECP_LIVE_EVAL"
 
 
-def _live_eval() -> int:
-    """Refuse, and say exactly what would be required. **Never runs a paid call from this tree.**
+def _refuse_live(reasons: list[str]) -> int:
+    """Say exactly what is missing, by variable NAME only, and spend nothing.
 
-    Two independent refusals, and both are stated because closing one would not enable the command:
-
-    1. The opt-in is absent. A command that can spend money is never the default and is never
-       inferred from the presence of a credential.
-    2. Even with it, there is no transport. Nothing under ``llm/`` imports an HTTP client and no
-       transport that speaks HTTP exists in this repository (ADR-051) — which is the property that
-       lets every other command here be provably offline. Capture requires an operator to supply
-       one explicitly, which is the point at which a person decides to spend money.
-
-    The names of the variables involved are printed. **No value is printed, and none is asked
-    for.**
+    A command that can reach a paid API is never the default and is never inferred from a
+    credential being present. **No value is printed here, asked for here, or read into any
+    artefact this repository commits.**
     """
-    enabled = os.environ.get(LIVE_EVAL_OPT_IN) == "1"
-    print("live capture is refused.", file=sys.stderr)
+    print("live evaluation is refused.", file=sys.stderr)
     print(file=sys.stderr)
-    if not enabled:
-        print(
-            f"  1. {LIVE_EVAL_OPT_IN} is not set to 1. A command that can reach a paid API is "
-            "never the default and is never inferred from a credential being present.",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            f"  1. {LIVE_EVAL_OPT_IN} is set, which is necessary and not sufficient.",
-            file=sys.stderr,
-        )
-    print(
-        "  2. This repository ships no transport that speaks HTTP (ADR-051). That is what makes "
-        "every other command here provably offline, and it is not a gap to be closed casually: "
-        "capture requires an operator to supply a transport explicitly.",
-        file=sys.stderr,
-    )
-    print(file=sys.stderr)
-    print("  What a live capture would need, by variable NAME only:", file=sys.stderr)
-    for name in (LIVE_EVAL_OPT_IN, CAPTURE_OPT_IN, "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    for index, reason in enumerate(reasons, start=1):
+        print(f"  {index}. {reason}", file=sys.stderr)
+    print("\n  The variables involved, by NAME only:", file=sys.stderr)
+    for name in (
+        LIVE_EVAL_OPT_IN,
+        CAPTURE_OPT_IN,
+        BASE_URL_VARIABLE,
+        MODEL_VARIABLE,
+        API_KEY_VARIABLE,
+    ):
         print(f"    {name}", file=sys.stderr)
-    print(
-        "\n  No value for any of those is printed here, asked for here, or read into any "
-        "artefact this repository commits.",
-        file=sys.stderr,
-    )
     return 1
+
+
+def _live_eval(*, plan_only: bool, max_attempts: int) -> int:
+    """Run one bounded live evaluation, or refuse and say precisely why.
+
+    Capturing a fixture and *measuring a model against a paid API* are different decisions, so
+    they have different switches and both are required.
+    """
+    reasons: list[str] = []
+    if os.environ.get(LIVE_EVAL_OPT_IN) != "1":
+        reasons.append(
+            f"{LIVE_EVAL_OPT_IN} is not set to 1. A command that can reach a paid API is never "
+            "the default and is never inferred from a credential being present."
+        )
+    if os.environ.get(CAPTURE_OPT_IN) != "1":
+        reasons.append(
+            f"{CAPTURE_OPT_IN} is not set to 1. A live run records what it saw, and the recorder "
+            "refuses to be constructed without it."
+        )
+    absent = [
+        name
+        for name in (BASE_URL_VARIABLE, MODEL_VARIABLE, API_KEY_VARIABLE)
+        if not os.environ.get(name)
+    ]
+    if absent:
+        reasons.append("these are unset: " + ", ".join(absent))
+    if reasons:
+        return _refuse_live(reasons)
+
+    golden = load_golden_set()
+    print("live evaluation plan - no value of any credential appears below")
+    print(json.dumps(plan(golden.records, max_attempts), indent=2, sort_keys=True))
+    print()
+
+    if plan_only:
+        subjects = build_subjects()
+        prompts = {
+            record.exception_id: build_prompt(
+                subjects[record.exception_id][0],
+                assemble_evidence(*subjects[record.exception_id], DEFAULT_POLICY),
+            )
+            for record in golden.records
+        }
+        assert_no_answer_leaks(prompts, golden.records)
+        print(f"leakage check: PASS over {len(prompts)} prompts. No call made (--plan-only).")
+        return 0
+
+    return _report_live(golden, asyncio.run(run_live_evaluation(golden, max_attempts=max_attempts)))
+
+
+def _report_live(golden: GoldenSet, result: dict[str, Any]) -> int:
+    """Everything the run measured: quality, schema validity, abstention, latency, tokens, cost."""
+    outcomes: list[LiveOutcome] = result["outcomes"]
+    budget: CallBudget = result["budget"]
+    answered = [outcome for outcome in outcomes if outcome.treatment is not None]
+    failed = [outcome for outcome in outcomes if outcome.treatment is None]
+
+    proposals = [
+        Proposal(
+            exception_id=outcome.exception_id,
+            treatment=TreatmentCode(outcome.treatment),
+            abstained=outcome.abstained,
+        )
+        for outcome in answered
+        if outcome.treatment is not None
+    ]
+    full = score(golden, proposals, origin=CassetteOrigin.CAPTURED)
+    held = {record.exception_id for record in golden.hold_out}
+    hold = score(
+        dataclasses.replace(golden, records=golden.hold_out),
+        [proposal for proposal in proposals if proposal.exception_id in held],
+        origin=CassetteOrigin.CAPTURED,
+    )
+
+    named = sorted({o.reported_model for o in outcomes if o.reported_model})
+    print("=" * 78)
+    print("LIVE MODEL EVALUATION")
+    print("=" * 78)
+    print(f"  route model alias      {os.environ.get(MODEL_VARIABLE)}")
+    print(f"  models the route named {named}")
+    print(f"  records                {len(outcomes)}")
+    print(f"  live calls made        {budget.spent} of a {budget.maximum} ceiling")
+    print(f"  extra attempts (retry) {sum(o.attempts - 1 for o in outcomes)}")
+    print()
+    rate = len(answered) / len(outcomes) if outcomes else 0.0
+    print(f"  schema-valid responses {len(answered)}/{len(outcomes)}  ({rate:.1%})")
+    for kind in sorted({o.failure for o in failed if o.failure}):
+        print(f"    {kind:26s} {sum(1 for o in failed if o.failure == kind)}")
+    print()
+    print(f"  --- against all {len(golden.records)} golden records ---")
+    print(f"  {full.headline()}")
+    print(f"  accuracy               {full.accuracy:.1%}")
+    print(f"  constant baseline      {full.majority_baseline:.1%}  ({full.majority_label})")
+    print(f"  lift over baseline     {full.lift_over_baseline:+.1%}")
+    print(f"  accuracy on priceable  {full.accuracy_on_priceable:.1%}  over {full.priceable}")
+    print(f"  abstention rate        {full.abstention_rate:.1%}")
+    print(f"    escalating correct   {full.abstained_where_escalation_was_correct}")
+    print(f"    a treatment existed  {full.abstained_where_a_treatment_was_available}")
+    print(f"  unanswered             {len(full.unanswered)}")
+    print()
+    print(f"  --- against the {len(golden.hold_out)} human-confirmed hold-out records ---")
+    print(f"  agreement              {hold.accuracy:.1%}  ({hold.correct}/{hold.scored})")
+    print(f"  on priceable           {hold.accuracy_on_priceable:.1%}  over {hold.priceable}")
+    print("  NOTE: the derived label is a pure function of the classification, so this slice is")
+    print("        four independent judgements, not 25. See ADR-068.")
+    print()
+    print("  confusion (expected -> proposed):")
+    for (expected, proposed), count in full.confusion.items():
+        mark = " " if expected == proposed else "*"
+        print(f"   {mark} {expected:10s} -> {proposed:10s} {count:5d}")
+    print()
+    latencies = sorted(outcome.latency_seconds for outcome in outcomes)
+    print(
+        f"  latency  min {latencies[0]:.2f}s  p50 {_quantile(latencies, 0.5):.2f}s  "
+        f"p95 {_quantile(latencies, 0.95):.2f}s  max {latencies[-1]:.2f}s"
+    )
+    for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        values = [getattr(o, field) for o in outcomes if getattr(o, field) is not None]
+        if values:
+            print(
+                f"  {field:18s} total {sum(values):>9,}   mean {sum(values) / len(values):>8.0f}"
+                f"   reported on {len(values)}/{len(outcomes)}"
+            )
+        else:
+            print(f"  {field:18s} not reported by the route")
+    print()
+    print("  Actual marginal API cost not measured; calls were executed through the owner's")
+    print("  subscription-backed OmniRoute route.")
+    print()
+    print(f"  artefacts: {LIVE_PROPOSALS_PATH}")
+    print(f"             {LIVE_CASSETTE_PATH}")
+    print(f"             {LIVE_RUN_PATH}")
+    return 0
+
+
+def _quantile(ordered: list[float], q: float) -> float:
+    """Nearest-rank. Interpolating would imply a precision this sample size does not have."""
+    if not ordered:
+        return 0.0
+    index = min(len(ordered) - 1, max(0, math.ceil(q * len(ordered)) - 1))
+    return ordered[index]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -397,12 +546,23 @@ def main(argv: list[str] | None = None) -> int:
     importing.add_argument("labels", type=pathlib.Path)
 
     sub.add_parser("compare", help="render §20's three-arm comparison as markdown")
-    sub.add_parser(
+    live = sub.add_parser(
         "live-eval",
         help=(
-            f"would capture live provider responses. Refused without {LIVE_EVAL_OPT_IN}=1, and "
-            "refused anyway because no HTTP transport exists here. Never run by CI."
+            f"capture live provider responses and score them. Refused without "
+            f"{LIVE_EVAL_OPT_IN}=1 and {CAPTURE_OPT_IN}=1. Never run by CI."
         ),
+    )
+    live.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="print the plan and run the leakage check, without making a call",
+    )
+    live.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="attempts per record, including the first. The call ceiling is records x this.",
     )
 
     scoring = sub.add_parser("score", help="grade a JSONL file of proposals")
@@ -431,7 +591,7 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.command == "compare":
         return _compare()
     if arguments.command == "live-eval":
-        return _live_eval()
+        return _live_eval(plan_only=arguments.plan_only, max_attempts=arguments.max_attempts)
     return _score(arguments.proposals, CassetteOrigin(arguments.origin))
 
 

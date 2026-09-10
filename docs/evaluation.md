@@ -175,6 +175,12 @@ Three things about how that was applied are deliberate:
 | LLM-as-matcher | `NOT MEASURED` | `NOT MEASURED` | `NOT MEASURED` |
 | shipped hybrid | deterministic half, measured | `NOT MEASURED` | `NOT MEASURED` |
 
+**These cells stayed `NOT MEASURED` after the live run of §8, and that is not an oversight.** This
+arm asks a model to perform the *matching* — to pair a settlement line with a ledger entry. §8
+measured a different task: proposing a *treatment* for a line the deterministic matcher already
+failed to pair. A number from one is not a number for the other, and moving it across would be the
+most convenient lie available.
+
 **The deterministic arm's accuracy is pair precision** — correct pairs over pairs produced — and that
 was a choice over a per-line rate. The corpus labels each *scenario* with a match intent, not each
 line with "should this have matched", and several residual-intent scenarios legitimately contain a
@@ -218,30 +224,140 @@ every note — is deterministic, and a test asserts that two runs agree on all o
 
 ---
 
-## 8. Live capture
+## 8. The live model measurement (6.4)
 
-`uv run python -m tests.evaluation live-eval` **refuses**, for two independent reasons, and both are
-printed:
+**This ran.** One bounded pass, all 250 golden records, 2026-09-10. Full reasoning in **ADR-070**.
 
-1. `LECP_LIVE_EVAL` is not set to `1`. A command that can reach a paid API is never the default and
-   is never inferred from a credential being present.
-2. Even with it set, this repository ships no transport that speaks HTTP (ADR-051). That is the
-   property that makes every other evaluation command provably offline. A capture requires an
-   operator to supply a transport explicitly, which is the point at which a person decides to spend
-   money.
+### 8.1 The result
 
-What a live capture would need, **by variable name only**:
+| | |
+|---|---|
+| Records | 250 |
+| Live calls | **251**, against a declared ceiling of 750 |
+| Retries | 1 |
+| Schema-valid responses | **248 / 250 — 99.2%** |
+| Malformed | 2, both truncated tool arguments |
+| **Accuracy, all 250** | **27.8%** |
+| Constant-answer baseline | 85.6% (`escalate`) |
+| **Lift over baseline** | **−57.8%** |
+| **Accuracy on the 36 priceable** | **97.2%** (35 of 36) |
+| Abstention | 13.7% — 34 of 248, **none on a priceable case** |
+| Latency | min 2.20s · p50 4.80s · p95 8.15s · max 17.97s |
+| Tokens | 799,492 prompt · 46,703 completion · 846,195 total |
+
+**The headline is worse than answering `escalate` every time, and it is published first.** The
+breakdown says why:
+
+| classification | records | correct label | model accuracy |
+|---|---|---|---|
+| `cross_period_refund` | 12 | `accrue` | **100.0%** |
+| `chargeback_reversal` | 24 | `rebook` | **95.8%** |
+| `fee_split` | 72 | `escalate` | 6.9% |
+| `unclassified` | 140 | `escalate` | 20.7% |
+
+The model is good at the judgement and bad at declining to make one. On the 214 records whose
+correct answer is *refer this to a human*, it proposed a concrete treatment 178 times. Every
+hold-out disagreement runs that same direction; not one is a wrong answer on a priceable case.
+
+**That is the measurement this repository was built to be able to take.** Without the approval gate,
+this model would have driven 178 ledger treatments a human was supposed to see. The gate was
+designed on a specification clause (ADR-056) and repaired after a defect (ADR-061); this is the
+first number that makes it load-bearing rather than well-argued.
+
+### 8.2 What was called, stated exactly
+
+| | |
+|---|---|
+| Route | OmniRoute, OpenAI-compatible, `POST /v1/chat/completions` |
+| Alias requested | `auto/best-free` — a routed alias, not a model |
+| Model the route named | `gpt-5.5`, on all 250 responses |
+| Upstream provider | **not independently verifiable from here, and not claimed** |
+| Model version reported | `unversioned` — the alias carries no dated snapshot |
+
+**Cost: actual marginal API cost not measured; calls were executed through the owner's
+subscription-backed OmniRoute route.** No response carried a billing or cost field. A list-price
+equivalent is *not* computed, because that needs the physical upstream and the row above says it is
+unknown — and an estimate printed beside measured figures becomes a measured figure by proximity.
+
+**Token counts include the router's overhead.** A one-sentence prompt through this route reported
+2,024 prompt tokens before any of our content. The 3,198-token mean is what the route billed, not
+the size of the evidence document.
+
+**Temperature is not pinned**, so a re-run would not reproduce these answers token-for-token.
+Scoring *is* reproducible — the captured cassette replays offline to the identical 248 proposals and
+a test asserts it — and the difference is stated rather than glossed.
+
+### 8.3 How it was kept safe
+
+Two opt-ins, both required, neither implying the other: `LECP_LIVE_EVAL=1` says a measurement was
+intended, `CASSETTE_CAPTURE=1` says a recording was. Both are construction-time refusals. **CI sets
+neither**, the credential is not in CI, and `live-eval` is deliberately still not a `make` target.
+
+- **Bounded by arithmetic.** `CallBudget` raises on the call that would exceed the ceiling. No
+  adaptive sampling, no second pass, no expansion after the score was seen.
+- **The prompt cannot carry the answer.** `assert_no_answer_leaks` walks all 250 prompts before the
+  first call and fails the run if an answer-bearing field name — or a label's actual text — appears.
+  Subjects are rebuilt from the seeded corpus by a function that never reads a golden record;
+  labels are joined back on `exception_id` afterwards. The forbidden-field list is asserted against
+  the dataclass, so a new label field cannot fall quietly outside it.
+- **`src/` is still provably offline.** The guard that fails the build if anything under `llm/`
+  imports an HTTP client was not weakened, exempted or widened. The transport is in
+  `tests/evaluation/livetransport.py` — exactly the shape the cassette module described: *"recording
+  wraps a transport an operator supplies and nothing here owns a socket."*
+- **The synthesised cassette was not touched.** Live interactions go to their own file, stamped
+  `captured` by the only class permitted to claim it.
+
+### 8.4 One shipped change, and why it was measured before it was made
+
+`response_format` with `strict: true` is an OpenAI *feature*, not a property of the wire format.
+Probed against this route before any evaluation call: the key is accepted, 200 is returned, and the
+schema is **not enforced** — the answer came back with `evidence_ids` instead of `evidence_refs` and
+no `confidence`, and `validated_proposal` rejected it. The same schema as a **forced tool call** came
+back exactly conformant.
+
+Running on the existing adapter would have reported a schema-valid rate near zero: a fact about the
+gateway's feature support, published as if it were a fact about a model's ability to follow a
+contract. So `llm/providers/openai_tools.py` carries the identical `proposal_wire_schema()` in the
+tool's `parameters`, and every answer still passes through the identical `validated_proposal`. One
+definition of the contract, two envelopes, and a test asserts they are the same object.
+
+It also sends `stream: false` explicitly: this route switches to server-sent events whenever a
+request carries `tools` or `response_format` and no `stream` key.
+
+### 8.5 Artefacts
 
 ```
-LECP_LIVE_EVAL
-CASSETTE_CAPTURE
-ANTHROPIC_API_KEY
-OPENAI_API_KEY
+tests/golden/live/live-proposals.jsonl   248 rows, scoreable by the ordinary scorer
+tests/golden/live/live-cassette.json     250 interactions, origin: captured, replays offline
+tests/golden/live/live-run.json          per-record latency, tokens, attempts, prompt hash
 ```
 
-No value for any of those is printed by any command, asked for by any command, or read into any
-committed artefact. `live-eval` is never invoked by CI and never by a test, and it is deliberately
-not a `make` target — a command that can spend money should not be one tab-completion away.
+`tests/test_live_evaluation.py` replays the cassette through the same adapter that recorded it and
+asserts every proposal comes back identical. **That test needs no network**, which is the whole
+argument for where the transport lives.
+
+### 8.6 What this does not establish
+
+- **The public demonstration still has no model.** No provider credential is configured on any
+  deployed service; the console still shows a proposal declaring itself `stand-in`.
+- **The hold-out is still four independent judgements.** It reports 36.0% agreement (9 of 25) and
+  100% on its 6 priceable records — the same four class rules seen again (ADR-068).
+- **No threshold follows from this.** OPEN-6 stays open, and now says why: one run of one routed
+  alias is not a distribution, and the overall figure would gate the wrong thing.
+- **The LLM-as-matcher arm is still `NOT MEASURED`.** That arm asks a model to do the *matching*,
+  which is a different task from proposing a treatment.
+
+### 8.7 Running it
+
+```bash
+LECP_LIVE_EVAL=1 CASSETTE_CAPTURE=1 \
+LLM_BASE_URL=... LLM_MODEL=... LLM_API_KEY=... \
+  uv run python -m tests.evaluation live-eval --plan-only   # plan + leakage check, no call
+  uv run python -m tests.evaluation live-eval               # the bounded run
+```
+
+The variable **names** are documented in `.env.example`. No value for any of them is printed by any
+command, asked for by any command, or written into any committed artefact.
 
 ---
 

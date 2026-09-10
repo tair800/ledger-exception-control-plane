@@ -104,10 +104,18 @@ and Upstash Free at zero cost, with no process merged and no semantic weakened t
 `docs/demo-deployment.md`, which also states every limitation. `docs/deployment.md` describes the
 Fly.io path and is **not** the live one. OPEN-10 closes.
 
-**One remains, and must still be reported as pending:** live model quality, cost and latency are
-**NOT MEASURED** — no provider credential is configured anywhere, including on the four deployed
-services, and the committed cassettes are synthesised. Deploying the system did not measure the
-model.
+**The third is now discharged too, and it produced a negative result.** A bounded live run on
+2026-09-10 — 250 records, 251 calls against a 750 ceiling, through an OpenAI-compatible OmniRoute
+route — measured **99.2% schema-valid, 97.2% accurate on the 36 priceable records, and 27.8%
+overall against an 85.6% constant-answer baseline**. The model is good at the judgement and bad at
+declining to make one: 178 of the 214 records whose correct answer is *escalate* got a concrete
+treatment. **That is the number that makes the approval gate load-bearing rather than well-argued**
+(ADR-070). Live **cost** remains unmeasured and unmeasurable from here — a subscription-backed
+route returns no billing field, and no list-price equivalent is estimated.
+
+**The deployed demonstration still has no model.** No provider credential is configured on any of
+the four services; the console's proposal declares itself `stand-in`. A measurement taken on a
+workstation is not a capability of a deployment, and the two must never be conflated.
 
 **What is genuinely absent:** no orchestration wires the stages into a running service — the demo
 seeder composes them and says so; §18's Langfuse trace is not discharged; and there is no real

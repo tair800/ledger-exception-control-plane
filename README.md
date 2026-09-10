@@ -41,10 +41,12 @@ count goes to **2**. Two requests, one financial effect.
   real merchant, no real money.
 - **The ledger is simulated.** An in-process double. This repository contains **no real ledger
   integration at all**, so a deployment cannot accidentally acquire one.
-- **No live model is called.** The proposal you see is a declared stand-in — its `model_id` reads
-  `stand-in` and its rationale opens by saying it was not produced by a model. No provider
-  credential is configured anywhere in the deployment. **Live model quality, cost and latency
-  remain NOT MEASURED.**
+- **No live model is called *here*.** The proposal you see is a declared stand-in — its `model_id`
+  reads `stand-in` and its rationale opens by saying it was not produced by a model. No provider
+  credential is configured on any of the four deployed services. A live model **has** now been
+  measured, on a workstation, over the golden set — see
+  [the live model measurement](#the-live-model-measurement) — and that measurement is not a
+  capability of this deployment.
 - **The backend sleeps.** Render's free tier scales to zero, so the first request after a quiet
   period waits up to a minute while a container starts. The console tells you that rather than
   showing an error.
@@ -572,17 +574,60 @@ make eval-compare       # the three-arm comparison table
 make label-packet       # regenerate the human-label packet for the hold-out slice
 ```
 
-**What is not measured, and says so.** The committed cassettes are *synthesised* — their recorded
-treatments are assigned round-robin by position, so agreement with the labels is arithmetic. The
-scorer takes a required `origin` with no default and refuses to describe such a run as model
-accuracy; its headline contains `THIS IS NOT A MODEL MEASUREMENT`. Live model quality, live cost and
-live latency are **NOT MEASURED** and are reported that way in the three-arm table.
+**The offline gate still measures the harness, and says so.** The committed cassettes are
+*synthesised* — their recorded treatments are assigned round-robin by position, so agreement with
+the labels is arithmetic. The scorer takes a required `origin` with no default and refuses to
+describe such a run as model accuracy; its headline contains `THIS IS NOT A MODEL MEASUREMENT`.
+That is what keeps CI honest without a credential. The live numbers are below.
+
+### The live model measurement
+
+One bounded run, 2026-09-10, over all 250 golden records. Full reasoning in
+[ADR-070](DECISIONS.md); method and caveats in
+[`docs/evaluation.md`](docs/evaluation.md#8-the-live-model-measurement-64).
+
+| | |
+|---|---|
+| Route | OmniRoute, OpenAI-compatible · alias `auto/best-free` · every response named `gpt-5.5` |
+| Records / live calls | 250 / **251**, against a declared ceiling of 750 · 1 retry |
+| Schema-valid | **248 / 250 — 99.2%** (2 truncated tool arguments, refused not coerced) |
+| **Accuracy, all 250** | **27.8%** — against an 85.6% constant-answer baseline, a **−57.8% lift** |
+| **Accuracy on the 36 priceable** | **97.2%** |
+| Abstention | 13.7% — 34 of 248, **none on a priceable case** |
+| Latency | min 2.20s · p50 4.80s · **p95 8.15s** · max 17.97s |
+| Tokens | 799,492 prompt · 46,703 completion · 846,195 total |
+| Cost | **not measured** — subscription-backed route, no billing field returned |
+
+**The headline is worse than answering `escalate` to everything, and it is the first number here on
+purpose.** The breakdown is the point:
+
+| classification | records | correct label | model accuracy |
+|---|---|---|---|
+| `cross_period_refund` | 12 | `accrue` | **100.0%** |
+| `chargeback_reversal` | 24 | `rebook` | **95.8%** |
+| `fee_split` | 72 | `escalate` | 6.9% |
+| `unclassified` | 140 | `escalate` | 20.7% |
+
+**The model is good at the judgement and bad at declining to make one.** On the 214 records whose
+correct answer is *refer this to a human*, it proposed a concrete treatment 178 times. Every
+hold-out disagreement runs that direction, and not one is a wrong answer on a priceable case.
+
+So the approval gate is not ceremony. **Without it, this model would have driven 178 ledger
+treatments that a human was supposed to see** — and the gate, the role separation and the audit
+trail were all built before this number existed, which is the only order in which that sentence is
+worth anything. The dangerous failure for a control plane is a wrong *amount*, and the model has no
+numeric field to put one in; the failure actually found is over-confidence about *scope*, and a
+person is the control for that.
+
+Reproducible offline: the run's cassette is committed with `origin: captured` and
+`tests/test_live_evaluation.py` replays it through the same adapter to the identical 248 proposals,
+with no network.
 
 ## Tests
 
 | Layer | What it covers |
 |---|---|
-| Unit | 1725 tests, no Docker: matching, tolerance, amount computation, key derivation, rounding, schema guards |
+| Unit | 1825 tests, no Docker: matching, tolerance, amount computation, key derivation, rounding, schema guards |
 | Property | Amount invariants — sign, currency, quantisation, determinism |
 | Schema guard | No numeric type, no amount-like field name, no extra fields in the model response schema |
 | Boundary guard | The calculator must not import the proposal model; `src/` must not import `naive/` |
@@ -590,6 +635,7 @@ live latency are **NOT MEASURED** and are reported that way in the three-arm tab
 | Concurrency | Two workers, one residual — forced with a real interleaving, not a mock |
 | Chaos | §19 on both branches, three adapter capability configurations |
 | Falsifiability | A mutation battery that plants the ways the kill test could be green and worthless |
+| Live evaluation | The tool envelope's failure modes, the call budget, the answer-leak refusal against a poisoned prompt, and an **offline replay of the captured run** to the identical 248 proposals — no network |
 | Frontend | 82 tests: key flow, loading/empty/error states, the no-money-arithmetic guard |
 
 Guard tests are written to be *falsifiable*: several of them exist because a planted defect passed
@@ -1304,18 +1350,8 @@ finished. The three that remain need something no amount of engineering here can
 | **11.2 — a screen recording** | The screenshots below are real and committed; a recording is an owner-facing task. |
 | **12.1 — career assets** | Positioning material, not engineering. |
 
-**One claim this repository deliberately does not make**, listed here rather than buried, because
-it is exactly the kind of thing a reader is entitled to assume was quietly skipped:
-
-**Live model quality, cost and latency are NOT MEASURED.** No provider SDK is a dependency, nothing
-under `llm/` imports an HTTP client, and the committed cassettes are *synthesised* — their
-treatments are assigned round-robin by position. The scorer takes a required `origin` and refuses to
-describe such a run as a model measurement. **The live deployment did not change this**: no provider
-credential is configured on any of its four services, and the proposal the console shows declares
-itself `stand-in` in its own rationale.
-
-Two claims that used to sit beside it are now discharged, and the evidence rather than the promise
-is in the repository:
+**Every claim this repository withheld has now been discharged, and the last one produced a
+result that does not flatter it.**
 
 1. **The human-labelled hold-out is confirmed** — 25 records labelled by the owner on 2026-09-09,
    agreeing with the derived table on all 25, committed with an attribution per record. No
@@ -1324,6 +1360,20 @@ is in the repository:
 2. **It is deployed** — the [live demo](#-live-demo) above, at zero cost, with no process merged and
    no semantic weakened to fit. What that deployment is *not* is stated at the same length in
    [`docs/demo-deployment.md`](docs/demo-deployment.md) (ADR-069).
+3. **The model is measured** — [above](#the-live-model-measurement): 250 records, 251 live calls,
+   99.2% schema-valid, 97.2% accurate where a proposal changes what happens, and **27.8% overall
+   against an 85.6% constant-answer baseline** (ADR-070).
+
+**What is still not claimed**, and it is a narrower list than it was:
+
+- **The public demonstration has no model.** No provider credential is configured on any of its four
+  services, and the proposal the console shows declares itself `stand-in` in its own rationale. The
+  measurement was taken on a workstation; it is not a capability of the deployment.
+- **Actual marginal API cost is not measured** — the calls went through a subscription-backed
+  OmniRoute route that returns no billing field, and no list-price equivalent is estimated because
+  the physical upstream behind the routed alias cannot be verified from here.
+- **The LLM-as-matcher arm of the three-arm comparison is still `NOT MEASURED`.** It asks a model to
+  do the *matching*, which is a different task from proposing a treatment.
 
 [`PROJECT_STATUS.md`](PROJECT_STATUS.md) is the authority on exactly what exists;
 [`DECISIONS.md`](DECISIONS.md) on why; [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) lists all
