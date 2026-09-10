@@ -372,9 +372,10 @@ Compose stack against the `lecp` database, which the seeder refuses to touch —
 is disposable and `lecp` is not. Pointed there, the console renders correct empty states over a
 database it is not reading, which is the worst of the three outcomes because nothing looks broken.
 
-### The console, on the seeded demonstration
+### The console, on the live deployment
 
-Captured from the running console against the database `make demo` produces. Not mock-ups.
+Captured from **the deployed console at the URL above**, signed in with the published demo tokens.
+Not mock-ups, and not a local run.
 
 **The queue.** Seven residuals the deterministic matcher could not clear, with the stage each has
 reached. The four cleared lines are not here, which is the point.
