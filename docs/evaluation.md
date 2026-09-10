@@ -8,14 +8,22 @@ Read this before quoting any number out of `tests/golden/`.
 
 ## 1. The one-paragraph version
 
-The deterministic layers of this system are measured. The model layer is **not**, because no model
-has ever been called from this repository: there is no provider SDK in the dependency graph, nothing
-under `llm/` imports an HTTP client, and no transport that speaks HTTP exists. The committed
-cassettes are **synthesised** — written by `tests/cassette_builder.py`, never received from a
-provider — so every figure computed from them is a fact about this harness. The harness is built so
-that such a figure cannot be reported as anything else: `score()` takes a required response origin
-with no default, `Score.headline()` refuses the word "accuracy" for a synthesised run, and
-`arms.Figure` cannot hold a value without an origin or an absence without a stated reason.
+The deterministic layers of this system are measured, and since 6.4 so is the model layer —
+**section 8 has the numbers, and they are not flattering**.
+
+**The shipped package still cannot make a call**, and that is the property everything else rests
+on: no provider SDK is in the dependency graph, and a guard test walks `src/…/llm/` and fails the
+build if anything there imports an HTTP client. The one transport that dials lives under `tests/`,
+behind two independent opt-ins, and CI sets neither.
+
+**Two kinds of cassette are committed, and confusing them would undo the whole harness.** The
+canonical corpus is **synthesised** — written by `tests/cassette_builder.py`, never received from a
+provider — so every figure computed from it is a fact about this harness. `tests/golden/live/` is
+**captured**: a real provider said those words, and a figure computed from it is a fact about a
+model. The harness makes the difference structural rather than editorial: `score()` takes a
+required response origin with no default, `Score.headline()` refuses the word "accuracy" for a
+synthesised run, and `arms.Figure` cannot hold a value without an origin or an absence without a
+stated reason.
 
 ---
 
@@ -235,36 +243,61 @@ every note — is deterministic, and a test asserts that two runs agree on all o
 | Records | 250 |
 | Live calls | **251**, against a declared ceiling of 750 |
 | Retries | 1 |
-| Schema-valid responses | **248 / 250 — 99.2%** |
-| Malformed | 2, both truncated tool arguments |
-| **Accuracy, all 250** | **27.8%** |
+| Usable through the shipped path | **247 / 250 — 98.8%** |
+| Refused | 3 — two truncated tool arguments, one hallucinated evidence id |
+| **Accuracy, the 247 answered** | **27.9%** |
 | Constant-answer baseline | 85.6% (`escalate`) |
-| **Lift over baseline** | **−57.8%** |
+| **Lift over baseline** | **−57.7%** |
 | **Accuracy on the 36 priceable** | **97.2%** (35 of 36) |
-| Abstention | 13.7% — 34 of 248, **none on a priceable case** |
+| Abstention | 13.8% — 34 of 247, **none on a priceable case** |
 | Latency | min 2.20s · p50 4.80s · p95 8.15s · max 17.97s |
 | Tokens | 799,492 prompt · 46,703 completion · 846,195 total |
+
+**Usable, not "schema-valid", and the distinction was a correction.** The first version of this
+table reported 248 — the count the *adapter* accepts. The shipped path (`llm/flow.py`) also runs
+`assert_citations_were_supplied`, and one answer cited an evidence id it was never shown: a
+corrupted UUID. Through the pipeline it is refused, so 247 is what a pipeline reader should be
+told. An adversarial review of this document caught the harness skipping that check; the harness
+now runs it.
 
 **The headline is worse than answering `escalate` every time, and it is published first.** The
 breakdown says why:
 
-| classification | records | correct label | model accuracy |
-|---|---|---|---|
-| `cross_period_refund` | 12 | `accrue` | **100.0%** |
-| `chargeback_reversal` | 24 | `rebook` | **95.8%** |
-| `fee_split` | 72 | `escalate` | 6.9% |
-| `unclassified` | 140 | `escalate` | 20.7% |
+| classification | records | answered | correct label | model accuracy |
+|---|---|---|---|---|
+| `cross_period_refund` | 12 | 12 | `accrue` | **100.0%** |
+| `chargeback_reversal` | 24 | 24 | `rebook` | **95.8%** |
+| `fee_split` | 72 | 71 | `escalate` | 7.0% |
+| `unclassified` | 142 | 140 | `escalate` | 20.7% |
 
-The model is good at the judgement and bad at declining to make one. On the 214 records whose
-correct answer is *refer this to a human*, it proposed a concrete treatment **178 of the 212 times
-it answered** — the remaining two of those 214 are the provider failures, which also carried that
-label. Every hold-out disagreement runs the same direction; not one is a wrong answer on a
-priceable case.
+The model is good at the judgement and bad at declining to make one. Of the 211 records it answered
+whose correct answer is *refer this to a human* (214 carry that label), it proposed a concrete
+treatment in **177**. Every hold-out disagreement runs the same direction; not one is a wrong
+answer on a priceable case.
 
-**That is the measurement this repository was built to be able to take.** Without the approval gate,
-this model would have driven 178 ledger treatments a human was supposed to see. The gate was
-designed on a specification clause (ADR-056) and repaired after a defect (ADR-061); this is the
-first number that makes it load-bearing rather than well-argued.
+### What actually contains that, and it is not one control
+
+The tempting sentence is *without the approval gate this model would have posted 177 wrong
+treatments*. It is wrong, an adversarial review caught it, and the truth is more useful: **three
+independent fail-closed controls caught different things, and only one of them is the gate.**
+
+1. **The citation check refused one answer outright** — the hallucinated evidence id above. That
+   proposal never became a record for anybody to approve.
+2. **The deterministic calculator refuses all 177.** Every one is `unclassified` (111) or
+   `fee_split` (66); neither class has an account configured, so `compute_adjustment` returns
+   `NO_ACCOUNT_MAPPED` before an amount exists — no instruction, no `adjustment` row, no outbox
+   row, no posting. **This is not luck.** The golden set carries `label_rule:
+   nothing_is_configured_for_this_class` on exactly those records: the reason the correct label is
+   `escalate` and the reason the amount cannot be computed are the same fact.
+3. **The approval gate stands in front of exactly one answer.** Of the 36 records where a proposal
+   really would have produced a priced instruction, 35 were right and **one was wrong** — a
+   chargeback reversal the model wanted to `accrue` to account 4900 instead of `rebook`. Nothing
+   upstream would have caught it. A human authorising the write is the only control that sees it.
+
+So the measurement supports a narrower claim than the first draft made, and a better one: **the
+bulk failure is contained structurally, and the gate covers the residue structure cannot.** ADR-056
+designed the gate from a specification clause and ADR-061 repaired a defect in it; this is the
+first evidence of what it actually catches.
 
 ### 8.2 What was called, stated exactly
 
@@ -286,7 +319,7 @@ unknown — and an estimate printed beside measured figures becomes a measured f
 the size of the evidence document.
 
 **Temperature is not pinned**, so a re-run would not reproduce these answers token-for-token.
-Scoring *is* reproducible — the captured cassette replays offline to the identical 248 proposals and
+Scoring *is* reproducible — the captured cassette replays offline to the identical 247 proposals and
 a test asserts it — and the difference is stated rather than glossed.
 
 ### 8.3 How it was kept safe
@@ -336,14 +369,17 @@ tests/golden/live/live-run.json          per-record latency, tokens, attempts, p
 
 `tests/test_live_evaluation.py` replays the cassette through the same adapter that recorded it and
 asserts every proposal comes back identical. **That test needs no network**, which is the whole
-argument for where the transport lives.
+argument for where the transport lives. `live-eval --from-cassette` goes further and recomputes
+every published figure from the capture — no credential, no opt-in, no call — so a reader can
+check the numbers rather than take them.
 
 ### 8.6 What this does not establish
 
 - **The public demonstration still has no model.** No provider credential is configured on any
   deployed service; the console still shows a proposal declaring itself `stand-in`.
-- **The hold-out is still four independent judgements.** It reports 36.0% agreement (9 of 25) and
-  100% on its 6 priceable records — the same four class rules seen again (ADR-068).
+- **The hold-out is still four independent judgements.** It reports 37.5% agreement (9 of the 24
+  it answered, of 25) and 100% on its 6 priceable records — the same four class rules seen again
+  (ADR-068).
 - **No threshold follows from this.** OPEN-6 stays open, and now says why: one run of one routed
   alias is not a distribution, and the overall figure would gate the wrong thing.
 - **The LLM-as-matcher arm is still `NOT MEASURED`.** That arm asks a model to do the *matching*,

@@ -22,10 +22,13 @@ model. `CLAUDE.md` §10 forbids inventing a metric, so the cell says what is mis
 carrying a number that would be quoted without its caveat. :class:`Figure` has no way to express a
 value without an origin, which is what stops the omission being filled in later by accident.
 
-**Cost is computed from provider usage fields or it is not computed.** The committed cassettes carry
-no ``usage`` block — deliberately, and a test in the M3.4 suite asserts the absence — because a
-synthesised recording saying ``{"input_tokens": 0}`` reads as "this call was free" rather than
-"nobody measured this call", and a fabricated zero ends up inside a published cost figure. There is
+**Cost is computed from provider usage fields or it is not computed.** The *synthesised* cassettes
+carry no ``usage`` block — deliberately, and the M3.4 suite asserts the absence, scoped to
+synthesised recordings — because one saying ``{"input_tokens": 0}`` reads as "this call was free"
+rather than "nobody measured this call", and a fabricated zero ends up inside a published cost
+figure. 6.4's captured cassette *does* carry usage on every interaction, and it is where the token
+totals in `docs/evaluation.md` §8 come from; it prices nothing here because it measured a different
+task over a different corpus, and its subscription-backed route returned no billing field. There is
 therefore no token count to price, and no cost number for either model-dependent arm.
 
 **The deterministic arm's accuracy is pair precision, and that is a deliberate choice over a
@@ -381,8 +384,9 @@ def measure_llm_matcher_arm() -> ArmResult:
     """
     origin = origin_of(load_cassette(REPLAY_CASSETTE), _any_provider())
     absent = (
-        f"requires live capture. The committed cassettes are {origin.value}, and a pairing "
-        "graded from them would measure the cassette builder rather than a model."
+        f"requires a live capture of THIS arm. The cassettes it would replay are {origin.value}, "
+        "and a pairing graded from them would measure the cassette builder rather than a model. "
+        "6.4's capture does not substitute: it asked for a treatment, not a pairing."
     )
     return ArmResult(
         arm=Arm.LLM_AS_MATCHER,
@@ -390,9 +394,10 @@ def measure_llm_matcher_arm() -> ArmResult:
         usd_per_1000_lines=Figure(
             unit="USD",
             why_absent=(
-                "cost is computed from provider usage fields and never estimated. The committed "
-                "cassettes carry no usage block, deliberately, so there is no token count to "
-                "price and therefore no number."
+                "cost is computed from provider usage fields and never estimated. No capture "
+                "exists for this arm: 6.4 captured the treatment-proposal path over the golden "
+                "set, which is a different task on a different corpus, and the synthesised "
+                "cassettes this arm would replay carry no usage block by design."
             ),
         ),
         p95=Figure(
@@ -455,8 +460,10 @@ def measure_hybrid_arm(
             unit="USD",
             why_absent=(
                 "the deterministic half issues no provider request; the treatment-proposal half "
-                "does, and its cost is computed from usage fields the committed cassettes do not "
-                "carry. A total that counted only the free half would read as the total."
+                "does, and 6.4 captured its usage — but over the golden set rather than this "
+                "arm's corpus, through a subscription-backed route that returns no billing field, "
+                "so there is no price to apply. A total that counted only the free half would "
+                "read as the total."
             ),
         ),
         p95=Figure(
@@ -476,8 +483,12 @@ def measure_hybrid_arm(
             "Pairing accuracy is the deterministic arm's figure, unchanged: the hybrid uses the "
             "same matcher on the same corpus, so re-measuring it would only invite a reader to "
             "read meaning into two numbers that describe one thing.",
-            f"Treatment-proposal accuracy on the residual: {NOT_MEASURED}. The committed "
-            f"cassettes are {origin.value}; the offline replay of that path is gated for "
+            "Treatment-proposal accuracy on the residual IS measured, and not here: 6.4 ran it "
+            "live over the 250-record golden set and reports 27.9% overall against an 85.6% "
+            "constant-answer baseline, 97.2% on the 36 priceable records. It is not folded into "
+            "this table because this table's corpus and task are different, and a figure moved "
+            "between them would describe neither. See docs/evaluation.md section 8.",
+            f"The offline replay of this path over the {origin.value} cassettes is gated for "
             "reproduction by tests/golden/replay-baseline.json, which is not a quality "
             "measurement and does not become one by being cited here.",
             "The model's channel into the money path is a four-member treatment enum. It never "
@@ -565,11 +576,11 @@ def render_comparison(comparison: Comparison) -> str:
                 *rows,
                 "",
                 f"`{NOT_MEASURED}` is not a placeholder for a number somebody forgot. Cost is "
-                "computed from provider usage fields or not at all, and the committed cassettes "
-                "are synthesised and carry none — so the two model-dependent arms have no cost, "
-                "no latency and no accuracy that would mean anything. A live capture is the only "
-                "thing that fills those cells, and it needs a credential this repository does "
-                "not hold.",
+                "computed from provider usage fields or not at all, and the synthesised "
+                "cassettes these arms would replay carry none — so the two model-dependent arms "
+                "have no cost, no latency and no accuracy that would mean anything here. 6.4's "
+                "live capture does not fill these cells: it measured proposing a treatment, not "
+                "doing the matching, over the 250-record golden set rather than this corpus.",
                 "",
                 *notes,
             ]

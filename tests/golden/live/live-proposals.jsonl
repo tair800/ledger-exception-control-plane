@@ -78,7 +78,6 @@
 {"abstained":true,"exception_id":"5a07892a-2251-5a18-8a92-93506f081286","treatment":"escalate"}
 {"abstained":false,"exception_id":"5b6f13d8-962d-51b5-a8b1-521c15490af6","treatment":"rebook"}
 {"abstained":false,"exception_id":"5b997453-b622-5318-9685-779e651df045","treatment":"rebook"}
-{"abstained":false,"exception_id":"5c1f2423-f234-5f63-ba8c-4c20a46bbd72","treatment":"rebook"}
 {"abstained":false,"exception_id":"5dac7261-ab15-55ee-8364-1c9c57f37788","treatment":"rebook"}
 {"abstained":false,"exception_id":"5e2e920c-8247-5f3c-a0da-94de73454ff5","treatment":"accrue"}
 {"abstained":false,"exception_id":"5e9bfd93-cc4e-5e7a-b89d-60e0464201dd","treatment":"rebook"}

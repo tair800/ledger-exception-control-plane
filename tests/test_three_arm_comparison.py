@@ -206,18 +206,27 @@ def test_the_llm_matcher_arms_absences_each_name_their_own_reason() -> None:
     """Three cells, three different reasons. One blanket "not measured" would hide two of them."""
     result = measure_llm_matcher_arm()
 
-    assert "requires live capture" in (result.accuracy.why_absent or "")
+    assert "live capture" in (result.accuracy.why_absent or "")
+    # 6.4 captured a live run, and this arm still reports no accuracy. The reason must say why
+    # that capture does not substitute — otherwise a reader with the other measurement in hand
+    # will reasonably assume somebody forgot to fold it in.
+    assert "does not substitute" in (result.accuracy.why_absent or "")
     assert "usage fields" in (result.usd_per_1000_lines.why_absent or "")
     assert "never estimated" in (result.usd_per_1000_lines.why_absent or "")
     assert "round trip" in (result.p95.why_absent or "")
 
 
-def test_the_committed_cassettes_carry_no_usage_block_so_cost_cannot_be_computed() -> None:
+def test_the_synthesised_cassettes_carry_no_usage_block_so_cost_cannot_be_computed() -> None:
     """The reason the cost cell is empty, asserted against the artefact rather than described.
 
     A synthesised recording carrying ``{"input_tokens": 0}`` would read as "this call was free"
     rather than "nobody measured this call", and a fabricated zero would end up inside a published
     cost figure.
+
+    **Scoped to the synthesised corpus, and renamed to say so.** The old name claimed the property
+    of every committed cassette while the body only ever loaded ``REPLAY_CASSETTE`` — harmless
+    until 6.4 committed a *captured* cassette that carries usage on all 250 interactions, at which
+    point the name asserted something false and no test could fail on it.
     """
     cassette = load_cassette(REPLAY_CASSETTE)
     for interaction in cassette.interactions:
@@ -350,7 +359,12 @@ def test_the_hybrids_cost_and_latency_are_not_measured_and_do_not_count_only_the
     assert hybrid.p95.render() == NOT_MEASURED
     assert "would read as the total" in (hybrid.usd_per_1000_lines.why_absent or "")
     assert "provider round trip" in (hybrid.p95.why_absent or "")
-    assert any(
+    # Cost and latency are unmeasured for this arm; treatment-proposal accuracy is NOT, since
+    # 6.4. The note must point at that measurement rather than repeat a stale absence — this
+    # assertion was narrowed when the live run landed, and the previous version of it is what
+    # would have let the table keep saying "NOT MEASURED" about a figure the repository publishes.
+    assert any("IS measured" in note and "docs/evaluation.md" in note for note in hybrid.notes)
+    assert not any(
         f"Treatment-proposal accuracy on the residual: {NOT_MEASURED}" in note
         for note in hybrid.notes
     )

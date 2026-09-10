@@ -1214,16 +1214,16 @@
       "abstained": false,
       "attempts": 1,
       "completion_tokens": 227,
-      "confidence": "high",
+      "confidence": null,
       "exception_id": "5c1f2423-f234-5f63-ba8c-4c20a46bbd72",
-      "failure": null,
-      "failure_detail": null,
+      "failure": "CitationError",
+      "failure_detail": "the proposal cites evidence that was not supplied: ['2dd7fde7-b89f-55b7-a6f0-596a71ae8d67f62b9']",
       "latency_seconds": 5.318267999973614,
       "prompt_hash": "84ea10b6ab4014ea5a5d0058e1c899305be7549c4d2f50d1cdabfa9fddd6e73b",
       "prompt_tokens": 3296,
       "reported_model": "gpt-5.5",
       "total_tokens": 3523,
-      "treatment": "rebook"
+      "treatment": null
     },
     {
       "abstained": false,

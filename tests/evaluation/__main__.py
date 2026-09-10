@@ -103,6 +103,7 @@ from tests.evaluation.livecapture import (
     assert_no_answer_leaks,
     build_subjects,
     plan,
+    rederive_from_cassette,
     run_live_evaluation,
 )
 from tests.evaluation.livetransport import (
@@ -375,12 +376,18 @@ def _refuse_live(reasons: list[str]) -> int:
     return 1
 
 
-def _live_eval(*, plan_only: bool, max_attempts: int) -> int:
+def _live_eval(*, plan_only: bool, max_attempts: int, from_cassette: bool = False) -> int:
     """Run one bounded live evaluation, or refuse and say precisely why.
 
     Capturing a fixture and *measuring a model against a paid API* are different decisions, so
     they have different switches and both are required.
     """
+    if from_cassette:
+        # No credential, no opt-in, no network: this recomputes the published figures from the
+        # committed capture. It is the command a reader runs to check the numbers.
+        golden = load_golden_set()
+        return _report_live(golden, asyncio.run(rederive_from_cassette(golden)))
+
     reasons: list[str] = []
     if os.environ.get(LIVE_EVAL_OPT_IN) != "1":
         reasons.append(
@@ -554,6 +561,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     live.add_argument(
+        "--from-cassette",
+        action="store_true",
+        help=(
+            "recompute the published figures from the committed capture. No credential, no "
+            "opt-in, no network, and no call."
+        ),
+    )
+    live.add_argument(
         "--plan-only",
         action="store_true",
         help="print the plan and run the leakage check, without making a call",
@@ -591,7 +606,11 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.command == "compare":
         return _compare()
     if arguments.command == "live-eval":
-        return _live_eval(plan_only=arguments.plan_only, max_attempts=arguments.max_attempts)
+        return _live_eval(
+            plan_only=arguments.plan_only,
+            max_attempts=arguments.max_attempts,
+            from_cassette=arguments.from_cassette,
+        )
     return _score(arguments.proposals, CassetteOrigin(arguments.origin))
 
 

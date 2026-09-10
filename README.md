@@ -552,9 +552,10 @@ corpus:
 | shipped hybrid | 100.0% | **NOT MEASURED** | **NOT MEASURED** | `no_model` |
 
 `NOT MEASURED` is not a number somebody forgot. Cost is computed from provider usage fields or not
-at all, and the committed cassettes are synthesised and carry none, so the two model-dependent arms
-have no cost, no latency and no accuracy that would mean anything. A live capture is the only thing
-that fills those cells.
+at all. The *synthesised* corpus these arms would replay carries no usage block, deliberately, so
+there is no token count to price — and the captured run of §6.4 does not fill these cells either:
+it measured a different task (proposing a treatment, not doing the matching) over a different
+corpus, and its subscription-backed route returns no billing field to price its tokens with.
 
 Three things the table is careful about. The deterministic arm's 100.0% is *pair precision* — 1,040
 correct of 1,040 pairs — and the harness reports recall beside it (976 of 978 matchable lines,
@@ -590,10 +591,10 @@ One bounded run, 2026-09-10, over all 250 golden records. Full reasoning in
 |---|---|
 | Route | OmniRoute, OpenAI-compatible · alias `auto/best-free` · every response named `gpt-5.5` |
 | Records / live calls | 250 / **251**, against a declared ceiling of 750 · 1 retry |
-| Schema-valid | **248 / 250 — 99.2%** (2 truncated tool arguments, refused not coerced) |
-| **Accuracy, all 250** | **27.8%** — against an 85.6% constant-answer baseline, a **−57.8% lift** |
-| **Accuracy on the 36 priceable** | **97.2%** |
-| Abstention | 13.7% — 34 of 248, **none on a priceable case** |
+| Usable answers | **247 / 250 — 98.8%** through the shipped path (2 truncated tool arguments, 1 hallucinated evidence id — all refused, none coerced) |
+| **Accuracy, the 247 answered** | **27.9%** — against an 85.6% constant-answer baseline, a **−57.7% lift** |
+| **Accuracy on the 36 priceable** | **97.2%** (35 of 36) |
+| Abstention | 13.8% — 34 of 247, **none on a priceable case** |
 | Latency | min 2.20s · p50 4.80s · **p95 8.15s** · max 17.97s |
 | Tokens | 799,492 prompt · 46,703 completion · 846,195 total |
 | Cost | **not measured** — subscription-backed route, no billing field returned |
@@ -601,28 +602,48 @@ One bounded run, 2026-09-10, over all 250 golden records. Full reasoning in
 **The headline is worse than answering `escalate` to everything, and it is the first number here on
 purpose.** The breakdown is the point:
 
-| classification | records | correct label | model accuracy |
-|---|---|---|---|
-| `cross_period_refund` | 12 | `accrue` | **100.0%** |
-| `chargeback_reversal` | 24 | `rebook` | **95.8%** |
-| `fee_split` | 72 | `escalate` | 6.9% |
-| `unclassified` | 140 | `escalate` | 20.7% |
+| classification | records | answered | correct label | model accuracy |
+|---|---|---|---|---|
+| `cross_period_refund` | 12 | 12 | `accrue` | **100.0%** |
+| `chargeback_reversal` | 24 | 24 | `rebook` | **95.8%** |
+| `fee_split` | 72 | 71 | `escalate` | 7.0% |
+| `unclassified` | 142 | 140 | `escalate` | 20.7% |
 
-**The model is good at the judgement and bad at declining to make one.** On the 214 records whose
-correct answer is *refer this to a human*, it proposed a concrete treatment **178 of the 212 times
-it answered** — the other two of those 214 are the provider failures. Every hold-out disagreement
-runs that direction, and not one is a wrong answer on a priceable case.
+**The model is good at the judgement and bad at declining to make one.** Of the 211 records it
+answered whose correct answer is *refer this to a human* (214 carry that label; three were
+refused), it proposed a concrete treatment in **177**.
 
-So the approval gate is not ceremony. **Without it, this model would have driven 178 ledger
-treatments that a human was supposed to see** — and the gate, the role separation and the audit
-trail were all built before this number existed, which is the only order in which that sentence is
-worth anything. The dangerous failure for a control plane is a wrong *amount*, and the model has no
-numeric field to put one in; the failure actually found is over-confidence about *scope*, and a
-person is the control for that.
+### What actually stops that, and it is not one control
 
-Reproducible offline: the run's cassette is committed with `origin: captured` and
-`tests/test_live_evaluation.py` replays it through the same adapter to the identical 248 proposals,
-with no network.
+The tempting sentence — *without the approval gate this model would have posted 177 wrong
+treatments* — is wrong, and the repository is in a position to say exactly why. **Three
+independent fail-closed controls caught different things, and only one of them is the gate.**
+
+1. **The citation check refused one answer outright.** A proposal cited an evidence id that was
+   never in its pack — a corrupted UUID — and `assert_citations_were_supplied` rejected it before
+   it could be recorded. That is one hallucination that never reached a person.
+2. **The deterministic calculator refuses all 177.** Every one is `unclassified` (111) or
+   `fee_split` (66), and neither class has an account configured, so `compute_adjustment` returns
+   `NO_ACCOUNT_MAPPED` before any amount exists: no instruction, no `adjustment` row, no outbox
+   row, no posting. **That is not luck.** The golden set records `label_rule:
+   nothing_is_configured_for_this_class` on exactly those records — the reason the correct label is
+   `escalate` and the reason the amount cannot be computed are the same fact.
+3. **The approval gate stands in front of exactly one answer.** Of the 36 records where a proposal
+   really would have produced a priced instruction, the model got 35 right and **one wrong**: a
+   chargeback reversal it wanted to `accrue` to account 4900 instead of `rebook`. Nothing upstream
+   would have stopped that one. A human authorising the write is the only control that sees it.
+
+So the honest claim is narrower and more useful than the tempting one: **the model's bulk failure
+is contained structurally, and the gate is what covers the residue that structure cannot.** The
+dangerous failure for a control plane is a wrong *amount*, and the model has no numeric field to
+put one in. The failure actually found is over-confidence about *scope* — and scope is where the
+account policy and the human sit.
+
+Reproducible offline, by anyone, with no credential:
+
+```bash
+uv run python -m tests.evaluation live-eval --from-cassette   # recomputes every figure above
+```
 
 ## Tests
 
@@ -636,7 +657,7 @@ with no network.
 | Concurrency | Two workers, one residual — forced with a real interleaving, not a mock |
 | Chaos | §19 on both branches, three adapter capability configurations |
 | Falsifiability | A mutation battery that plants the ways the kill test could be green and worthless |
-| Live evaluation | The tool envelope's failure modes, the call budget, the answer-leak refusal against a poisoned prompt, and an **offline replay of the captured run** to the identical 248 proposals — no network |
+| Live evaluation | The tool envelope's failure modes, the call budget, the answer-leak refusal against a poisoned prompt, and an **offline replay of the captured run** to the identical 247 proposals — no network |
 | Frontend | 82 tests: key flow, loading/empty/error states, the no-money-arithmetic guard |
 
 Guard tests are written to be *falsifiable*: several of them exist because a planted defect passed
@@ -703,10 +724,13 @@ Stated plainly, because a reviewer will find them anyway.
   repository, so that column proves the dispatcher behaves correctly *given* an enforcing ledger —
   not that any particular real ledger enforces anything. Establishing a real provider's capability
   profile from its documentation is an open item.
-- **No live model call anywhere.** No provider SDK is a dependency and nothing speaks HTTP. The
-  proposal flow is exercised through injected fakes and recorded cassettes, and the committed
-  cassettes are synthesised rather than captured. **Live model quality, cost and latency are not
-  measured.**
+- **The shipped package still makes no live model call**, and a guard test enforces it: no
+  provider SDK is a dependency and nothing under `src/…/llm/` imports an HTTP client. The one
+  transport that dials lives under `tests/`, is reachable only through a doubly-gated command, and
+  is what produced the [live measurement](#the-live-model-measurement). Two kinds of cassette are
+  now committed and they are not interchangeable: the canonical corpus is **synthesised** and
+  measures the harness; `tests/golden/live/` is **captured** and measures a model. **Live cost is
+  still not measured** — a subscription-backed route returns no billing field.
 - **The human-labelled hold-out is confirmed, and narrower than "25 records" sounds.** All 25 were
   labelled by the owner and agree with the derived table on every record. But the derived label is a
   pure function of the classification across all 250 records, so the slice is four distinct
@@ -866,7 +890,8 @@ omission.** `agent_identity` is null because §2 states this system is *not* an 
 proposes a treatment code from a closed set and takes no action, so there is nothing to identify.
 `region_jurisdiction` is null because §11 defines it as the processing region of *the model call*,
 and no model call is made here at all — no transport ships, no provider SDK is a dependency, and
-every committed cassette is marked synthesised. Recording a region would describe a request that
+every cassette that existed when this was written was marked synthesised. Recording a region
+would describe a request that
 never happened, in the one record an auditor trusts. Both gaps are *named* by the provenance read
 rather than rendered as blank cells, because "no model was involved" and "a model was involved and
 we failed to record which" are different states.
@@ -1281,7 +1306,9 @@ Four properties are worth naming, because each one is a way this normally goes w
   it wraps a transport an operator supplies, because nothing in the package owns a socket. Scrubbing
   of authorisation headers, provider identifiers and credential-shaped values happens before
   anything is written, and a test asserts no cassette contains a secret.
-- **The committed cassettes declare themselves synthesised.** They exercise the adapters' real
+- **The canonical cassettes declare themselves synthesised** — the captured ones under
+  `tests/golden/live/` declare themselves captured, and the scorer treats the two differently.
+  The synthesised ones exercise the adapters' real
   parsing, the fingerprint, scrubbing and determinism; they are not evidence about how any model
   behaves. Obtaining that needs a captured cassette, and the format keeps the two apart.
 
@@ -1362,8 +1389,8 @@ result that does not flatter it.**
    no semantic weakened to fit. What that deployment is *not* is stated at the same length in
    [`docs/demo-deployment.md`](docs/demo-deployment.md) (ADR-069).
 3. **The model is measured** — [above](#the-live-model-measurement): 250 records, 251 live calls,
-   99.2% schema-valid, 97.2% accurate where a proposal changes what happens, and **27.8% overall
-   against an 85.6% constant-answer baseline** (ADR-070).
+   98.8% usable, 97.2% accurate where a proposal changes what happens, and **27.9% against an
+   85.6% constant-answer baseline** (ADR-070).
 
 **What is still not claimed**, and it is a narrower list than it was:
 

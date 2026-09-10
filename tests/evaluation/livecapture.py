@@ -52,13 +52,17 @@ from ledger_exception_control_plane.fixtures.generator import generate
 from ledger_exception_control_plane.llm.cassette import (
     Interaction,
     RecordingTransport,
+    ReplayTransport,
+    load_cassette,
     render_cassette,
 )
 from ledger_exception_control_plane.llm.evidence import (
     CandidateEntryFact,
+    EvidencePack,
     ExceptionSubject,
     assemble_evidence,
 )
+from ledger_exception_control_plane.llm.flow import assert_citations_were_supplied
 from ledger_exception_control_plane.llm.port import ProviderError, ProviderId
 from ledger_exception_control_plane.llm.prompt import (
     PROMPT_CONTRACT_VERSION,
@@ -104,6 +108,7 @@ __all__ = [
     "LiveOutcome",
     "assert_no_answer_leaks",
     "build_subjects",
+    "rederive_from_cassette",
     "run_live_evaluation",
 ]
 
@@ -311,7 +316,8 @@ async def run_live_evaluation(
             f"{len(missing)} golden records have no rebuilt subject; the corpus drifted"
         )
 
-    prompts = {r.exception_id: build_prompt(*_pack(subjects[r.exception_id])) for r in records}
+    packs = {r.exception_id: _pack(subjects[r.exception_id]) for r in records}
+    prompts = {key: build_prompt(subject, pack) for key, (subject, pack) in packs.items()}
     assert_no_answer_leaks(prompts, records)
 
     credential = credential_from_environment()
@@ -351,6 +357,10 @@ async def run_live_evaluation(
                 abstained = False
                 try:
                     proposal = await proposer.propose(prompt)
+                    # The shipped flow does this too, and a harness that skipped it would grade
+                    # answers the pipeline refuses. `CitationError` is a `ProviderResponseError`,
+                    # so it lands in the same handler and is recorded under its own name.
+                    assert_citations_were_supplied(proposal, packs[record.exception_id][1])
                     treatment = proposal.treatment.value
                     confidence = proposal.confidence.value
                     abstained = proposal.abstained
@@ -397,7 +407,78 @@ async def run_live_evaluation(
     }
 
 
-def _pack(pair: tuple[ExceptionSubject, list[CandidateEntryFact]]) -> tuple[ExceptionSubject, Any]:
+async def rederive_from_cassette(golden: GoldenSet | None = None) -> dict[str, Any]:
+    """Recompute every published figure from the committed capture. **No network, no credential.**
+
+    This is what makes the numbers auditable rather than a printout. The cassette holds what the
+    provider actually returned, so replaying it through the same adapter and the same citation
+    check reproduces the run exactly — including its failures, which is the part a re-run against
+    a live route could never guarantee.
+
+    Latency and token figures come from the recorded run rather than from this replay: a cassette
+    answers in microseconds, and reporting that as model latency would be the same class of error
+    as scoring a synthesised cassette.
+    """
+    golden = golden or load_golden_set()
+    subjects = build_subjects()
+    recorded = json.loads(LIVE_RUN_PATH.read_text(encoding="utf-8"))
+    timing = {row["exception_id"]: row for row in recorded["outcomes"]}
+    alias = recorded["model_alias"]
+
+    proposer = OpenAIToolProposer(
+        ReplayTransport(load_cassette(LIVE_CASSETTE_PATH)), model_id=alias
+    )
+
+    outcomes: list[LiveOutcome] = []
+    for record in golden.records:
+        subject, pack = _pack(subjects[record.exception_id])
+        prompt = build_prompt(subject, pack)
+        was = timing[record.exception_id]
+        treatment = confidence = failure = detail = None
+        abstained = False
+        try:
+            proposal = await proposer.propose(prompt)
+            assert_citations_were_supplied(proposal, pack)
+            treatment = proposal.treatment.value
+            confidence = proposal.confidence.value
+            abstained = proposal.abstained
+        except ProviderError as exc:
+            failure = type(exc).__name__
+            detail = str(exc)[:400]
+        outcomes.append(
+            LiveOutcome(
+                exception_id=record.exception_id,
+                treatment=treatment,
+                abstained=abstained,
+                confidence=confidence,
+                failure=failure,
+                failure_detail=detail,
+                prompt_hash=prompt_hash(prompt),
+                attempts=was["attempts"],
+                latency_seconds=was["latency_seconds"],
+                reported_model=was["reported_model"],
+                prompt_tokens=was["prompt_tokens"],
+                completion_tokens=was["completion_tokens"],
+                total_tokens=was["total_tokens"],
+            )
+        )
+
+    budget = CallBudget(maximum=recorded["call_budget"], spent=recorded["calls_made"])
+    _write(
+        outcomes,
+        load_cassette(LIVE_CASSETTE_PATH).interactions,
+        budget,
+        dt.datetime.fromisoformat(recorded["started_at"]),
+        dt.datetime.fromisoformat(recorded["finished_at"]),
+        alias,
+        recorded["route"],
+    )
+    return {"outcomes": outcomes, "calls": [], "interactions": [], "budget": budget}
+
+
+def _pack(
+    pair: tuple[ExceptionSubject, list[CandidateEntryFact]],
+) -> tuple[ExceptionSubject, EvidencePack]:
     subject, candidates = pair
     return subject, assemble_evidence(subject, candidates, DEFAULT_POLICY)
 

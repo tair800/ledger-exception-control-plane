@@ -44,11 +44,17 @@ own table, which states they may not. It shipped at 5.1 and survived four increm
 asserted anything about the analyst in either direction. Recording a decision and authorising a
 posting are now separate rights (ADR-061).
 
-The model layer still makes **no live call**: no provider SDK is a dependency, nothing under `llm/`
-imports an HTTP client, and no transport that speaks HTTP exists — the flow is exercised entirely
-through injected fakes and recorded cassettes. The committed cassettes are **synthesised, not
-captured**; the format records which a file is and a test asserts it, because 6.3 will publish
-measurements produced from cassettes and the difference must never be lost.
+**The shipped package still makes no live call**, and that is enforced rather than asserted: no
+provider SDK is a dependency, and a guard test walks `src/…/llm/` and fails the build if anything
+there imports an HTTP client. 6.4 added the one transport that dials, under `tests/`, reachable
+only through a doubly-gated command — so every other suite still runs offline with no credential.
+
+**Two kinds of cassette are now committed and they are not interchangeable.** The canonical corpus
+is **synthesised**: a score over it measures this harness. `tests/golden/live/` is **captured**: a
+score over it measures a model. The format records which a file is, a test asserts it over every
+cassette, and the scorer's `MEASURES_A_MODEL` set decides whether a headline may be quoted as model
+accuracy. That distinction was built before there was a capture to apply it to, which is why it
+held when one arrived.
 
 **Nor does the ledger side open a socket.** There are now three reference adapters, all in-process,
 which is what lets the whole reliability layer be proven offline and in CI. The second — required by
@@ -106,12 +112,19 @@ Fly.io path and is **not** the live one. OPEN-10 closes.
 
 **The third is now discharged too, and it produced a negative result.** A bounded live run on
 2026-09-10 — 250 records, 251 calls against a 750 ceiling, through an OpenAI-compatible OmniRoute
-route — measured **99.2% schema-valid, 97.2% accurate on the 36 priceable records, and 27.8%
-overall against an 85.6% constant-answer baseline**. The model is good at the judgement and bad at
-declining to make one: of the 212 escalate-labelled records it answered, 178 came back with a
-concrete treatment. **That is the number that makes the approval gate load-bearing rather than well-argued**
-(ADR-070). Live **cost** remains unmeasured and unmeasurable from here — a subscription-backed
-route returns no billing field, and no list-price equivalent is estimated.
+route — measured **98.8% usable, 97.2% accurate on the 36 priceable records, and 27.9% against an
+85.6% constant-answer baseline**. The model is good at the judgement and bad at declining to make
+one: of the 211 escalate-labelled records it answered, 177 came back with a concrete treatment.
+
+**Three independent fail-closed controls caught different things, and the approval gate is only
+one of them** — say all three, because the single-control version overstates and an adversarial
+review caught it doing so. The **citation check** refused one hallucinated evidence id outright.
+The **account policy** refuses all 177: every one is `unclassified` or `fee_split`, neither has an
+account configured, and `compute_adjustment` returns `NO_ACCOUNT_MAPPED` before an amount exists —
+the same fact that makes the correct label `escalate`. The **approval gate** stands in front of
+exactly one wrong answer that would really have priced: a chargeback reversal the model wanted to
+`accrue` to account 4900 (ADR-070). Live **cost** remains unmeasured and unmeasurable from here —
+a subscription-backed route returns no billing field, and no list-price equivalent is estimated.
 
 **The deployed demonstration still has no model.** No provider credential is configured on any of
 the four services; the console's proposal declares itself `stand-in`. A measurement taken on a
@@ -227,9 +240,11 @@ ledger adapter (OPEN-11). `PROJECT_STATUS.md` is the authority on exactly what e
   works without running the available verification.
 - The evaluation gate runs on **recorded cassettes**, so CI needs no live API key.
 - **A score carries the origin of the responses it was computed over, and the scorer will not call a
-  synthesised run a model measurement.** The committed cassettes are synthesised; a score over them
-  measures the harness. `score()` takes a required `origin` with no default, because a default would
-  be supplied by every caller that forgot it and the wrong one publishes a fabricated result.
+  synthesised run a model measurement.** `score()` takes a required `origin` with no default, because
+  a default would be supplied by every caller that forgot it and the wrong one publishes a fabricated
+  result. A score over the **synthesised** canonical cassettes measures the harness and its headline
+  says so; a score over the **captured** run in `tests/golden/live/` measures a model and may be
+  quoted as one. Never let the two share a sentence without their origins.
 - **Never report accuracy on the golden set without the constant-answer baseline beside it.** 214 of
   250 labels are `ESCALATE`, so answering that every time scores 85.6% while deciding nothing. The
   figure that means something is the accuracy on the 36 priceable records, where the same constant

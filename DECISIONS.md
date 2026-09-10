@@ -4377,49 +4377,72 @@ records, and produced a result worth arguing about.
 
 ### The headline, and it is not flattering
 
-**Treatment-proposal accuracy: 27.8%, against a constant-answer baseline of 85.6%. A lift of
-−57.8%.** Answering `escalate` to every exception would have scored three times better.
+**Treatment-proposal accuracy: 27.9% over the 247 records the pipeline could use, against a
+constant-answer baseline of 85.6%. A lift of −57.7%.** Answering `escalate` to every exception
+would have scored three times better.
 
 That number is published first, unrounded and unexplained-away, because a portfolio that only
 publishes results that flatter its own architecture is marketing. But it is also not the
 interesting number, and the breakdown says why:
 
-| classification | records | correct label | model accuracy |
-|---|---|---|---|
-| `cross_period_refund` | 12 | `accrue` | **100.0%** |
-| `chargeback_reversal` | 24 | `rebook` | **95.8%** |
-| `fee_split` | 72 | `escalate` | 6.9% |
-| `unclassified` | 140 | `escalate` | 20.7% |
+| classification | records | answered | correct label | model accuracy |
+|---|---|---|---|---|
+| `cross_period_refund` | 12 | 12 | `accrue` | **100.0%** |
+| `chargeback_reversal` | 24 | 24 | `rebook` | **95.8%** |
+| `fee_split` | 72 | 71 | `escalate` | 7.0% |
+| `unclassified` | 142 | 140 | `escalate` | 20.7% |
 
 **On the 36 priceable records — the ones where a proposal changes what happens — the model is
 97.2% accurate (35 of 36).** On the 214 where the correct answer is *refer this to a human*, it
-answered 212 and proposed a concrete treatment in **178** of them.
+answered 211 and proposed a concrete treatment in **177** of them.
 
-### What that actually means
+### What that actually means, and the first draft of this section overstated it
 
-The model is good at the judgement and bad at declining to make one.
+The model is good at the judgement and bad at declining to make one. Every hold-out disagreement
+runs the same direction: expected `escalate`, got a treatment. Not one is a wrong answer on a
+priceable case.
 
-Every single hold-out disagreement runs the same direction: expected `escalate`, got a treatment.
-Not one is a wrong answer on a priceable case. Set against §19's question — what would this system
-do if it trusted the model — the answer is now measured rather than argued: **it would have posted
-178 ledger treatments that a human was supposed to look at.** (178 of the 212 escalate-labelled
-records it answered; the set holds 214, and the two the provider failed on carried that label too.)
+The first version of this paragraph then said: *the gate is the only thing standing between a
+confident model and 177 unwarranted postings.* **An adversarial review of this ADR refuted that,
+and the truth is more interesting.** Three independent fail-closed controls caught different parts
+of the failure, and the gate is the last and narrowest of them.
 
-So the approval gate is not ceremony, and this is the first evidence in the repository that says
-so with a number. ADR-056 separated recording a decision from authorising a posting on the strength
-of a specification clause. ADR-061 fixed a defect in it. This measurement is what makes both of them
-load-bearing: the gate is the only thing standing between a confident model and 178 unwarranted
-postings.
+**1. The citation check refused one answer before anything else saw it.** A proposal cited an
+evidence id that was never in its pack — a corrupted UUID — and `assert_citations_were_supplied`
+rejected it. That record is one of the three the pipeline could not use, and it is the reason the
+usable count is 247 rather than the adapter's 248. The harness had skipped that check; it no
+longer does, which is itself a finding: a measurement of the adapter was being published as a
+measurement of the pipeline.
 
-It also relocates the risk. The dangerous failure for a control plane is a *wrong amount*, and the
-architecture forbids that structurally — the model has no numeric field to put one in. The failure
-this measurement found is *over-confidence about scope*, and the architecture handles that with a
-person. Both defences were designed before the number existed, which is the only order in which
-that claim is worth anything.
+**2. The deterministic calculator refuses all 177.** Every one is `unclassified` (111) or
+`fee_split` (66). Neither class has an account configured, so `compute_adjustment` returns
+`NO_ACCOUNT_MAPPED` before an amount is computed: no instruction, no `adjustment` row, no outbox
+row, no posting. **That is not luck.** The golden set records `label_rule:
+nothing_is_configured_for_this_class` on exactly those 177 — *the reason the correct label is
+`escalate` and the reason the amount cannot be computed are the same fact about the system*. A
+model that over-commits on unpriceable classes is over-committing precisely where the calculator
+is already closed.
+
+**3. The approval gate stands in front of exactly one answer.** Of the 36 records where a proposal
+really would have produced a priced instruction, the model got 35 right and **one wrong**: a
+chargeback reversal it proposed to `accrue` to account 4900 instead of `rebook`. Nothing upstream
+would have stopped it — the class is mapped, the amount is computable, the citation is sound. A
+human authorising the write is the only control that sees that one.
+
+So the defensible claim is narrower than the tempting one and says more: **the bulk failure is
+contained structurally, and the gate covers the residue structure cannot reach.** ADR-056 designed
+the gate from a specification clause; ADR-061 repaired a defect in it; this is the first evidence
+of what it actually catches, and the answer is *one case in 250* rather than 177.
+
+It also relocates the risk truthfully. The dangerous failure for a control plane is a *wrong
+amount*, and the architecture forbids that structurally — the model has no numeric field to put
+one in. The failure this measurement found is *over-confidence about scope*, and scope is where
+the account policy and the human sit. All three defences were designed before the number existed,
+which is the only order in which any of this is worth anything.
 
 ### Abstention: the mechanism works and the model under-uses it
 
-34 of 248 answers abstained (13.7%). **All 34 were cases where escalating was correct, and not one
+34 of 247 answers abstained (13.8%). **All 34 were cases where escalating was correct, and not one
 priceable case was declined.** The abstention channel is therefore behaving exactly as ADR-048
 intended — an abstaining proposal carries `escalate`, and the model never used it to dodge a case
 it could price. It is simply used too rarely: 34 abstentions against 214 records that wanted one.
@@ -4434,8 +4457,8 @@ it could price. It is simply used too rarely: 34 abstentions against 214 records
 | Records | 250 (the whole golden set) |
 | Live calls | **251**, against a declared ceiling of 750 |
 | Retries | 1 |
-| Schema-valid responses | **248 / 250 (99.2%)** |
-| Malformed | 2, both truncated tool arguments |
+| Usable through the shipped path | **247 / 250 (98.8%)** |
+| Refused | 3 — two truncated tool arguments, one hallucinated evidence id |
 | Latency | min 2.20s · p50 4.80s · p95 8.15s · max 17.97s |
 | Tokens | 799,492 prompt · 46,703 completion · 846,195 total |
 | Cost | **not measured** — see below |
@@ -4458,7 +4481,7 @@ report and the wrong thing to quote as prompt size.
 
 **Temperature is not pinned.** Neither adapter sends one, so the provider default applies and a
 re-run would not reproduce these answers token-for-token. *Scoring* is reproducible — the captured
-cassette replays offline to the identical 248 proposals, and a test asserts it — but the sampling is
+cassette replays offline to the identical 247 proposals, and a test asserts it — but the sampling is
 not. Recorded as a limitation rather than fixed after the fact, because pinning it now and re-running
 would be changing the experiment after seeing the result.
 
@@ -4519,8 +4542,9 @@ nothing wrong.
 four deployed services, the console still shows a proposal declaring itself `stand-in`, and nothing
 about this run changed that. A measurement made on a workstation is not a capability of a deployment.
 
-**The hold-out slice is still four independent judgements.** It reports 36.0% agreement (9 of 25)
-and 100% on its 6 priceable records, and both figures are the same four class rules seen again.
+**The hold-out slice is still four independent judgements.** It reports 37.5% agreement (9 of the
+24 it answered, from 25) and 100% on its 6 priceable records, and both figures are the same four
+class rules seen again.
 ADR-068 said so before there was a model score to attach to them, and attaching one does not make
 them independent.
 
@@ -4588,12 +4612,12 @@ evidence FR-5 specifies.
 **Constraint:** cannot be chosen before a baseline exists, or the threshold is arbitrary.
 
 A baseline now exists and is deliberately *not* being turned into a threshold. The first live run
-(ADR-070) scored 27.8% overall, 97.2% on the priceable subset, and 13.7% abstention, through one
+(ADR-070) scored 27.9% over the 247 answered, 97.2% on the priceable subset, and 13.8% abstention, through one
 routed alias on one afternoon. Three reasons that is not yet a gate:
 
 - **A single run of a routed alias is not a distribution.** `auto/best-free` resolves per call and
   resolved to `gpt-5.5` throughout this one; nothing guarantees the next run meets the same model.
-- **The overall figure would gate the wrong thing.** 27.8% is below the 85.6% constant-answer
+- **The overall figure would gate the wrong thing.** 27.9% is below the 85.6% constant-answer
   baseline, so a naive accuracy floor would fail every build while the model is 97.2% correct
   wherever a proposal changes what happens. The figure worth gating is the priceable one, possibly
   with an *escalation-recall* floor beside it — the model's actual weakness.
