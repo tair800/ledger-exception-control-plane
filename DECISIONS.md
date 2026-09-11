@@ -4558,6 +4558,131 @@ second and says nothing about the first.
 
 ---
 
+## ADR-071 — The duplicate send was §13.5 working, and the assertion that caught it was wrong
+
+**Status:** accepted. **Date:** 2026-09-11, closing the open M4 question recorded on 2026-09-11.
+
+`test_two_runners_over_one_queue_apply_each_operation_once` failed once in CI (run 34530849003,
+commit `9cade72`) with **6 sends for 4 operations**. Every `applied_count` assertion held, so no
+financial effect doubled. It passed on re-run and passed six consecutive times locally, which is
+the shape of a rare interleaving rather than a regression — and the shape of a question that gets
+closed by a green re-run instead of an answer.
+
+It was not closed that way. The interleaving was forced deterministically and the answer is:
+**this is §13.5 clause 3 operating exactly as specified, and the test was asserting a property the
+architecture deliberately does not promise.**
+
+### The interleaving, reproduced rather than inferred
+
+With the first send held open inside `adapter.post`, a second dispatch on the same adjustment runs
+to completion. Against `SimulatedLedger`:
+
+```
+posts_received for ONE operation: 2
+applied_count                   : 1
+posting_attempt rows            : [(1, resolved), (2, resolved)]
+```
+
+Step by step:
+
+1. **Runner A, transaction 1.** No terminal outcome, no in-flight attempt. `attempt_no = max(0)+1
+   = 1`. The transaction commits, **releasing the `FOR UPDATE` on the outbox row** — §12.1.1 forces
+   the write-ahead record into a transaction of its own, so no lock can be held across the send.
+   `run_due_once` says this in its own docstring: *"the claim is taken and released before any
+   send"*.
+2. **Runner A, transaction 2.** Inserts `PostingAttempt(attempt_no=1, IN_FLIGHT)` and commits. That
+   commit is an await point, so control can pass to B here.
+3. **Runner A** enters the socket write.
+4. **Runner B, transaction 1.** `last_outcome` is still NULL — A has not recorded an outcome — but
+   there is one `IN_FLIGHT` attempt. The ambiguity gate fires and asks `resend_decision`.
+5. **The answer is `PERMITTED`.** `SimulatedLedger` is in `CONFORMANCE_RUNS` with
+   `suppression_proven=True`, so its effective capability is `ENFORCES_KEY`, and
+   `resend_decision` checks `suppresses_duplicates` *before* `queryable_by_operation_id`. The
+   bounds pass: `now - first_sent_at` is zero against a one-day window, and the endpoint matches.
+6. **B computes `attempt_no = max(1)+1 = 2`.** The unique constraint on
+   `(adjustment_id, attempt_no)` is what refuses a *simultaneous* second insert of attempt N — and
+   it does not apply here, because B is legitimately taking the next number. B sends.
+7. The ledger suppresses. `applied_count` stays 1; `posts_received` becomes 2.
+
+### Which claim actually holds
+
+The five claims this touches, kept apart deliberately, because conflating them is how a test ends
+up asserting the wrong one:
+
+| Claim | Holds? | Why |
+|---|---|---|
+| At most one **financial side effect** | **Yes**, conditionally | §13.5's actual guarantee, permitted only under `ENFORCES_KEY` or `BY_OPERATION_ID`. Measured at the ledger: `applied_count == 1`. |
+| At most one **transport request** | **No, and never promised** | §13.5 clause 3 permits an automatic re-send where capability allows the duplicate to be suppressed, bounded by window and scope. |
+| At most one **active dispatch claim** | **No, deliberately** | The claim is released before the send. Holding it would deadlock against `dispatch_once`'s own `FOR UPDATE` and would be the long-running claim transaction 4.1 warned about. |
+| **At-least-once** outbox delivery | Yes | What the outbox guarantees, and all it guarantees. |
+| **Bounded** retry | Yes | The re-send is bounded by the declared window and scope, and refused outside either. |
+
+§13.5 is titled *"effectively-once financial side effect"*. A transport-request count is not what
+it promises, and the second send is the specification's own words: *"Automatic retry from `UNKNOWN`
+is permitted only where capability allows the duplicate to be suppressed or detected — and even
+then it is bounded by the declared window and scope."*
+
+### The capability branch is load-bearing, and that is the evidence
+
+The same forced interleaving, run against each reference adapter:
+
+| Adapter | Effective idempotency | Decision | Sends | Applied |
+|---|---|---|---|---|
+| `SimulatedLedger` | `enforces_key` | **permitted** | **2** | 1 |
+| `QueryableNonIdempotentLedger` | `none` | `reconcile_first` | **1** | 1 |
+| `NonIdempotentLedger` | `none` | `manual_recovery` | **1** | 1 |
+
+A second send happens **only** where suppression is proven. Where the adapter cannot suppress, the
+second dispatch is refused outright. That is the difference between a race and a branch, and it is
+why no production code changed.
+
+### What changed: the test contract, and it got stronger
+
+The old assertion was added for a good reason and reached for the wrong property. Three reviewers
+had pointed out that `applied_count == 1` is held at one by the reference ledger whatever we do, so
+the test was green by construction; `posts_received == len(operations)` was the fix, and it asserts
+at-most-one-transport-request, which the architecture declines to promise.
+
+Replaced by four tests that are each true and each falsifiable:
+
+1. **`test_two_runners_over_one_queue_apply_each_operation_once`** — one application per
+   operation, read off the ledger; no attempt number reused; and at least one attempt per
+   operation, so a pass that dispatched nothing cannot satisfy it vacuously.
+2. **`test_every_send_is_backed_by_a_committed_write_ahead_record`** — `posts_received` equals the
+   number of committed attempt rows. §12.1.1's promise, counted: a send that skipped transaction 2
+   leaves the trail short, a record for a send that never happened leaves it long.
+3. **`test_a_runner_that_cannot_suppress_never_sends_twice`** — the strong claim, moved to where it
+   is actually true. Against `NonIdempotentLedger` the second dispatch must be refused, and that
+   adapter books every request it receives, so a duplicate that got through would double-book.
+4. **`test_a_permitted_resend_is_exactly_one_extra_send_and_no_extra_effect`** — the §13.5 branch
+   pinned: `PERMITTED`, attempt number 2, exactly one extra send, and no extra financial effect. A
+   change that made the re-send unbounded would fail here.
+
+**Tests 3 and 4 force the interleaving rather than waiting for it**, and that mattered: the first
+version of test 3 ran two concurrent passes and asserted no duplicate, and it passed *with both
+§13.5 guards patched out* — the overlap simply did not occur. A test whose falsifiability depends
+on the scheduler is the same shape as the assertion that started this. With the overlap forced and
+the guards removed, `NonIdempotentLedger` double-books (`applied_count == 2`) and all three
+assertions fire.
+
+**One methodological note, recorded because it invalidated the first attempt.** The forcing
+mechanism patches `post` on the *instance*. Subclassing the adapter looks equivalent and is not:
+`implementation_of` keys the conformance record on the class that actually runs, so
+`Gated(SimulatedLedger)` matches no committed run, every strong claim is downgraded to `NONE`, and
+the dispatcher refuses for the wrong reason. The first probe did exactly that and produced a clean,
+confident, wrong answer. The guard behaved correctly; the probe did not.
+
+### What is not claimed
+
+**Exactly-once transport is not claimed and is now demonstrably false.** The effectively-once
+*financial effect* language is unchanged and remains conditional on the adapter capability table in
+§13.4.
+
+Nothing here changes production behaviour: no dispatcher, locking, transaction or persistence
+semantics were touched, so the 4.5 kill-test gate was not re-run.
+
+---
+
 # Open decisions
 
 Not yet decided. Each names what must be settled and by when.

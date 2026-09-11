@@ -55,7 +55,10 @@ from ledger_exception_control_plane.db.control import (
 from ledger_exception_control_plane.db.engine import async_dsn
 from ledger_exception_control_plane.fixtures.loader import assert_target_is_disposable
 from ledger_exception_control_plane.ledger import (
+    IdempotencyMode,
+    LedgerAdapter,
     LedgerAdapterCapabilities,
+    NonIdempotentLedger,
     PostingInstruction,
     PostingOutcome,
     Rejected,
@@ -63,6 +66,7 @@ from ledger_exception_control_plane.ledger import (
     Throttled,
     Unknown,
 )
+from ledger_exception_control_plane.ledger.conformance import capabilities_for
 from ledger_exception_control_plane.ledger.transport import (
     LedgerTransportError,
     RetryableCause,
@@ -70,6 +74,12 @@ from ledger_exception_control_plane.ledger.transport import (
 from ledger_exception_control_plane.money import DEMO_LEDGER_CONTEXT, AdjustmentInstruction
 from ledger_exception_control_plane.money.calculator import ROUNDING
 from ledger_exception_control_plane.operations import enqueue_posting
+from ledger_exception_control_plane.operations.dispatcher import (
+    DispatchRefusedError,
+    DispatchResult,
+    ResendDecision,
+    dispatch_once,
+)
 from ledger_exception_control_plane.operations.retry import (
     DeadLetterReason,
     ReplayOutcome,
@@ -1403,49 +1413,206 @@ async def test_the_limit_bounds_one_pass(engine: AsyncEngine) -> None:
     assert len(await _rows("posting_attempt")) == 2
 
 
+async def _overlapping_dispatch(
+    engine: AsyncEngine, ledger: LedgerAdapter, adjustment_id: uuid.UUID
+) -> DispatchRefusedError | DispatchResult:
+    """Force the interleaving the CI failure stumbled into, rather than waiting for it.
+
+    The first send is held open inside ``post`` while a second dispatch runs to completion, so the
+    second one is guaranteed to enter the gate with an attempt in flight — the window where §13.5
+    clause 3 decides whether a re-send is permitted. Returns what the second dispatch did.
+
+    **Patched on the instance, never by subclassing.** :func:`implementation_of` keys the
+    conformance record on the class that actually runs, so a subclass matches no committed run and
+    every strong claim is silently downgraded to ``NONE``. A test that subclassed would watch the
+    dispatcher refuse for the wrong reason and call it a pass; the first attempt at this
+    investigation did exactly that.
+    """
+    import asyncio
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    original, state = ledger.post, {"first": True}
+
+    async def held(operation: str, instruction: PostingInstruction) -> PostingOutcome:
+        if state["first"]:
+            state["first"] = False
+            entered.set()
+            await release.wait()
+        return await original(operation, instruction)
+
+    ledger.post = held  # type: ignore[assignment]
+
+    first = asyncio.create_task(
+        dispatch_once(engine, adjustment_id=adjustment_id, adapter=ledger, sent_at=EPOCH)
+    )
+    await entered.wait()
+    try:
+        second: DispatchRefusedError | DispatchResult = await dispatch_once(
+            engine, adjustment_id=adjustment_id, adapter=ledger, sent_at=EPOCH
+        )
+    except DispatchRefusedError as refused:
+        second = refused
+    finally:
+        release.set()
+        await first
+    return second
+
+
+async def _two_runners(engine: AsyncEngine, ledger: LedgerAdapter, count: int) -> list[str]:
+    """Two bounded passes over one queue, concurrently. Returns the operation identifiers."""
+    import asyncio
+
+    operations = [(await _enqueued(engine, marker=f"race{index}")) for index in range(count)]
+    passes = await asyncio.gather(
+        run_due_once(engine, adapter=ledger, policy=POLICY, now=EPOCH, rng=random.Random(1)),
+        run_due_once(engine, adapter=ledger, policy=POLICY, now=EPOCH, rng=random.Random(2)),
+        return_exceptions=True,
+    )
+    for outcome in passes:
+        assert not isinstance(outcome, BaseException), f"a pass failed outright: {outcome!r}"
+    return [operation_id for _, operation_id in operations]
+
+
 @pytest.mark.asyncio
 async def test_two_runners_over_one_queue_apply_each_operation_once(
     engine: AsyncEngine,
 ) -> None:
     """**Two workers, one queue** — the invariant, measured at the ledger.
 
-    ``SKIP LOCKED`` keeps the two passes off each other's rows while they select; the write-ahead
-    unique constraint is what stops a duplicate send if they overlap anyway. Which of the two did
-    the work is a scheduling accident, so the assertion is on the thing that must be true either
-    way: one application per operation.
+    The claim in ``run_due_once`` is taken and released *before* the send, because §12.1.1 forces
+    the write-ahead record into a transaction of its own and a lock cannot be held across it. Two
+    passes can therefore both reach dispatch for the same row, and what happens then is decided by
+    the adapter's **proven** capability, not by a lock.
+
+    **This test used to assert ``posts_received == len(operations)``, and that was wrong.** It
+    failed once in CI with 6 sends for 4 operations, and the investigation (ADR-071) forced the
+    interleaving deterministically: a second pass that finds an attempt in flight asks
+    :func:`resend_decision`, and against an adapter whose suppression is *proven* the answer is
+    ``PERMITTED`` — §13.5 clause 3 in as many words. The second send is the specification working,
+    not a race. §13.5 is titled *effectively-once financial side effect*, and a transport-request
+    count is not what it promises.
+
+    So this asserts the two things that are actually guaranteed, and
+    :func:`test_a_runner_that_cannot_suppress_never_sends_twice` carries the strong claim the old
+    assertion was reaching for.
     """
-    import asyncio
-
-    operations = [(await _enqueued(engine, marker=f"race{index}")) for index in range(4)]
     ledger = SimulatedLedger()
+    operation_ids = await _two_runners(engine, ledger, 4)
 
-    passes = await asyncio.gather(
-        run_due_once(engine, adapter=ledger, policy=POLICY, now=EPOCH, rng=random.Random(1)),
-        run_due_once(engine, adapter=ledger, policy=POLICY, now=EPOCH, rng=random.Random(2)),
-        return_exceptions=True,
-    )
-
-    for outcome in passes:
-        assert not isinstance(outcome, BaseException), f"a pass failed outright: {outcome!r}"
-
-    for _, operation_id in operations:
+    # 1. The financial guarantee, read off the ledger rather than out of our own tables —
+    #    §19.1's rule, and the only number here that describes money.
+    for operation_id in operation_ids:
         assert ledger.applied_count(operation_id) == 1
-
-    # **The assertion that can actually fail.** `applied_count` is held at one by the reference
-    # ledger's own suppression whatever we do, so on its own it cannot tell "we sent once" from "we
-    # sent twice and the ledger absorbed it" — three reviewers pointed out that the whole test was
-    # therefore green by construction. `posts_received` counts what left the client.
-    assert ledger.posts_received == len(operations), (
-        f"{ledger.posts_received} sends for {len(operations)} operations: a duplicate reached the "
-        "ledger and was suppressed there rather than prevented here"
-    )
 
     attempts = await _rows("posting_attempt")
     per_adjustment: dict[uuid.UUID, list[int]] = {}
     for row in attempts:
         per_adjustment.setdefault(row["adjustment_id"], []).append(row["attempt_no"])
+
+    # 2. No attempt number is reused. `uq_posting_attempt_adjustment_no` enforces it; asserted here
+    #    because it is the constraint that refuses the *simultaneous* overlap, as distinct from the
+    #    §13.5 re-send which takes the next number legitimately.
     for adjustment_id, numbers in per_adjustment.items():
         assert len(numbers) == len(set(numbers)), f"duplicate attempt numbers for {adjustment_id}"
+
+    # 3. Load-bearing. A pass that dispatched nothing at all would satisfy every assertion above
+    #    vacuously, which is the shape three reviewers objected to the first time.
+    assert len(attempts) >= len(operation_ids), "the passes did not dispatch every operation"
+
+
+@pytest.mark.asyncio
+async def test_every_send_is_backed_by_a_committed_write_ahead_record(
+    engine: AsyncEngine,
+) -> None:
+    """§12.1.1: a send is a fact in the database before it is a fact on the wire.
+
+    Counted rather than described, and over the concurrent case rather than the easy one. A send
+    that reached the socket without its own committed attempt row would leave the trail short, and
+    a row written for a send that never happened would leave it long. Either way the two numbers
+    disagree, which is the only reading of "the write-ahead record is committed before every socket
+    write" that a test can actually check.
+    """
+    ledger = SimulatedLedger()
+    await _two_runners(engine, ledger, 4)
+
+    attempts = await _rows("posting_attempt")
+    assert ledger.posts_received == len(attempts), (
+        f"{ledger.posts_received} sends against {len(attempts)} write-ahead records: a send "
+        "reached the ledger without being recorded first, or a record was written for a send that "
+        "never happened"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_runner_that_cannot_suppress_never_sends_twice(
+    engine: AsyncEngine,
+) -> None:
+    """**The strong claim, put where it is actually true.**
+
+    Against :class:`SimulatedLedger` a second send is permitted, so counting sends there proves
+    nothing about our restraint. Against an adapter whose suppression is **not proven**, §13.5
+    clause 3 forbids the automatic re-send outright — and this ledger applies unconditionally, so a
+    duplicate that got through would double-book and the count would say so twice over.
+
+    That makes this the falsifiable version of what the old assertion was reaching for: exactly one
+    send *and* exactly one application per operation, from an adapter that would forgive neither.
+    """
+    adjustment_id, operation_id = await _enqueued(engine, marker="no-suppression")
+    ledger = NonIdempotentLedger()
+    assert capabilities_for(ledger).idempotency is IdempotencyMode.NONE
+
+    second = await _overlapping_dispatch(engine, ledger, adjustment_id)
+
+    assert isinstance(second, DispatchRefusedError), (
+        "a second send was permitted against an adapter that suppresses nothing; §13.5 clause 3 "
+        f"forbids it, and this ledger books every request it receives. Got: {second}"
+    )
+    assert ledger.posts_received == 1, (
+        f"{ledger.posts_received} sends for one operation against an adapter that suppresses "
+        "nothing: the duplicate was not prevented here, and nothing downstream prevents it either"
+    )
+    assert ledger.applied_count(operation_id) == 1, (
+        f"operation {operation_id[:12]}… was booked more than once by an adapter with no "
+        "idempotency mechanism, which is the double-post this project exists to prevent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_permitted_resend_is_exactly_one_extra_send_and_no_extra_effect(
+    engine: AsyncEngine,
+) -> None:
+    """The §13.5 re-send, forced rather than waited for, and pinned to what it may cost.
+
+    The CI failure that started this was a scheduling accident: the second pass happened to enter
+    the gate while the first was inside the socket write. Waiting for that interleaving is how a
+    property stays unverified for twelve green runs, so it is forced here — the adapter's ``post``
+    is held open until a second dispatch has run to completion.
+
+    **Patched on the instance, never by subclassing.** :func:`implementation_of` keys the
+    conformance record on the class that actually runs, so a subclass matches no committed run and
+    every strong claim is downgraded to ``NONE`` — which would make the dispatcher refuse for the
+    wrong reason and leave this test green while proving the opposite of its name. The first
+    attempt at this investigation did exactly that.
+
+    What is pinned: one extra send, one extra attempt row, and **no** extra financial effect.
+    """
+    adjustment_id, operation_id = await _enqueued(engine, marker="permitted-resend")
+    ledger = SimulatedLedger()
+    assert capabilities_for(ledger).idempotency is IdempotencyMode.ENFORCES_KEY, (
+        "this test is about the branch taken when suppression is proven; the record moved"
+    )
+
+    second = await _overlapping_dispatch(engine, ledger, adjustment_id)
+
+    assert isinstance(second, DispatchResult), f"the permitted re-send was refused: {second}"
+    assert second.resend is ResendDecision.PERMITTED
+    assert second.attempt_no == 2, "the re-send takes the next attempt number, not the first one"
+    assert ledger.posts_received == 2, "the permitted re-send is one extra send, not a loop"
+    assert ledger.applied_count(operation_id) == 1, (
+        "a permitted re-send must cost a request and never a second financial effect"
+    )
+    rows = [r for r in await _rows("posting_attempt") if r["adjustment_id"] == adjustment_id]
+    assert sorted(r["attempt_no"] for r in rows) == [1, 2]
 
 
 @pytest.mark.asyncio

@@ -178,6 +178,13 @@ ledger adapter (OPEN-11). `PROJECT_STATUS.md` is the authority on exactly what e
   have two live resolutions.
 - **Never write "exactly-once".** Write *effectively-once effect* and name the mechanism. The stronger
   phrase is false and a reviewer will end the review on it.
+- **The guarantee is about the financial *effect*, never about the transport *request*, and the two
+  must not be conflated — including in a test.** §13.5 permits an automatic re-send where the
+  adapter's suppression is *proven*, bounded by the declared window and scope, so a second request
+  for one operation is the specification working rather than a defect. A test asserting one send
+  per operation is asserting more than this system promises, and one did: it failed once in CI, and
+  the investigation found the assertion wrong rather than the dispatcher (ADR-071). Count
+  applications at the ledger; count requests only against an adapter that suppresses nothing.
 - **"Effectively-once" is itself conditional.** It may be claimed **only** where the ledger adapter
   declares `idempotency == ENFORCES_KEY` **or** `posting_identity_query == BY_OPERATION_ID`, and only
   with a retry-independent `operation_id`. Where the adapter does not meet that bar the claim is

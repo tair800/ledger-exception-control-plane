@@ -83,35 +83,41 @@ correctly *given* an enforcing ledger rather than that any particular ledger enf
 
 ---
 
-## Open finding — an intermittent duplicate send, seen once in CI
+## Resolved — the intermittent duplicate send was the specification, not a race
 
-**2026-09-11.** `tests/test_retry_postgres.py::test_two_runners_over_one_queue_apply_each_operation_once`
-failed once in CI (run 34530849003, commit `9cade72`):
+**Opened 2026-09-11, closed 2026-09-11 (ADR-071).**
+`tests/test_retry_postgres.py::test_two_runners_over_one_queue_apply_each_operation_once` failed
+once in CI with **6 sends for 4 operations**. Every `applied_count` held at 1.
 
-```
-AssertionError: 6 sends for 4 operations: a duplicate reached the ledger and was
-suppressed there rather than prevented here
-```
+**Root cause: the test asserted a property the architecture deliberately does not promise.** The
+interleaving was forced deterministically rather than waited for. A second pass that enters the
+dispatch gate while an earlier attempt is in flight asks `resend_decision`; against an adapter whose
+suppression is **proven** the answer is `PERMITTED`, and §13.5 clause 3 says so in as many words —
+*"automatic retry from `UNKNOWN` is permitted only where capability allows the duplicate to be
+suppressed or detected — and even then it is bounded by the declared window and scope."* It takes
+the next attempt number, so the unique constraint on `(adjustment_id, attempt_no)` does not apply;
+that constraint refuses a *simultaneous* second insert of the same number, which is a different
+overlap. The ledger then suppresses, which is the guarantee §13.5 actually makes.
 
-**What did and did not hold.** All four `applied_count == 1` assertions passed — no financial
-effect doubled, and the `effectively-once effect` claim, which §13 permits only where the adapter
-enforces a key, is intact because the reference ledger enforced. What failed is the stronger
-property that test exists to check: that a duplicate is **prevented on our side** rather than
-absorbed by the adapter. Two sends left the client that should not have.
+**The capability branch is load-bearing, and that is the evidence it is not a race.** The same
+forced interleaving against each reference adapter: `SimulatedLedger` (`enforces_key`) permits and
+sends twice, applying once; `QueryableNonIdempotentLedger` and `NonIdempotentLedger` (both
+effectively `none`) are **refused** and send once. A second send happens only where the declared,
+*proven* capability permits it.
 
-**It is rare and it is not this commit.** First failure of that job in twelve runs; green on the
-immediately preceding commit; six consecutive local passes against real PostgreSQL; and the commit
-it failed on touched only the LLM adapter, the live-evaluation harness under `tests/`, docs and
-evaluation artefacts — nothing in the retry, dispatch or outbox path. A re-run of the same job on
-the same commit passed.
+**No production code changed.** The dispatcher, its locking, its transaction boundaries and its
+persistence semantics are untouched, so the 4.5 kill-test gate was not re-run.
 
-**Recorded rather than re-run away, and the assertion is not being weakened.** It was added
-because three reviewers pointed out the test had been green by construction, and an intermittent
-failure of the one assertion that can fail is worth more attention than a green re-run. The open
-question is which of the two mechanisms the docstring names — `SKIP LOCKED` on the claim, or the
-write-ahead unique constraint — did not hold, and whether the interleaving can be forced
-deterministically instead of waited for. That is an M4 investigation and is out of scope for the
-6.4 evaluation increment that observed it.
+**The test contract changed, and got stronger.** One assertion that was wrong became four that are
+each true and each falsifiable — one application per operation; every send backed by a committed
+write-ahead record; an adapter that cannot suppress never sends twice; and the permitted re-send
+pinned to exactly one extra request and no extra effect. The last two **force** the interleaving
+instead of waiting for it, which mattered: the first version of the weak-adapter test passed *with
+both §13.5 guards patched out*, because the overlap never occurred. With the overlap forced and the
+guards removed, `NonIdempotentLedger` double-books and every assertion fires.
+
+**Exactly-once transport is not claimed and is now demonstrably false.** The conditional
+effectively-once *financial effect* language is unchanged.
 
 ---
 
@@ -134,7 +140,7 @@ deterministically instead of waited for. That is an M4 investigation and is out 
 | **3.4 Cassette recording harness** | **DONE** | Whole-request fingerprint match, scrubbing, fail-closed capture; the corpus replays offline through both adapters |
 | **4.1 Claim locking and operation identifier** | **DONE** | `SKIP LOCKED` claim proven under forced concurrency; identifier retry-independent, instruction-bound, approver-independent, and persisted before dispatch |
 | **4.2 Transactional outbox and ledger adapter** | **DONE** | Outbox written in the state change's transaction; write-ahead attempt record before every send; three-valued `PostingOutcome` and `QueryOutcome`; capability declared, proven by a conformance run, and branched on |
-| **4.3 Bounded retry, DLQ and replay CLI** | **DONE** | Enumerated transport classifier defaulting to `UNKNOWN`; full-jitter backoff under an attempt ceiling *and* a wall-clock budget; dead-letter queue with a money-free envelope; replay proven to apply exactly one posting, measured at the ledger |
+| **4.3 Bounded retry, DLQ and replay CLI** | **DONE** | Enumerated transport classifier defaulting to `UNKNOWN`; full-jitter backoff under an attempt ceiling *and* a wall-clock budget; dead-letter queue with a money-free envelope; replay proven to apply exactly one posting, measured at the ledger  **Concurrency contract corrected at closure (ADR-071):** two runners over one queue may both reach dispatch — the claim is released before the send by design — and a second send is permitted only where the adapter's suppression is *proven*. The test that asserted one transport request per operation was asserting more than §13.5 promises; four falsifiable tests replaced it, two of which force the interleaving rather than waiting for it. No production code changed. |
 | **5.1 Approval gate with role separation** | **DONE** | OPEN-8 resolved; hashed bearer tokens, three roles, countersignature and single use enforced by database constraints; the gate proven to block the write |
 | **4.4 `UNKNOWN` semantics, reconciliation and recovery** | **DONE** | §13.5's capability branch executed across all three configurations; query before re-send; both re-send bounds enforced; the consecutive-negative count derived from an append-only table; monotonic transitions and the supersession interlock held by triggers; operator queue with evidence procedure, SLA and segregation of duties; `/recovery` endpoints |
 | **5.2 Audit-event contract v1** | **DONE** | All ten verbs emit inside the transaction they describe; closed `scope_granted` vocabulary with a refusal recording the authority actually held; correlation id derived from the ingested artefact and proven by recomputation; `provenance()` answers the exit criterion and names the two fields this repository cannot fill |
