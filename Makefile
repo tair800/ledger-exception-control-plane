@@ -390,7 +390,10 @@ demo-smoke: ## Smoke a deployed demonstration. Pass URL=https://... (and optiona
 # So these three are recorded here beside their hashes, on the same footing as the development
 # PostgreSQL password in `docker-compose.yml`: they authenticate against a *disposable* database
 # on localhost with demo mode on, and a deployment supplies its own registry through
-# LECP_PRINCIPALS and reuses none of this. `docs/deployment.md` says how, and says why.
+# LECP_PRINCIPALS and reuses none of this. `docs/deployment.md` says how, and says why. The one
+# exception is the public demonstration, which loads this registry on purpose
+# (`docs/demo-deployment.md`); its console's one-click roles hold the same three tokens in
+# `frontend/src/lib/server/demo-roles.ts`, and a console test pins them to the hashes below.
 DEMO_ANALYST_TOKEN = demo-analyst
 DEMO_CONTROLLER_TOKEN = demo-controller
 DEMO_OPERATOR_TOKEN = demo-operator

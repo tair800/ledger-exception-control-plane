@@ -31,12 +31,13 @@ before the run (ADR-059). It is now a standing CI step rather than a one-off mea
 Since then: **6.1 to 6.3** delivered the golden set, the scorer and the evaluation gate — with the
 identity migration that made the evaluation joins mean anything, and a scorer that reports the
 constant-answer baseline beside every accuracy figure because 214 of 250 labels are `escalate`
-(ADR-060, ADR-063). **M7** delivered the operations console, which never lets the bearer token reach
-the browser, performs no arithmetic on a monetary value, and makes §19.1 reachable from a button
-(ADR-062). **8.1** delivered the observability conventions, §18's metrics and redaction, degrading to
-a no-op with no SDK installed (ADR-064). **10.1** delivered the gated deployment pipeline, validated
-against the built image and real PostgreSQL, deploying nothing (ADR-065). **11.1** rewrote the README
-recruiter-first and added the two documentation checks §11.1 names.
+(ADR-060, ADR-063). **M7** delivered the operations console, which holds the bearer token only in
+an httpOnly cookie, out of reach of page scripts, performs no arithmetic on a monetary value, and
+makes §19.1 reachable from a button (ADR-062). **8.1** delivered the observability conventions,
+§18's metrics and redaction, degrading to a no-op with no SDK installed (ADR-064). **10.1**
+delivered the gated deployment pipeline, validated against the built image and real PostgreSQL,
+deploying nothing (ADR-065). **11.1** rewrote the README recruiter-first and added the two
+documentation checks §11.1 names.
 
 **A critical authorisation defect was found and fixed in that window.** `APPROVAL_ROLES` held both
 `ANALYST` and `CONTROLLER`, so an analyst could authorise a ledger posting — contradicting ADR-056's
@@ -434,8 +435,15 @@ make demo-api     # serve it on 127.0.0.1:8000 with demo mode on and the demo pr
 make demo-reset   # empty every table the demonstration writes, leaving the schema
 ```
 
-Sign in as `demo-controller`, `demo-operator` or `demo-analyst`. Those tokens are published in the
-`Makefile` beside their hashes and a test asserts they appear nowhere else.
+Sign in as `demo-controller`, `demo-operator` or `demo-analyst`. Those tokens are published on
+purpose — in the README, and in the `Makefile` beside the registry hashes that make them valid.
+**What is guarded is the registry, not the tokens:** a token authenticates nothing where no registry
+holds its hash, so `tests/test_config.py` asserts the registry appears in no tracked file but the
+`Makefile`. The console's one-click roles present the same three tokens from one server-side module,
+`frontend/src/lib/server/demo-roles.ts`, and `frontend/src/test/demo-tokens.test.ts` fails if any
+other console source holds one, if anything but a route handler imports a server module, if a
+role's token stops matching the `Makefile` registry entry for that role, or if a sign-in response
+carries a token anywhere but the httpOnly session cookie (ADR-072).
 
 Adding a dependency: `uv add <pkg>` for runtime, `uv add --dev <pkg>` for tooling. Both update
 `uv.lock`, which is committed. CI runs `--frozen`, so a dependency change that skipped the lockfile

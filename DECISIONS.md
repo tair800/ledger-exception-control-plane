@@ -4681,6 +4681,61 @@ confident, wrong answer. The guard behaved correctly; the probe did not.
 Nothing here changes production behaviour: no dispatcher, locking, transaction or persistence
 semantics were touched, so the 4.5 kill-test gate was not re-run.
 
+## ADR-072 — Where the public demonstration's tokens live, and what each guard actually asserts
+
+**Status:** accepted. **Date:** 2026-09-30.
+
+The console's one-click demo roles (`1cd0ba0`) put the three published tokens in a second committed
+code location, `frontend/src/lib/server/demo-roles.ts`, and that exposed a claim which was already
+false. `CLAUDE.md` and `docs/demo-deployment.md` both said the tokens are in the `Makefile` and that
+*a test asserts they appear nowhere else*. No test asserted that, and it was not true: the README,
+`PROJECT_STATUS.md` and the demonstration docs publish them too. What
+`test_the_demonstration_principals_exist_only_in_the_makefile` asserts is narrower and more useful —
+that the **registry**, the hashes that make the tokens valid, appears in no tracked file but the
+`Makefile`. ADR-066 already named this failure: a document asserting a guard that does not exist is
+worse than one asserting nothing, because a reader stops checking.
+
+### Decision
+
+**Two committed copies of the values, one authority, and a test holding them together.**
+
+- The `Makefile` is the authority for the demonstration's principals — token, hash and role side by
+  side — and its registry is what `make demo-principals` prints for the public demonstration's host.
+- `demo-roles.ts` is the console's only copy. The console's server has to present a token on the
+  visitor's behalf, and the console is a separate program on a separate host: it does not read the
+  backend's `Makefile`, and making its build parse one would couple a Next.js build to the
+  backend's local tooling for three public constants.
+- **The console's copy stays compiled in rather than moving to the environment.** Read from
+  configuration, the one-click route could present whatever credential a deployment put there,
+  including a real one. As constants it can present only these three, and they authenticate nothing
+  where no registry holds their hashes.
+
+### The invariants, and the test that fails without each
+
+| Invariant | Guard |
+|---|---|
+| The demonstration registry appears in no tracked file but the `Makefile` | `tests/test_config.py`, unchanged |
+| No console source but `demo-roles.ts` holds a published token | `frontend/src/test/demo-tokens.test.ts` |
+| Each console token is the registry's token for the same role, so a button signs in as the role it names | the same file |
+| Only route handlers import `src/lib/server/`, so no token table can be bundled into a page | the same file, scanner and positive controls in `source-scan.ts` |
+| A one-click sign-in answers with the session alone; the token goes to the control plane's `Authorization` header and to the browser only as the httpOnly session cookie | the same file, through the real route at the network boundary |
+
+Each console guard was shown to fail by injecting the regression it exists for: a token literal in
+a client module, the operator button given the controller's token, a component re-exporting the
+table, the token added to the sign-in response, and the cookie made readable by scripts.
+
+### What is not claimed
+
+**The browser does hold the token after sign-in** — as the httpOnly session cookie, which it sends
+back to the console's own routes. That is how every console session has worked since M7 (ADR-062),
+for a typed token and a demo role alike, and nothing here changes it. What the one-click path adds
+is that the token never passes through a page script at all: the button sends a role name. Wording
+that said the token "never reaches the browser", or that the browser only ever sends a role name,
+now says what is true — held only in the httpOnly cookie, out of reach of page scripts.
+
+No backend code, authorisation rule, registry, session behaviour, evaluation artefact or deployment
+setting changed.
+
 ---
 
 # Open decisions

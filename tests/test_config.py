@@ -162,6 +162,13 @@ def test_the_demonstration_principals_exist_only_in_the_makefile() -> None:
 
     Asserted over every tracked file rather than over `deployment/` alone: the wrong place for these
     is anywhere that is not the `Makefile`, and naming one wrong place would miss the others.
+
+    **What is guarded is the registry, not the tokens.** The tokens are published on purpose — in
+    the README, and in the console's server-side table for its one-click roles,
+    `frontend/src/lib/server/demo-roles.ts`, which `frontend/src/test/demo-tokens.test.ts` pins to
+    this registry role by role. A token authenticates nothing where no registry holds its hash, so
+    the registry is what must not travel. The public demonstration holds it on purpose, through its
+    host's environment rather than a tracked file (`docs/demo-deployment.md`).
     """
     import pathlib
     import subprocess

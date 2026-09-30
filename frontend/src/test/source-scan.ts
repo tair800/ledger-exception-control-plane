@@ -7,7 +7,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 
 /**
  * `frontend/` — the root of everything the guards scan.
@@ -173,6 +173,72 @@ export function findBannedPhrase(files: { path: string; source: string }[]): Vio
         }
       }
     });
+  }
+
+  return violations;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Guard 3 — server modules stay on the server
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * `src/lib/server/` — the modules that read the session cookie, call the control plane, and hold
+ * the public demonstration's published tokens.
+ *
+ * Next.js bundles whatever a page or component imports into the JavaScript it sends to the browser,
+ * so the promise that a token never reaches page scripts rests on one structural fact: nothing but
+ * a route handler, which runs only on the server, imports these modules. A component that imported
+ * `demo-roles.ts` would ship the token table to every visitor, and nothing would look broken.
+ *
+ * Stricter than Next.js requires, deliberately. A server component could import these safely for
+ * exactly as long as nothing it passed to a client component carried a token; the console has no
+ * need for that, so the rule is the one that needs no such argument.
+ */
+export const SERVER_MODULES = join("src", "lib", "server");
+
+/** A route handler under `src/app/`: code Next.js runs on the server and never bundles for a page. */
+export function isRouteHandler(path: string): boolean {
+  return path.startsWith(join("src", "app") + sep) && /[\\/]route\.ts$/.test(path);
+}
+
+function isServerModule(path: string): boolean {
+  return path === SERVER_MODULES || path.startsWith(SERVER_MODULES + sep);
+}
+
+/** Static imports and re-exports (`from "…"`), dynamic imports, and side-effect imports. */
+const MODULE_SPECIFIER =
+  /\bfrom\s*["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)|\bimport\s+["']([^"']+)["']/g;
+
+/** The module a specifier names, relative to `frontend/`, or null for a package. */
+function resolveModule(importer: string, specifier: string): string | null {
+  if (specifier.startsWith("@/")) return join("src", specifier.slice(2));
+  if (specifier.startsWith(".")) return join(dirname(importer), specifier);
+  return null;
+}
+
+export function findServerModuleImports(files: { path: string; source: string }[]): Violation[] {
+  const violations: Violation[] = [];
+
+  for (const file of files) {
+    if (isRouteHandler(file.path) || isServerModule(file.path)) continue;
+
+    stripComments(file.source)
+      .split("\n")
+      .forEach((text, index) => {
+        for (const match of text.matchAll(MODULE_SPECIFIER)) {
+          const specifier = match[1] ?? match[2] ?? match[3];
+          const target = specifier === undefined ? null : resolveModule(file.path, specifier);
+          if (target !== null && isServerModule(target)) {
+            violations.push({
+              path: file.path,
+              line: index + 1,
+              text: text.trim(),
+              rule: "a server module imported by something other than a route handler",
+            });
+          }
+        }
+      });
   }
 
   return violations;

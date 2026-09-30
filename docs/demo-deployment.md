@@ -5,7 +5,7 @@
 >
 > ```
 > Browser
->   └─ Vercel (Hobby, fra1) ......... Next.js console; the token never reaches the browser
+>   └─ Vercel (Hobby, fra1) ......... Next.js console; the token never reaches page scripts
 >        └─ Render (Free, Frankfurt) . FastAPI in Docker; migrations at container start
 >             ├─ Neon (Free, eu-central-1) ..... PostgreSQL `lecp_demo`, synthetic only
 >             └─ Upstash (Free, eu-central-1) .. Redis, readiness probe only
@@ -179,12 +179,15 @@ system actually is.
   deployment.** Pointing the demonstration at a provider would need a credential nobody has set
   here, which is the intended state.
 - **The demo principals are published.** `demo-controller`, `demo-operator` and `demo-analyst` are
-  in the `Makefile` beside their hashes, and a test asserts they appear nowhere else. They are safe
-  because of what they reach — a disposable database of invented rows behind a simulated ledger —
-  and for no other reason. They grant no access to anything outside the demonstration. The
-  console offers them as one-click roles (`CONSOLE_DEMO_SIGN_IN=true`): the button sends the role
-  name and the console's server supplies the token, so a visitor needs no instructions and the
-  token still never reaches page scripts.
+  in the README, and in the `Makefile` beside the registry hashes that make them valid. That
+  registry is what `LECP_PRINCIPALS` holds here, and a test asserts it appears in no other tracked
+  file; the tokens themselves are meant to be public. They are safe because of what they reach — a
+  disposable database of invented rows behind a simulated ledger — and for no other reason. They
+  grant no access to anything outside the demonstration. The console offers them as one-click
+  roles (`CONSOLE_DEMO_SIGN_IN=true`): the button sends the role name and the console's server
+  supplies the token from its one server-side table, `frontend/src/lib/server/demo-roles.ts`, so a
+  visitor needs no instructions and the token never reaches page scripts — the browser holds it
+  only as the httpOnly session cookie, as for a typed token.
 - **The fault injector is reachable.** `LECP_DEMO_MODE=true` publishes `/api/v1/demo/…`, including
   the control that crashes a dispatch mid-send. That is the point of the demonstration. Those
   routes answer **404** when demo mode is off, and no other deployment sets it.
@@ -219,7 +222,7 @@ Everything else Render needs is already in `render.yaml` and is not secret.
 | `CONTROL_PLANE_BASE_URL` | The Render service URL, no trailing slash, no `/api/v1`. |
 | `CONTROL_PLANE_TIMEOUT_MS` | `55000` — just under Vercel Hobby's 60-second function cap. |
 | `CONSOLE_COOKIE_SECURE` | `true` — the console is served over HTTPS. |
-| `CONSOLE_DEMO_SIGN_IN` | `true` — offer the three published demo roles as one-click sign-in. The browser sends a role name, never a token. |
+| `CONSOLE_DEMO_SIGN_IN` | `true` — offer the three published demo roles as one-click sign-in. The button sends a role name; the console's server supplies the token. |
 
 **GitHub** — repository *variables*, not secrets, because a public demonstration's URL is public:
 

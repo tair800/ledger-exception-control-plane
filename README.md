@@ -20,10 +20,10 @@ GitHub Actions · Vercel · Render · Neon · Upstash
 
 The sign-in screen offers three **public demonstration roles** as buttons — *Explore as
 Analyst*, *Explore as Operator*, *Explore as Controller* — so no token needs to be typed.
-Each button signs in with that role's published token, validated by the control plane
-exactly as a typed one is; the browser only ever sends the role name. If the free-tier backend
-is asleep, the screen says it is starting and signs you in when it answers, usually within a
-minute. The tokens are meant to be public:
+Each button sends only the role name; the console's server signs in with that role's published
+token, validated by the control plane exactly as a typed one is, and page scripts never see it.
+If the free-tier backend is asleep, the screen says it is starting and signs you in when it
+answers, usually within a minute. The tokens are meant to be public:
 
 | Token | Role | What it can do |
 |---|---|---|

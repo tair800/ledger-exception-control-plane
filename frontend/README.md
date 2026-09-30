@@ -59,7 +59,11 @@ On the public demonstration the sign-in screen offers those three as one-click r
 browser sends only the role name to `POST /api/console/session/demo`; the route looks up that
 role's published token on the server and signs in through `establishSession`, the same
 validation and the same httpOnly cookie as a typed token. The buttons appear only when
-`CONSOLE_DEMO_SIGN_IN=true`. A sign-in that meets a control plane still waking from free-tier
+`CONSOLE_DEMO_SIGN_IN=true`. The tokens live in one server module, `src/lib/server/demo-roles.ts`,
+and in no other console source: `src/test/demo-tokens.test.ts` fails if another module holds one,
+if anything but a route handler imports a server module, if a role's token stops matching the
+`Makefile` registry entry for that role, or if a sign-in response carries a token outside the
+httpOnly cookie. A sign-in that meets a control plane still waking from free-tier
 sleep — a timeout, or its host answering 429/502/503/504 — says *Starting the demo backend…* and
 retries every 5 seconds for up to two and a half minutes before showing the failure.
 

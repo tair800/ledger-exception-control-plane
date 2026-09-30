@@ -95,7 +95,7 @@ export function readDemoSignIn(): Promise<Result<DemoSignIn>> {
   return request<DemoSignIn>("/api/console/session/demo");
 }
 
-/** Sign in as a demonstration role. Only the role name leaves the browser; never a token. */
+/** Sign in as a demonstration role. The request carries the role name; the server adds the token. */
 export function signInAsDemoRole(role: DemoSignIn["roles"][number]): Promise<Result<ConsoleSession>> {
   return request<ConsoleSession>("/api/console/session/demo", {
     method: "POST",
