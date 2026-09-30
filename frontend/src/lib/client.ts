@@ -11,6 +11,7 @@ import type {
   ConsoleMeta,
   ConsoleSession,
   DeadLetterView,
+  DemoSignIn,
   DecisionResponse,
   DecisionVerb,
   ExceptionDetail,
@@ -86,6 +87,19 @@ export function signIn(token: string): Promise<Result<ConsoleSession>> {
   return request<ConsoleSession>("/api/console/session", {
     method: "POST",
     body: JSON.stringify({ token }),
+  });
+}
+
+/** Whether the public demonstration's one-click roles are offered here. */
+export function readDemoSignIn(): Promise<Result<DemoSignIn>> {
+  return request<DemoSignIn>("/api/console/session/demo");
+}
+
+/** Sign in as a demonstration role. Only the role name leaves the browser; never a token. */
+export function signInAsDemoRole(role: DemoSignIn["roles"][number]): Promise<Result<ConsoleSession>> {
+  return request<ConsoleSession>("/api/console/session/demo", {
+    method: "POST",
+    body: JSON.stringify({ role }),
   });
 }
 

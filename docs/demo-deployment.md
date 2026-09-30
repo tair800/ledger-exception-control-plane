@@ -181,7 +181,10 @@ system actually is.
 - **The demo principals are published.** `demo-controller`, `demo-operator` and `demo-analyst` are
   in the `Makefile` beside their hashes, and a test asserts they appear nowhere else. They are safe
   because of what they reach — a disposable database of invented rows behind a simulated ledger —
-  and for no other reason. They grant no access to anything outside the demonstration.
+  and for no other reason. They grant no access to anything outside the demonstration. The
+  console offers them as one-click roles (`CONSOLE_DEMO_SIGN_IN=true`): the button sends the role
+  name and the console's server supplies the token, so a visitor needs no instructions and the
+  token still never reaches page scripts.
 - **The fault injector is reachable.** `LECP_DEMO_MODE=true` publishes `/api/v1/demo/…`, including
   the control that crashes a dispatch mid-send. That is the point of the demonstration. Those
   routes answer **404** when demo mode is off, and no other deployment sets it.
@@ -216,6 +219,7 @@ Everything else Render needs is already in `render.yaml` and is not secret.
 | `CONTROL_PLANE_BASE_URL` | The Render service URL, no trailing slash, no `/api/v1`. |
 | `CONTROL_PLANE_TIMEOUT_MS` | `55000` — just under Vercel Hobby's 60-second function cap. |
 | `CONSOLE_COOKIE_SECURE` | `true` — the console is served over HTTPS. |
+| `CONSOLE_DEMO_SIGN_IN` | `true` — offer the three published demo roles as one-click sign-in. The browser sends a role name, never a token. |
 
 **GitHub** — repository *variables*, not secrets, because a public demonstration's URL is public:
 

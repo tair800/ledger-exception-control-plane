@@ -55,6 +55,14 @@ registry is loaded for you and the three tokens are `demo-controller`, `demo-ope
 `demo-analyst`. They are published on purpose and are safe only because of what they reach: a
 disposable database on localhost, with demo mode on. A deployment supplies its own registry.
 
+On the public demonstration the sign-in screen offers those three as one-click roles. The
+browser sends only the role name to `POST /api/console/session/demo`; the route looks up that
+role's published token on the server and signs in through `establishSession`, the same
+validation and the same httpOnly cookie as a typed token. The buttons appear only when
+`CONSOLE_DEMO_SIGN_IN=true`. A sign-in that meets a control plane still waking from free-tier
+sleep — a timeout, or its host answering 502/503/504 — says *Starting the demo backend…* and
+retries every 3 seconds for up to two minutes before showing the failure.
+
 ### Environment variables
 
 Names only — values belong in `.env.local`, which is git-ignored.
@@ -64,9 +72,11 @@ Names only — values belong in `.env.local`, which is git-ignored.
 | `CONTROL_PLANE_BASE_URL` | Base URL of the control plane, no trailing slash, no `/api/v1`. | `http://localhost:8000` |
 | `CONTROL_PLANE_TIMEOUT_MS` | Bound on every upstream request. | `8000` |
 | `CONSOLE_COOKIE_SECURE` | `true` when serving over HTTPS, so the session cookie is `Secure`. | `false` |
+| `CONSOLE_DEMO_SIGN_IN` | `true` on the public demonstration only: offer its three published roles as one-click sign-in. | off |
 
 There is **no token in the environment**. A deployment-wide token would make every visitor the same
-principal and would defeat the role separation the whole design rests on.
+principal and would defeat the role separation the whole design rests on. `CONSOLE_DEMO_SIGN_IN` is
+a switch, not a credential: each visitor still picks a role, and each role is a separate principal.
 
 ### Checks
 

@@ -405,6 +405,12 @@ export interface ConsoleSession {
   role: Role | null;
 }
 
+/** Whether this console offers the public demonstration's one-click roles, and which. */
+export interface DemoSignIn {
+  enabled: boolean;
+  roles: ("analyst" | "operator" | "controller")[];
+}
+
 /**
  * What the console knows about the connected instance.
  *
