@@ -147,7 +147,11 @@ describe("the sign-in screen", () => {
       "GET /api/console/session/demo": { body: { enabled: true, roles: ["analyst"] } },
       "POST /api/console/session/demo": () => {
         attempts += 1;
-        return attempts < 3
+        // Render's edge answered 429 during a real cold start, and 503 while a container starts.
+        if (attempts === 1) {
+          return { status: 429, body: { status: 429, message: "The control plane refused the request (429).", authority: false, not_implemented: false } };
+        }
+        return attempts === 2
           ? { status: 503, body: { status: 503, message: "The control plane failed while handling the request.", authority: false, not_implemented: false } }
           : { body: session("analyst") };
       },
@@ -170,7 +174,7 @@ describe("the sign-in screen", () => {
     expect(screen.queryByRole("alert")).toBeNull();
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(4_000);
+      await vi.advanceTimersByTimeAsync(8_000);
     });
     expect(await screen.findByText("console content")).toBeInTheDocument();
     expect(attempts).toBe(3);

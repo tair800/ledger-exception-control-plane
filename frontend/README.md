@@ -60,8 +60,8 @@ browser sends only the role name to `POST /api/console/session/demo`; the route 
 role's published token on the server and signs in through `establishSession`, the same
 validation and the same httpOnly cookie as a typed token. The buttons appear only when
 `CONSOLE_DEMO_SIGN_IN=true`. A sign-in that meets a control plane still waking from free-tier
-sleep — a timeout, or its host answering 502/503/504 — says *Starting the demo backend…* and
-retries every 3 seconds for up to two minutes before showing the failure.
+sleep — a timeout, or its host answering 429/502/503/504 — says *Starting the demo backend…* and
+retries every 5 seconds for up to two and a half minutes before showing the failure.
 
 ### Environment variables
 

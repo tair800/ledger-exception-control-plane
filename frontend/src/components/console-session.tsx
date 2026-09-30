@@ -146,20 +146,23 @@ const DEMO_ROLE_COPY: Record<DemoRole, { label: string; detail: string }> = {
   },
 };
 
-/** How long a sign-in keeps waiting for a control plane that is waking, and how often it asks. */
-const WAKE_LIMIT_MS = 120_000;
-const WAKE_POLL_MS = 3_000;
+/**
+ * How long a sign-in keeps waiting for a control plane that is waking, and how often it asks.
+ * Gentle on purpose: a host starting an instance answers 429 to a client that asks too often.
+ */
+const WAKE_LIMIT_MS = 150_000;
+const WAKE_POLL_MS = 5_000;
 /** After this many seconds of waiting, the screen says the backend is waking. */
 const WAKE_NOTICE_SECONDS = 3;
 
 /**
  * A failure that means the free-tier control plane is still starting, not that sign-in failed:
- * nothing answered in time, or its host answered 502/503/504 while the container starts.
+ * nothing answered in time, or its host answered 429/502/503/504 while the container starts.
  */
+const WAKING_STATUSES = new Set([0, 429, 502, 503, 504]);
+
 function isWaking(failure: ApiFailure): boolean {
-  return (
-    failure.status === 0 || failure.status === 502 || failure.status === 503 || failure.status === 504
-  );
+  return WAKING_STATUSES.has(failure.status);
 }
 
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
